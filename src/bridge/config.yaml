@@ -1,0 +1,83 @@
+# Bridge Server Configuration
+# CH32H417 Keyboard AI Terminal — Software Workspace
+
+server:
+  host: "0.0.0.0"
+  port: 8765
+  websocket_path: "/"
+  # TLS is recommended for production; disable for local prototyping
+  tls:
+    enabled: false
+    cert_file: ""
+    key_file: ""
+
+# Heartbeat settings
+device:
+  heartbeat_interval_sec: 30
+  heartbeat_timeout_sec: 90
+  max_devices: 4
+
+# AI Agent configurations
+agents:
+  claude:
+    enabled: true
+    # Path to Claude Code CLI (leave empty to use PATH)
+    executable: ""
+    # Launch mode: "sdk_url" (WebSocket) or "headless" (stdio)
+    mode: "headless"
+    # Additional CLI arguments
+    args:
+      - "--output-format"
+      - "stream-json"
+    # Environment variables
+    env:
+      ANTHROPIC_MODEL: "claude-sonnet-4-1"
+    # API Key or OAuth token (prefer env var ANTHROPIC_API_KEY)
+    api_key: ""
+    # Session timeout
+    session_timeout_sec: 3600
+
+  codex:
+    enabled: true
+    # Path to Codex CLI (leave empty to use PATH)
+    executable: ""
+    # Launch mode: "remote_control" or "exec_json"
+    mode: "exec_json"
+    # Additional CLI arguments
+    args:
+      - "--json"
+    # Environment variables
+    env:
+      CODEX_MODEL: "gpt-5.5"
+    # API Key (prefer env var CODEX_API_KEY)
+    api_key: ""
+    # Session timeout
+    session_timeout_sec: 3600
+
+# Session management
+session:
+  # Maximum concurrent sessions per agent
+  max_concurrent: 8
+  # Persist completed sessions to disk
+  persist_to_disk: true
+  persist_dir: "./sessions"
+  # Auto-cleanup completed/failed sessions after N hours
+  cleanup_after_hours: 24
+  # LRU cache size (must match device-side AGENT_SESSION_CACHE_MAX)
+  cache_size: 50
+
+# Protocol unifier settings
+unifier:
+  # Buffer size for streaming stdout reads (bytes)
+  stream_buffer_size: 4096
+  # Max message delta size before truncation
+  max_delta_size: 2048
+  # Permission request default timeout (seconds)
+  permission_timeout_sec: 30
+
+# Logging
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  format: "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+  file: "bridge_server.log"
+  console: true

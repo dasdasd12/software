@@ -1,0 +1,120 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "WCH {{CHIP}} V3F Debug",
+      "type": "mrs-debugger",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      "startup": {
+        "initCommands": {
+          "initReset": true,
+          "initResetType": "init",
+          "additionalCommands": [],
+          "armSemihosting": false
+        },
+        "loadedFiles": {
+          "symbolFile": "${workspaceFolder}/build/v3f/${workspaceFolderBasename}_V3F.elf",
+          "executableFile": "${workspaceFolder}/build/v3f/${workspaceFolderBasename}_V3F.elf"
+        },
+        "runCommands": {
+          "runReset": true,
+          "runResetType": "halt",
+          "additionalCommands": [],
+          "setBreakAt": "main",
+          "setProgramCounterAt": 0,
+          "continue": true
+        },
+        "debugInRAM": false
+      },
+      "gdbCfg": {
+        "executable": "{{GDBEXE}}",
+        "options": ["--quiet"],
+        "commands": [
+          "set mem inaccessible-by-default off",
+          "set architecture riscv:rv32",
+          "set remotetimeout unlimited",
+          "set disassembler-options xw"
+        ]
+      },
+      "openOCDCfg": {
+        "useLocalOpenOCD": true,
+        "executable": "openocd.exe",
+        "gdbport": 3333,
+        "telnetport": 4444,
+        "tclport": 6666,
+        "configOptions": ["-f {{CFGFILE}}"],
+        "host": "localhost",
+        "port": 3333,
+        "skipDownloadBeforeDebug": false,
+        "enablePageEraser": false,
+        "enableNoZeroWaitingAreaFlash": false
+      },
+      "svdpath": "",
+      "output": {
+        "showDebugGDBTrace": true,
+        "saveDebugOutputToFile": false,
+        "showDebugOutputTimestamps": true
+      },
+      "architecture": "RISC-V"
+    },
+    {
+      "name": "WCH {{CHIP}} V5F Debug",
+      "type": "mrs-debugger",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      "startup": {
+        "initCommands": {
+          "initReset": true,
+          "initResetType": "init",
+          "additionalCommands": [],
+          "armSemihosting": false
+        },
+        "loadedFiles": {
+          "symbolFile": "${workspaceFolder}/build/v5f/${workspaceFolderBasename}_V5F.elf",
+          "executableFile": "${workspaceFolder}/build/v5f/${workspaceFolderBasename}_V5F.elf"
+        },
+        "runCommands": {
+          "runReset": true,
+          "runResetType": "halt",
+          "additionalCommands": [],
+          "setBreakAt": "main",
+          "setProgramCounterAt": 0,
+          "continue": true
+        },
+        "debugInRAM": false
+      },
+      "gdbCfg": {
+        "executable": "{{GDBEXE}}",
+        "options": ["--quiet"],
+        "commands": [
+          "set mem inaccessible-by-default off",
+          "set architecture riscv:rv32",
+          "set remotetimeout unlimited",
+          "set disassembler-options xw",
+          "set breakpoint always-inserted on"
+        ]
+      },
+      "openOCDCfg": {
+        "useLocalOpenOCD": true,
+        "executable": "openocd.exe",
+        "gdbport": 3334,
+        "telnetport": 4444,
+        "tclport": 6666,
+        "configOptions": ["-f {{CFGFILE}}"],
+        "host": "localhost",
+        "port": 3334,
+        "skipDownloadBeforeDebug": false,
+        "enablePageEraser": false,
+        "enableNoZeroWaitingAreaFlash": false
+      },
+      "svdpath": "",
+      "output": {
+        "showDebugGDBTrace": true,
+        "saveDebugOutputToFile": false,
+        "showDebugOutputTimestamps": true
+      },
+      "architecture": "RISC-V"
+    }
+  ]
+}

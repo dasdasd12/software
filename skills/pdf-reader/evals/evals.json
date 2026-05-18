@@ -1,0 +1,77 @@
+{
+  "skill_name": "pdf-reader",
+  "evals": [
+    {
+      "id": 1,
+      "name": "extract-text-and-data",
+      "prompt": "我有一份合同文件 contracts/sample_contract.pdf，请帮我提取以下信息：甲方名称、乙方名称、合同金额、签署日期、合同有效期。请以表格形式返回结果。",
+      "expected_output": "以表格形式返回合同的关键信息字段",
+      "files": [],
+      "assertions": [
+        {
+          "name": "输出包含表格",
+          "type": "contains",
+          "target": "|"
+        },
+        {
+          "name": "提取了甲方信息",
+          "type": "contains_any",
+          "target": ["甲方", "Party A", "甲方名称"]
+        },
+        {
+          "name": "提取了金额信息",
+          "type": "contains_any",
+          "target": ["金额", "元", "¥", "￥", "价格", "费用"]
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "name": "analyze-charts-and-images",
+      "prompt": "这份年度报告 reports/annual_report_2023.pdf 里有很多图表，请帮我分析一下第15页的销售趋势图，说明：1）这是什么类型的图表，2）X轴和Y轴代表什么，3）数据呈现什么趋势，4）有什么关键发现。",
+      "expected_output": "详细描述图表的类型、坐标轴、数据趋势和关键发现",
+      "files": [],
+      "assertions": [
+        {
+          "name": "识别了图表类型",
+          "type": "contains_any",
+          "target": ["柱状图", "饼图", "折线图", "条形图", "散点图", "图表类型"]
+        },
+        {
+          "name": "描述了坐标轴",
+          "type": "contains_any",
+          "target": ["X轴", "Y轴", "横轴", "纵轴", "坐标轴"]
+        },
+        {
+          "name": "分析了趋势",
+          "type": "contains_any",
+          "target": ["趋势", "增长", "下降", "上升", "波动", "平稳"]
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "name": "summarize-document",
+      "prompt": "请帮我阅读这篇研究论文 papers/research_paper.pdf，并提供一个简洁的总结，包括：研究背景、主要方法、核心发现、结论和意义。总结控制在500字以内。",
+      "expected_output": "提供结构化的论文总结",
+      "files": [],
+      "assertions": [
+        {
+          "name": "包含研究背景",
+          "type": "contains_any",
+          "target": ["背景", "研究背景", "引言", "简介"]
+        },
+        {
+          "name": "包含核心发现",
+          "type": "contains_any",
+          "target": ["发现", "结果", " findings", "results"]
+        },
+        {
+          "name": "包含结论",
+          "type": "contains_any",
+          "target": ["结论", "总结", "conclusion", "summary"]
+        }
+      ]
+    }
+  ]
+}

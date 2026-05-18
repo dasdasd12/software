@@ -1,0 +1,76 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "WCH Detect",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-ExecutionPolicy", "Bypass",
+        "-File", "{{SCRIPT}}",
+        "-Action", "detect",
+        "-ProjectDir", "${workspaceFolder}",
+        "-Chip", "{{CHIP}}"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "WCH Build Both",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-ExecutionPolicy", "Bypass",
+        "-File", "{{SCRIPT}}",
+        "-Action", "build",
+        "-ProjectDir", "${workspaceFolder}",
+        "-Chip", "{{CHIP}}",
+        "-Core", "both"
+      ],
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "WCH Flash Both",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-ExecutionPolicy", "Bypass",
+        "-File", "{{SCRIPT}}",
+        "-Action", "flash",
+        "-ProjectDir", "${workspaceFolder}",
+        "-Chip", "{{CHIP}}",
+        "-Core", "both"
+      ],
+      "dependsOn": ["WCH Build Both"],
+      "problemMatcher": []
+    },
+    {
+      "label": "WCH Debug Check V3F",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-ExecutionPolicy", "Bypass",
+        "-File", "{{SCRIPT}}",
+        "-Action", "debug-check",
+        "-ProjectDir", "${workspaceFolder}",
+        "-Chip", "{{CHIP}}",
+        "-Core", "v3f"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "WCH Debug Check V5F",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-ExecutionPolicy", "Bypass",
+        "-File", "{{SCRIPT}}",
+        "-Action", "debug-check",
+        "-ProjectDir", "${workspaceFolder}",
+        "-Chip", "{{CHIP}}",
+        "-Core", "v5f"
+      ],
+      "problemMatcher": []
+    }
+  ]
+}
