@@ -16,6 +16,7 @@ import logging
 import signal
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Set
 
@@ -24,6 +25,15 @@ import yaml
 from agent_proxy import AgentProxy
 from protocol_unifier import ProtocolUnifier
 from session_manager import AgentType, AgentState, SessionManager
+
+
+@dataclass
+class PendingPermission:
+    request_id: str
+    session_id: str
+    agent: AgentType
+    created_at: float
+    timeout_sec: int
 
 
 class BridgeServer:
@@ -49,8 +59,9 @@ class BridgeServer:
 
         # Connection state
         self.connected_devices: Set[asyncio.Queue] = set()
+        self.pending_permissions: Dict[str, PendingPermission] = {}
         self._server = None
-        self._shutdown_event = asyncio.Event()
+        self._shutdown_event: Optional[asyncio.Event] = None
 
     # ------------------------------------------------------------------ #
     #  Initialization
@@ -99,6 +110,7 @@ class BridgeServer:
     async def _handle_device(self, websocket) -> None:
         """Handle a single device WebSocket connection."""
         device_queue = asyncio.Queue()
+        send_task: Optional[asyncio.Task] = None
         self.connected_devices.add(device_queue)
         peer = websocket.remote_address
         self.logger.info(f"Device connected: {peer}")
@@ -117,15 +129,15 @@ class BridgeServer:
 
                 await self._handle_device_message(msg, device_queue)
 
-            send_task.cancel()
-            try:
-                await send_task
-            except asyncio.CancelledError:
-                pass
-
         except Exception as exc:
             self.logger.warning(f"Device {peer} error: {exc}")
         finally:
+            if send_task:
+                send_task.cancel()
+                try:
+                    await send_task
+                except asyncio.CancelledError:
+                    pass
             self.connected_devices.discard(device_queue)
             self.logger.info(f"Device disconnected: {peer}")
 
@@ -206,10 +218,31 @@ class BridgeServer:
         request_id = msg.get("request_id", "")
         approved = msg.get("approved", False)
         self.logger.info(f"Permission {request_id}: {'APPROVED' if approved else 'DENIED'}")
-        # Forward to the appropriate agent proxy
-        # In a full implementation, map request_id -> session_id -> proxy
-        # For MVP, broadcast to all proxies or store pending request map
-        await self._send_error(queue, "NOT_IMPLEMENTED", "Direct permission forwarding requires request tracking")
+        self._prune_expired_permissions()
+
+        pending = self.pending_permissions.pop(request_id, None)
+        if not pending:
+            await self._send_error(queue, "REQUEST_NOT_FOUND", f"Permission request {request_id} not found")
+            return
+
+        proxy = self.agents.get(pending.agent)
+        result = {"accepted": True, "forwarded": False}
+        if proxy:
+            result = await proxy.handle_permission_response(
+                pending.session_id,
+                request_id,
+                bool(approved),
+            )
+
+        self.session_mgr.update_state(pending.session_id, AgentState.WORKING)
+        ack = self.unifier.encode_device_message({
+            "type": "permission_ack",
+            "request_id": request_id,
+            "session_id": pending.session_id,
+            "approved": bool(approved),
+            "forwarded": bool(result.get("forwarded", False)),
+        })
+        await queue.put(ack)
 
     async def _cmd_interrupt(self, msg: Dict[str, Any], queue: asyncio.Queue) -> None:
         session_id = msg.get("session_id", "")
@@ -245,12 +278,54 @@ class BridgeServer:
 
     def _on_agent_event(self, json_line: str) -> None:
         """Called by AgentProxy whenever a unified event is produced."""
+        self._track_permission_event(json_line)
         # Broadcast to all connected devices
         for queue in list(self.connected_devices):
             try:
                 queue.put_nowait(json_line)
             except Exception:
                 pass
+
+    def _track_permission_event(self, json_line: str) -> None:
+        try:
+            event = json.loads(json_line)
+        except json.JSONDecodeError:
+            return
+
+        if event.get("type") != "permission_request":
+            return
+
+        request_id = event.get("request_id", "")
+        session_id = event.get("session_id", "")
+        agent = self._agent_from_string(event.get("agent", ""))
+        if not request_id or not session_id or not agent:
+            return
+
+        self.pending_permissions[request_id] = PendingPermission(
+            request_id=request_id,
+            session_id=session_id,
+            agent=agent,
+            created_at=time.time(),
+            timeout_sec=int(event.get("timeout_sec", self.cfg["unifier"].get("permission_timeout_sec", 30))),
+        )
+        self.session_mgr.update_state(session_id, AgentState.WAITING_PERMISSION)
+
+    def _prune_expired_permissions(self) -> None:
+        now = time.time()
+        expired = [
+            request_id
+            for request_id, pending in self.pending_permissions.items()
+            if now - pending.created_at > pending.timeout_sec
+        ]
+        for request_id in expired:
+            del self.pending_permissions[request_id]
+
+    @staticmethod
+    def _agent_from_string(value: str) -> Optional[AgentType]:
+        try:
+            return AgentType(value)
+        except ValueError:
+            return None
 
     async def _send_error(self, queue: asyncio.Queue, code: str, message: str) -> None:
         payload = {
@@ -266,6 +341,7 @@ class BridgeServer:
     # ------------------------------------------------------------------ #
 
     async def start(self) -> None:
+        self._shutdown_event = asyncio.Event()
         srv_cfg = self.cfg["server"]
         host = srv_cfg.get("host", "0.0.0.0")
         port = srv_cfg.get("port", 8765)
@@ -283,7 +359,11 @@ class BridgeServer:
         # Graceful shutdown
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, self._request_shutdown)
+            try:
+                loop.add_signal_handler(sig, self._request_shutdown)
+            except NotImplementedError:
+                self.logger.debug("Signal handlers are not supported on this platform")
+                break
 
         await self._shutdown_event.wait()
         self.logger.info("Shutting down...")
@@ -296,7 +376,8 @@ class BridgeServer:
                 await proxy.terminate(session_id)
 
     def _request_shutdown(self) -> None:
-        self._shutdown_event.set()
+        if self._shutdown_event:
+            self._shutdown_event.set()
 
 
 # ------------------------------------------------------------------ #

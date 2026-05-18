@@ -139,24 +139,26 @@ static void on_ai_launch_key(void)
 
 static void on_ai_confirm_key(void)
 {
-    /* Approve pending permission request */
-    /* In a real implementation, track the pending request_id from the dialog */
-    /* For now, send approval for the most recent request (simplified) */
-    /* TODO: integrate with agent_manager pending request tracking */
-    agent_send_permission_response("last_request", true);
-    ui_hide_permission_dialog();
+    const char* request_id = agent_manager_get_pending_request_id();
+    if (request_id) {
+        agent_send_permission_response(request_id, true);
+        ui_hide_permission_dialog();
+    }
 }
 
 static void on_ai_cancel_key(void)
 {
-    /* Deny pending permission request or interrupt current task */
-    agent_send_permission_response("last_request", false);
+    const char* request_id = agent_manager_get_pending_request_id();
+    if (request_id) {
+        agent_send_permission_response(request_id, false);
+        ui_hide_permission_dialog();
+        return;
+    }
 
     const session_info_t* sess = session_manager_get_latest(g_active_agent);
     if (sess && (sess->state == STATE_WORKING || sess->state == STATE_WAITING_PERMISSION)) {
         agent_send_interrupt(sess->session_id);
     }
-    ui_hide_permission_dialog();
 }
 
 /*============================================================================*

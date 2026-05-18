@@ -148,6 +148,7 @@ typedef enum {
     MSG_TASK_UPDATE,
     MSG_AGENT_MESSAGE_DELTA,
     MSG_PERMISSION_REQUEST,
+    MSG_PERMISSION_ACK,
     MSG_TASK_COMPLETED,
     MSG_TASK_FAILED,
     MSG_SESSION_LIST,
@@ -168,6 +169,7 @@ static inline const char* msg_type_to_str(msg_type_t type) {
         case MSG_TASK_UPDATE:          return "task_update";
         case MSG_AGENT_MESSAGE_DELTA:  return "agent_message_delta";
         case MSG_PERMISSION_REQUEST:   return "permission_request";
+        case MSG_PERMISSION_ACK:       return "permission_ack";
         case MSG_TASK_COMPLETED:       return "task_completed";
         case MSG_TASK_FAILED:          return "task_failed";
         case MSG_SESSION_LIST:         return "session_list";

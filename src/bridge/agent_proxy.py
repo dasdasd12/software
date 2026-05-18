@@ -10,9 +10,8 @@ import os
 import shutil
 import subprocess
 import sys
-import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional
 
 from protocol_unifier import ProtocolUnifier
 from session_manager import AgentType, AgentState, Session, SessionManager
@@ -68,10 +67,6 @@ class AgentProxy:
         """Start a new session subprocess for this agent."""
         if not self.is_available():
             raise RuntimeError(f"{self.agent_type.value} executable not found")
-
-        # Check concurrent limit
-        agent_sessions = self._sm.list_by_agent(self.agent_type)
-        # Max concurrent is handled by session manager config; here we just log
 
         # Build command line based on mode
         cmd = self._build_command(session_id, context)
@@ -145,6 +140,25 @@ class AgentProxy:
         except Exception:
             return False
 
+    async def handle_permission_response(
+        self,
+        session_id: str,
+        request_id: str,
+        approved: bool,
+    ) -> Dict[str, Any]:
+        """Accept a device permission response.
+
+        MVP behavior records the response at the bridge boundary only. Real
+        CLI forwarding can replace this method without changing device JSON.
+        """
+        return {
+            "accepted": True,
+            "forwarded": False,
+            "session_id": session_id,
+            "request_id": request_id,
+            "approved": approved,
+        }
+
     # ------------------------------------------------------------------ #
     #  Command builders
     # ------------------------------------------------------------------ #
@@ -165,7 +179,7 @@ class AgentProxy:
             if context:
                 cmd += [context]
             cmd += ["--output-format", "stream-json"]
-        cmd += self._args
+        cmd += self._dedupe_args(cmd, self._args)
         return cmd
 
     def _build_codex_cmd(self, session_id: str, context: str) -> List[str]:
@@ -177,8 +191,25 @@ class AgentProxy:
             cmd += ["exec", "--json"]
             if context:
                 cmd += [context]
-        cmd += self._args
+        cmd += self._dedupe_args(cmd, self._args)
         return cmd
+
+    @staticmethod
+    def _dedupe_args(existing: List[str], extra: List[str]) -> List[str]:
+        """Keep config args additive while avoiding duplicated built-in flags."""
+        existing_flags = {arg for arg in existing if arg.startswith("-")}
+        filtered: List[str] = []
+        skip_next = False
+        for index, arg in enumerate(extra):
+            if skip_next:
+                skip_next = False
+                continue
+            if arg in existing_flags:
+                if index + 1 < len(extra) and not extra[index + 1].startswith("-"):
+                    skip_next = True
+                continue
+            filtered.append(arg)
+        return filtered
 
     # ------------------------------------------------------------------ #
     #  Stream reading

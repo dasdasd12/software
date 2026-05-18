@@ -94,6 +94,12 @@ static void _notify_permission(const char* req_id, const char* tool,
     }
 }
 
+static void _clear_pending_permission(void)
+{
+    s_pending_request_id[0] = '\0';
+    s_permission_deadline = 0;
+}
+
 /*============================================================================*
  *  Public API
  *============================================================================*/
@@ -106,8 +112,7 @@ int agent_manager_init(const agent_manager_config_t* cfg)
     memset(&s_cfg, 0, sizeof(s_cfg));
     memset(s_cache, 0, sizeof(s_cache));
     s_cache_count = 0;
-    s_pending_request_id[0] = '\0';
-    s_permission_deadline = 0;
+    _clear_pending_permission();
 
     if (cfg) {
         s_cfg = *cfg;
@@ -176,6 +181,13 @@ int agent_manager_handle_message(const agent_message_t* msg)
             break;
         }
 
+        case MSG_PERMISSION_ACK: {
+            if (strncmp(s_pending_request_id, msg->request_id, AGENT_REQUEST_ID_MAX_LEN) == 0) {
+                _clear_pending_permission();
+            }
+            break;
+        }
+
         case MSG_TASK_COMPLETED: {
             session_info_t* sess = _find_session(msg->session_id);
             if (sess) {
@@ -183,6 +195,7 @@ int agent_manager_handle_message(const agent_message_t* msg)
                 sess->updated_at = msg->timestamp;
                 _notify_state_change(sess);
             }
+            _clear_pending_permission();
             session_manager_persist();
             break;
         }
@@ -194,6 +207,7 @@ int agent_manager_handle_message(const agent_message_t* msg)
                 sess->updated_at = msg->timestamp;
                 _notify_state_change(sess);
             }
+            _clear_pending_permission();
             session_manager_persist();
             break;
         }
@@ -231,11 +245,30 @@ int agent_send_launch(agent_type_t agent, const char* session_id, const char* co
 
 int agent_send_permission_response(const char* request_id, bool approved)
 {
+    if (!request_id || request_id[0] == '\0') {
+        return -1;
+    }
     uint32_t now = (uint32_t)time(NULL);
     return _send_json(
         "{\"type\":\"permission_response\",\"request_id\":\"%s\",\"approved\":%s,\"timestamp\":%u}",
         request_id, approved ? "true" : "false", now
     );
+}
+
+const char* agent_manager_get_pending_request_id(void)
+{
+    return agent_manager_has_pending_permission() ? s_pending_request_id : NULL;
+}
+
+bool agent_manager_has_pending_permission(void)
+{
+    if (s_pending_request_id[0] == '\0') {
+        return false;
+    }
+    if (s_permission_deadline == 0) {
+        return true;
+    }
+    return (uint32_t)time(NULL) <= s_permission_deadline;
 }
 
 int agent_send_interrupt(const char* session_id)

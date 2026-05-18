@@ -96,6 +96,20 @@ int agent_send_launch(agent_type_t agent,
 int agent_send_permission_response(const char* request_id, bool approved);
 
 /**
+ * @brief Return the current pending permission request id, if any.
+ *
+ * @return Pointer to request id string, or NULL when no permission is pending
+ */
+const char* agent_manager_get_pending_request_id(void);
+
+/**
+ * @brief Check whether a permission request is currently pending.
+ *
+ * @return true if a pending request id is available
+ */
+bool agent_manager_has_pending_permission(void);
+
+/**
  * @brief Send an interrupt request to Bridge Server
  *
  * @param session_id  Target session to interrupt
