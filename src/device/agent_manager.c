@@ -26,6 +26,8 @@ static uint8_t        s_cache_count = 0;
 static char           s_pending_request_id[AGENT_REQUEST_ID_MAX_LEN];
 static uint32_t       s_permission_deadline = 0;
 
+static void _notify_state_change(const session_info_t* sess);
+
 /*============================================================================*
  *  Helpers
  *============================================================================*/
@@ -70,6 +72,197 @@ static session_info_t* _alloc_session_slot(void)
         }
     }
     return oldest;
+}
+
+static const char* _bounded_strstr(const char* start, const char* end, const char* needle)
+{
+    size_t needle_len = strlen(needle);
+    if (needle_len == 0) {
+        return start;
+    }
+    while (start && start + needle_len <= end) {
+        if (strncmp(start, needle, needle_len) == 0) {
+            return start;
+        }
+        start++;
+    }
+    return NULL;
+}
+
+static const char* _json_find_value(const char* obj_start, const char* obj_end, const char* key)
+{
+    char pattern[48];
+    int len = snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+    if (len < 0 || (size_t)len >= sizeof(pattern)) {
+        return NULL;
+    }
+
+    const char* pos = _bounded_strstr(obj_start, obj_end, pattern);
+    if (!pos) {
+        return NULL;
+    }
+    pos += len;
+    while (pos < obj_end && (*pos == ' ' || *pos == '\t' || *pos == '\r' || *pos == '\n')) {
+        pos++;
+    }
+    if (pos >= obj_end || *pos != ':') {
+        return NULL;
+    }
+    pos++;
+    while (pos < obj_end && (*pos == ' ' || *pos == '\t' || *pos == '\r' || *pos == '\n')) {
+        pos++;
+    }
+    return pos < obj_end ? pos : NULL;
+}
+
+static bool _json_get_string(const char* obj_start, const char* obj_end,
+                             const char* key, char* out, size_t out_len)
+{
+    const char* pos = _json_find_value(obj_start, obj_end, key);
+    if (!pos || *pos != '"' || out_len == 0) {
+        return false;
+    }
+    pos++;
+    size_t written = 0;
+    while (pos < obj_end && *pos != '"') {
+        if (*pos == '\\' && pos + 1 < obj_end) {
+            pos++;
+        }
+        if (written + 1 < out_len) {
+            out[written++] = *pos;
+        }
+        pos++;
+    }
+    if (pos >= obj_end || *pos != '"') {
+        return false;
+    }
+    out[written] = '\0';
+    return written > 0;
+}
+
+static bool _json_get_u32(const char* obj_start, const char* obj_end,
+                          const char* key, uint32_t* out)
+{
+    const char* pos = _json_find_value(obj_start, obj_end, key);
+    if (!pos || pos >= obj_end || *pos < '0' || *pos > '9') {
+        return false;
+    }
+    uint32_t value = 0;
+    while (pos < obj_end && *pos >= '0' && *pos <= '9') {
+        value = (value * 10u) + (uint32_t)(*pos - '0');
+        pos++;
+    }
+    *out = value;
+    return true;
+}
+
+static bool _parse_session_object(const char* obj_start, const char* obj_end, session_info_t* out)
+{
+    char agent_str[AGENT_TYPE_MAX_LEN];
+    char state_str[AGENT_STATE_MAX_LEN];
+    memset(out, 0, sizeof(*out));
+
+    if (!_json_get_string(obj_start, obj_end, "session_id", out->session_id, sizeof(out->session_id))) {
+        return false;
+    }
+    if (!_json_get_string(obj_start, obj_end, "agent", agent_str, sizeof(agent_str))) {
+        return false;
+    }
+    if (!_json_get_string(obj_start, obj_end, "state", state_str, sizeof(state_str))) {
+        return false;
+    }
+    if (!_json_get_u32(obj_start, obj_end, "created_at", &out->created_at)) {
+        return false;
+    }
+    if (!_json_get_u32(obj_start, obj_end, "updated_at", &out->updated_at)) {
+        return false;
+    }
+
+    out->agent = agent_type_from_str(agent_str);
+    out->state = agent_state_from_str(state_str);
+    return true;
+}
+
+static void _merge_session(const session_info_t* incoming)
+{
+    session_info_t* sess = _find_session(incoming->session_id);
+    if (!sess) {
+        sess = _alloc_session_slot();
+    }
+    *sess = *incoming;
+    _notify_state_change(sess);
+}
+
+static uint8_t _merge_session_list_payload(const char* payload)
+{
+    if (!payload || payload[0] == '\0') {
+        return 0;
+    }
+
+    const char* payload_end = payload + strlen(payload);
+    const char* sessions_key = strstr(payload, "\"sessions\"");
+    if (!sessions_key) {
+        return 0;
+    }
+    const char* array = strchr(sessions_key, '[');
+    if (!array || array >= payload_end) {
+        return 0;
+    }
+
+    uint8_t merged = 0;
+    const char* pos = array + 1;
+    while (pos < payload_end && merged < AGENT_SESSION_CACHE_MAX) {
+        const char* obj_start = strchr(pos, '{');
+        if (!obj_start || obj_start >= payload_end) {
+            break;
+        }
+
+        int depth = 0;
+        bool in_string = false;
+        bool escaped = false;
+        const char* cursor = obj_start;
+        const char* obj_end = NULL;
+        while (cursor < payload_end) {
+            char ch = *cursor;
+            if (in_string) {
+                if (escaped) {
+                    escaped = false;
+                } else if (ch == '\\') {
+                    escaped = true;
+                } else if (ch == '"') {
+                    in_string = false;
+                }
+            } else {
+                if (ch == '"') {
+                    in_string = true;
+                } else if (ch == '{') {
+                    depth++;
+                } else if (ch == '}') {
+                    depth--;
+                    if (depth == 0) {
+                        obj_end = cursor + 1;
+                        break;
+                    }
+                } else if (ch == ']') {
+                    return merged;
+                }
+            }
+            cursor++;
+        }
+
+        if (!obj_end) {
+            break;
+        }
+
+        session_info_t parsed;
+        if (_parse_session_object(obj_start, obj_end, &parsed)) {
+            _merge_session(&parsed);
+            merged++;
+        }
+        pos = obj_end;
+    }
+
+    return merged;
 }
 
 static void _notify_state_change(const session_info_t* sess)
@@ -213,9 +406,7 @@ int agent_manager_handle_message(const agent_message_t* msg)
         }
 
         case MSG_SESSION_LIST: {
-            /* Device-side session list refresh from server */
-            /* Payload contains JSON array; parse and merge into cache */
-            /* Simplified: in full implementation, parse msg->payload */
+            _merge_session_list_payload(msg->payload);
             break;
         }
 

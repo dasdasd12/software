@@ -48,7 +48,7 @@
 - Bridge Server 记录 `permission_request` 的 `request_id -> session_id -> proxy` 映射。（MVP 已完成）
 - `permission_response` 按 request id 返回 `permission_ack`，并预留真实 Agent 转发接口。（MVP 已完成）
 - 设备端保存真实 pending request id，快捷键确认/取消使用最新 request id。（MVP 已完成）
-- 实现 `session_list` payload 解析，把服务端 session 列表合并到设备端 cache。
+- 实现 `session_list` payload 解析，把服务端 session 列表合并到设备端 cache。（MVP 已完成）
 - 为 LittleFS 持久化定义最小读写接口，先落地 active agent 和 session metadata。
 
 验收：

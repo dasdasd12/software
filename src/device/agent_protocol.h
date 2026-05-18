@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <string.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -111,18 +112,23 @@ static inline const char* agent_state_to_str(agent_state_t state) {
  */
 static inline agent_state_t agent_state_from_str(const char* str) {
     if (!str) return STATE_IDLE;
-    switch (str[0]) {
-        case 'I': return (str[1] == 'D') ? STATE_IDLE : STATE_OFFLINE;
-        case 'C': return (str[1] == 'O') ? STATE_CONNECTING : STATE_COMPLETED;
-        case 'S': return (str[1] == 'U') ? STATE_SUBMITTED : STATE_EXECUTING;
-        case 'W': return (str[6] == 'P') ? STATE_WAITING_PERMISSION : STATE_WORKING;
-        case 'R': return (str[1] == 'U') ? STATE_RUNNING : STATE_ERROR;
-        case 'T': return (str[1] == 'H') ? STATE_THINKING : STATE_TIMEOUT;
-        case 'P': return (str[1] == 'A') ? STATE_PAUSED : STATE_WAITING_INPUT;
-        case 'F': return STATE_FAILED;
-        case 'A': return STATE_CANCELLED;
-        default:  return STATE_IDLE;
-    }
+    if (strcmp(str, "IDLE") == 0) return STATE_IDLE;
+    if (strcmp(str, "CONNECTING") == 0) return STATE_CONNECTING;
+    if (strcmp(str, "SUBMITTED") == 0) return STATE_SUBMITTED;
+    if (strcmp(str, "WORKING") == 0) return STATE_WORKING;
+    if (strcmp(str, "RUNNING") == 0) return STATE_RUNNING;
+    if (strcmp(str, "THINKING") == 0) return STATE_THINKING;
+    if (strcmp(str, "EXECUTING") == 0) return STATE_EXECUTING;
+    if (strcmp(str, "WAITING_PERMISSION") == 0) return STATE_WAITING_PERMISSION;
+    if (strcmp(str, "WAITING_INPUT") == 0) return STATE_WAITING_INPUT;
+    if (strcmp(str, "PAUSED") == 0) return STATE_PAUSED;
+    if (strcmp(str, "COMPLETED") == 0) return STATE_COMPLETED;
+    if (strcmp(str, "FAILED") == 0) return STATE_FAILED;
+    if (strcmp(str, "CANCELLED") == 0) return STATE_CANCELLED;
+    if (strcmp(str, "ERROR") == 0) return STATE_ERROR;
+    if (strcmp(str, "TIMEOUT") == 0) return STATE_TIMEOUT;
+    if (strcmp(str, "OFFLINE") == 0) return STATE_OFFLINE;
+    return STATE_IDLE;
 }
 
 /**

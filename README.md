@@ -83,7 +83,7 @@ python server.py --config config.yaml
 
 - `SessionManager.create()` 的死锁已在首轮稳定化中修复，并补充测试。
 - `permission_response` 已完成 MVP 级 request tracking 和 ACK；真实 CLI stdin 转发仍待实现。
-- 设备端 session list 解析、LittleFS 持久化和 UI 回调仍是占位实现。
+- 设备端 session list 解析已完成 MVP；LittleFS 持久化和完整 UI 回调仍是占位实现。
 - 需要持续补充 Bridge Server 的异步 WebSocket 测试和真实 CLI 联调。
 
 ## 测试
