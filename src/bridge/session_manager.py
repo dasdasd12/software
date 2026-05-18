@@ -6,11 +6,10 @@ Matches device-side AGENT_SESSION_CACHE_MAX = 50.
 """
 
 import json
-import os
 import time
 import uuid
-from dataclasses import dataclass, field, asdict
-from enum import Enum, auto
+from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from threading import Lock
 from typing import Dict, List, Optional
@@ -99,8 +98,8 @@ class SessionManager:
         session_id = f"sess_{uuid.uuid4().hex[:12]}"
         session = Session(session_id=session_id, agent=agent)
         with self._lock:
-            self._enforce_limit()
             self._sessions[session_id] = session
+            self._enforce_limit(locked=True)
         self._persist()
         return session
 

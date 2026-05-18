@@ -6,6 +6,7 @@ __pycache__/
 .env
 .venv/
 venv/
+.local-bin/
 
 # C / 嵌入式编译产物
 *.o

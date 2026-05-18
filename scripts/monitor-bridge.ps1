@@ -12,7 +12,8 @@ $ErrorActionPreference = "SilentlyContinue"
 #  Configuration
 # --------------------------------------------------------------------------- #
 
-$Workspace     = "c:\program1\Program\AI_keyb_wch\software"
+$ScriptDir     = Split-Path -Parent $MyInvocation.MyCommand.Path
+$Workspace     = Split-Path -Parent $ScriptDir
 $BridgeHost    = "localhost"
 $BridgePort    = 8765
 $BridgeLog     = "$Workspace\src\bridge\bridge_server.log"
@@ -89,8 +90,13 @@ if ($claudeAvail) {
     Write-Host "  Claude version     : $cv"
 }
 if ($codexAvail) {
-    $c v = & codex --version 2>$null
-    Write-Host "  Codex version      : $cv"
+    $cv = ""
+    $cv = & codex --version 2>$null
+    if ($LASTEXITCODE -eq 0 -and $cv) {
+        Write-Host "  Codex version      : $cv"
+    } else {
+        Write-Host "  Codex version      : unavailable"
+    }
 }
 
 # --- Workspace Config ---

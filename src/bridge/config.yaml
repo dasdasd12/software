@@ -25,10 +25,8 @@ agents:
     executable: ""
     # Launch mode: "sdk_url" (WebSocket) or "headless" (stdio)
     mode: "headless"
-    # Additional CLI arguments
-    args:
-      - "--output-format"
-      - "stream-json"
+    # Additional CLI arguments. The bridge adds -p --output-format stream-json.
+    args: []
     # Environment variables
     env:
       ANTHROPIC_MODEL: "claude-sonnet-4-1"
@@ -43,9 +41,8 @@ agents:
     executable: ""
     # Launch mode: "remote_control" or "exec_json"
     mode: "exec_json"
-    # Additional CLI arguments
-    args:
-      - "--json"
+    # Additional CLI arguments. The bridge adds exec --json.
+    args: []
     # Environment variables
     env:
       CODEX_MODEL: "gpt-5.5"
