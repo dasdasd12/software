@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.env
+.venv/
+venv/
+
+# C / 嵌入式编译产物
+*.o
+*.obj
+*.elf
+*.hex
+*.bin
+*.map
+*.lst
+*.axf
+build/
+Debug/
+Release/
+/cmake-build*/
+
+# IDE
+.vscode/
+.idea/
+*.user
+*.uvguix.*
+*.uvoptx
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs / Temp
+*.log
+*.tmp
+*.bak
+*.swp
+*~
+
+# Docs（可选，如果你不想把大二进制文件进仓库）
+# *.pdf
+# *.docx
