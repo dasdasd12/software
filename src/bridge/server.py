@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Bridge Server — WebSocket Main Service
+Local Core Service MVP — WebSocket Local API
 
-Accepts device connections over WebSocket, dispatches unified events,
-and proxies to Codex / Claude processes via AgentProxy.
+Accepts local UI/test/automation clients over WebSocket, dispatches unified
+events, and proxies to Codex / Claude processes via AgentProxy.
 
 Usage:
     python server.py --config config.yaml
@@ -36,8 +36,8 @@ class PendingPermission:
     timeout_sec: int
 
 
-class BridgeServer:
-    """WebSocket server bridging CH32H417 devices to AI agents."""
+class LocalCoreServiceMVP:
+    """Local Core Service MVP for local APIs, sessions, permissions, and agents."""
 
     def __init__(self, config: Dict[str, Any]):
         self.cfg = config
@@ -57,8 +57,9 @@ class BridgeServer:
         self.agents: Dict[AgentType, AgentProxy] = {}
         self._init_agents()
 
-        # Connection state
-        self.connected_devices: Set[asyncio.Queue] = set()
+        # Local API client state. This is not the product device transport.
+        self.connected_clients: Set[asyncio.Queue] = set()
+        self.connected_devices = self.connected_clients  # Backward-compatible alias.
         self.pending_permissions: Dict[str, PendingPermission] = {}
         self._server = None
         self._shutdown_event: Optional[asyncio.Event] = None
@@ -79,7 +80,7 @@ class BridgeServer:
             handlers.append(logging.FileHandler(log_cfg["file"], encoding="utf-8"))
 
         logging.basicConfig(level=level, format=fmt, handlers=handlers)
-        self.logger = logging.getLogger("BridgeServer")
+        self.logger = logging.getLogger("LocalCoreServiceMVP")
 
     def _init_agents(self) -> None:
         for agent_key, agent_type in [("claude", AgentType.CLAUDE), ("codex", AgentType.CODEX)]:
@@ -104,33 +105,33 @@ class BridgeServer:
             self.logger.info(f"Agent {agent_key}: {status} ({proxy._executable or 'PATH'})")
 
     # ------------------------------------------------------------------ #
-    #  WebSocket handlers
+    #  Local API WebSocket handlers
     # ------------------------------------------------------------------ #
 
-    async def _handle_device(self, websocket) -> None:
-        """Handle a single device WebSocket connection."""
-        device_queue = asyncio.Queue()
+    async def _handle_local_api_client(self, websocket) -> None:
+        """Handle a single local WebSocket API client connection."""
+        client_queue = asyncio.Queue()
         send_task: Optional[asyncio.Task] = None
-        self.connected_devices.add(device_queue)
+        self.connected_clients.add(client_queue)
         peer = websocket.remote_address
-        self.logger.info(f"Device connected: {peer}")
+        self.logger.info(f"Local API client connected: {peer}")
 
         try:
             # Start a task to forward messages from queue to websocket
-            send_task = asyncio.create_task(self._device_sender(websocket, device_queue))
+            send_task = asyncio.create_task(self._local_api_sender(websocket, client_queue))
 
             async for raw_message in websocket:
                 try:
                     msg = json.loads(raw_message)
                 except json.JSONDecodeError:
                     self.logger.warning(f"Invalid JSON from {peer}: {raw_message[:200]}")
-                    await self._send_error(device_queue, "INVALID_JSON", "Message is not valid JSON")
+                    await self._send_error(client_queue, "INVALID_JSON", "Message is not valid JSON")
                     continue
 
-                await self._handle_device_message(msg, device_queue)
+                await self._handle_local_api_message(msg, client_queue)
 
         except Exception as exc:
-            self.logger.warning(f"Device {peer} error: {exc}")
+            self.logger.warning(f"Local API client {peer} error: {exc}")
         finally:
             if send_task:
                 send_task.cancel()
@@ -138,10 +139,10 @@ class BridgeServer:
                     await send_task
                 except asyncio.CancelledError:
                     pass
-            self.connected_devices.discard(device_queue)
-            self.logger.info(f"Device disconnected: {peer}")
+            self.connected_clients.discard(client_queue)
+            self.logger.info(f"Local API client disconnected: {peer}")
 
-    async def _device_sender(self, websocket, queue: asyncio.Queue) -> None:
+    async def _local_api_sender(self, websocket, queue: asyncio.Queue) -> None:
         """Coroutine that pulls from queue and sends to websocket."""
         while True:
             msg = await queue.get()
@@ -152,26 +153,38 @@ class BridgeServer:
             except Exception:
                 break
 
-    async def _handle_device_message(self, msg: Dict[str, Any], device_queue: asyncio.Queue) -> None:
-        """Process a single message from device."""
+    async def _handle_local_api_message(self, msg: Dict[str, Any], client_queue: asyncio.Queue) -> None:
+        """Process a single message from a local API client."""
         msg_type = msg.get("type", "")
-        self.logger.debug(f"Device msg: {msg_type}")
+        self.logger.debug(f"Local API msg: {msg_type}")
 
         if msg_type == "agent_launch":
-            await self._cmd_agent_launch(msg, device_queue)
+            await self._cmd_agent_launch(msg, client_queue)
         elif msg_type == "permission_response":
-            await self._cmd_permission_response(msg, device_queue)
+            await self._cmd_permission_response(msg, client_queue)
         elif msg_type == "interrupt":
-            await self._cmd_interrupt(msg, device_queue)
+            await self._cmd_interrupt(msg, client_queue)
         elif msg_type == "list_sessions":
-            await self._cmd_list_sessions(msg, device_queue)
+            await self._cmd_list_sessions(msg, client_queue)
         elif msg_type == "heartbeat":
-            await self._cmd_heartbeat(msg, device_queue)
+            await self._cmd_heartbeat(msg, client_queue)
         else:
-            await self._send_error(device_queue, "UNKNOWN_TYPE", f"Unknown message type: {msg_type}")
+            await self._send_error(client_queue, "UNKNOWN_TYPE", f"Unknown message type: {msg_type}")
+
+    async def _handle_device(self, websocket) -> None:
+        """Backward-compatible alias for older tests; use _handle_local_api_client."""
+        await self._handle_local_api_client(websocket)
+
+    async def _device_sender(self, websocket, queue: asyncio.Queue) -> None:
+        """Backward-compatible alias for older tests; use _local_api_sender."""
+        await self._local_api_sender(websocket, queue)
+
+    async def _handle_device_message(self, msg: Dict[str, Any], device_queue: asyncio.Queue) -> None:
+        """Backward-compatible alias for older tests; use _handle_local_api_message."""
+        await self._handle_local_api_message(msg, device_queue)
 
     # ------------------------------------------------------------------ #
-    #  Device commands
+    #  Local API commands
     # ------------------------------------------------------------------ #
 
     async def _cmd_agent_launch(self, msg: Dict[str, Any], queue: asyncio.Queue) -> None:
@@ -279,8 +292,8 @@ class BridgeServer:
     def _on_agent_event(self, json_line: str) -> None:
         """Called by AgentProxy whenever a unified event is produced."""
         self._track_permission_event(json_line)
-        # Broadcast to all connected devices
-        for queue in list(self.connected_devices):
+        # Broadcast to all connected local API clients.
+        for queue in list(self.connected_clients):
             try:
                 queue.put_nowait(json_line)
             except Exception:
@@ -343,7 +356,7 @@ class BridgeServer:
     async def start(self) -> None:
         self._shutdown_event = asyncio.Event()
         srv_cfg = self.cfg["server"]
-        host = srv_cfg.get("host", "0.0.0.0")
+        host = srv_cfg.get("host", "127.0.0.1")
         port = srv_cfg.get("port", 8765)
 
         # Import websockets here to allow graceful degradation if not installed
@@ -353,8 +366,8 @@ class BridgeServer:
             self.logger.error("Package 'websockets' is required. Install: pip install websockets")
             sys.exit(1)
 
-        self._server = await websockets.serve(self._handle_device, host, port)
-        self.logger.info(f"Bridge Server listening on ws://{host}:{port}")
+        self._server = await websockets.serve(self._handle_local_api_client, host, port)
+        self.logger.info(f"Local Core Service MVP listening on ws://{host}:{port}")
 
         # Graceful shutdown
         loop = asyncio.get_running_loop()
@@ -385,7 +398,7 @@ class BridgeServer:
 # ------------------------------------------------------------------ #
 
 def main():
-    parser = argparse.ArgumentParser(description="CH32H417 AI Terminal — Bridge Server")
+    parser = argparse.ArgumentParser(description="AI Keyboard Local Core Service MVP")
     parser.add_argument("--config", "-c", default="config.yaml", help="Path to YAML config file")
     args = parser.parse_args()
 
@@ -396,8 +409,11 @@ def main():
     with open(config_path, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
-    server = BridgeServer(config)
+    server = LocalCoreServiceMVP(config)
     asyncio.run(server.start())
+
+
+BridgeServer = LocalCoreServiceMVP
 
 
 if __name__ == "__main__":

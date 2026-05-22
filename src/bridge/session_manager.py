@@ -6,6 +6,7 @@ Matches device-side AGENT_SESSION_CACHE_MAX = 50.
 """
 
 import json
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -61,12 +62,40 @@ class Session:
 
     @staticmethod
     def from_dict(data: dict) -> "Session":
+        if not isinstance(data, dict):
+            raise ValueError("session entry must be an object")
+
+        session_id = data.get("session_id")
+        if not isinstance(session_id, str) or not session_id:
+            raise ValueError("session_id must be a non-empty string")
+
+        try:
+            agent = AgentType(data["agent"])
+        except KeyError as exc:
+            raise ValueError("agent is required") from exc
+        except ValueError as exc:
+            raise ValueError(f"unknown agent: {data.get('agent')}") from exc
+
+        state_raw = data.get("state", AgentState.IDLE.value)
+        try:
+            state = AgentState(state_raw)
+        except ValueError as exc:
+            raise ValueError(f"unknown state: {state_raw}") from exc
+
+        created_at = data.get("created_at", 0)
+        updated_at = data.get("updated_at", created_at)
+        try:
+            created_at = float(created_at)
+            updated_at = float(updated_at)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("created_at and updated_at must be numeric") from exc
+
         return Session(
-            session_id=data["session_id"],
-            agent=AgentType(data["agent"]),
-            state=AgentState(data.get("state", "IDLE")),
-            created_at=data.get("created_at", 0),
-            updated_at=data.get("updated_at", 0),
+            session_id=session_id,
+            agent=agent,
+            state=state,
+            created_at=created_at,
+            updated_at=updated_at,
         )
 
 
@@ -221,10 +250,16 @@ class SessionManager:
         if not self._persist_dir:
             return
         try:
-            data = [s.to_dict() for s in self._sessions.values()]
             path = self._persist_dir / "sessions.json"
-            with open(path, "w", encoding="utf-8") as f:
+            tmp_path = self._persist_dir / "sessions.json.tmp"
+            with self._lock:
+                data = [s.to_dict() for s in self._sessions.values()]
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
+                f.write("\n")
+                f.flush()
+                os.fsync(f.fileno())
+            tmp_path.replace(path)
         except Exception as exc:
             # Best-effort persistence; log but don't crash
             print(f"[SessionManager] persist warning: {exc}")
@@ -236,10 +271,28 @@ class SessionManager:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
+            if not isinstance(data, list):
+                raise ValueError("sessions.json must contain a JSON array")
+
+            skipped = 0
             with self._lock:
                 for item in data:
-                    sess = Session.from_dict(item)
+                    try:
+                        sess = Session.from_dict(item)
+                    except Exception as exc:
+                        skipped += 1
+                        print(f"[SessionManager] load warning: skipped session entry: {exc}")
+                        continue
                     self._sessions[sess.session_id] = sess
-            print(f"[SessionManager] loaded {len(self._sessions)} sessions from disk")
+                before_limit = len(self._sessions)
+                self._enforce_limit(locked=True)
+
+            loaded = self.count()
+            if before_limit != loaded:
+                print(f"[SessionManager] load warning: trimmed {before_limit - loaded} sessions over cache limit")
+                self._persist()
+            if skipped:
+                self._persist()
+            print(f"[SessionManager] loaded {loaded} sessions from disk")
         except Exception as exc:
             print(f"[SessionManager] load warning: {exc}")

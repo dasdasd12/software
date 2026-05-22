@@ -1,8 +1,10 @@
-# Bridge Server Configuration
-# CH32H417 Keyboard AI Terminal — Software Workspace
+# Local Core Service MVP Configuration
+# AI Keyboard Software Workspace
 
 server:
-  host: "0.0.0.0"
+  # Local Core Service APIs are privileged; bind loopback by default.
+  # Use 0.0.0.0 only for explicit local debugging.
+  host: "127.0.0.1"
   port: 8765
   websocket_path: "/"
   # TLS is recommended for production; disable for local prototyping
@@ -25,7 +27,7 @@ agents:
     executable: ""
     # Launch mode: "sdk_url" (WebSocket) or "headless" (stdio)
     mode: "headless"
-    # Additional CLI arguments. The bridge adds -p --output-format stream-json.
+    # Additional CLI arguments. The service adds -p --output-format stream-json --verbose.
     args: []
     # Environment variables
     env:
@@ -41,7 +43,7 @@ agents:
     executable: ""
     # Launch mode: "remote_control" or "exec_json"
     mode: "exec_json"
-    # Additional CLI arguments. The bridge adds exec --json.
+    # Additional CLI arguments. The service adds exec --json.
     args: []
     # Environment variables
     env:

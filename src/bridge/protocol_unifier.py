@@ -88,6 +88,23 @@ class ProtocolUnifier:
 
         msg_type = obj.get("type", "")
 
+        if msg_type == "assistant":
+            return self._claude_assistant_to_unified(obj, session_id)
+
+        if msg_type == "result":
+            if obj.get("is_error") or obj.get("subtype") not in {"success", None}:
+                return self._mk_task_failed(
+                    session_id=session_id,
+                    agent=AgentType.CLAUDE,
+                    error_code=str(obj.get("api_error_status") or obj.get("subtype") or "ERROR"),
+                    error_message=obj.get("result") or "Claude encountered an error.",
+                )
+            return self._mk_task_completed(
+                session_id=session_id,
+                agent=AgentType.CLAUDE,
+                summary=obj.get("result", "Claude turn completed."),
+            )
+
         # Claude stream-json format (simplified; actual format depends on version)
         if msg_type == "message_start":
             return self._mk_task_update(session_id, AgentType.CLAUDE, AgentState.SUBMITTED)
@@ -122,6 +139,29 @@ class ProtocolUnifier:
                 error_message=obj.get("message", "Claude encountered an error."),
             )
 
+        return None
+
+    def _claude_assistant_to_unified(self, obj: Dict[str, Any], session_id: str) -> Optional[Dict[str, Any]]:
+        message = obj.get("message", {})
+        content = message.get("content", []) if isinstance(message, dict) else []
+        if not isinstance(content, list):
+            return None
+
+        text_parts = []
+        saw_tool_use = False
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            item_type = item.get("type")
+            if item_type == "text" and item.get("text"):
+                text_parts.append(str(item["text"]))
+            elif item_type == "tool_use":
+                saw_tool_use = True
+
+        if text_parts:
+            return self._mk_delta(session_id, AgentType.CLAUDE, "\n".join(text_parts))
+        if saw_tool_use:
+            return self._mk_task_update(session_id, AgentType.CLAUDE, AgentState.EXECUTING)
         return None
 
     # ------------------------------------------------------------------ #

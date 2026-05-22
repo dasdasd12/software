@@ -178,7 +178,7 @@ class AgentProxy:
             cmd += ["-p"]
             if context:
                 cmd += [context]
-            cmd += ["--output-format", "stream-json"]
+            cmd += ["--output-format", "stream-json", "--verbose"]
         cmd += self._dedupe_args(cmd, self._args)
         return cmd
 

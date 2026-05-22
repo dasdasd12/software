@@ -65,3 +65,68 @@ def test_claude_error_becomes_task_failed():
         "error_code": "BAD",
         "error_message": "failed",
     }
+
+
+def test_claude_current_stream_text_becomes_delta():
+    unifier = ProtocolUnifier()
+    event = unifier.claude_to_unified(
+        json.dumps({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "thinking", "thinking": "internal"},
+                    {"type": "text", "text": "visible answer"},
+                ],
+            },
+        }),
+        "sess_3",
+    )
+
+    assert event == {
+        "type": "agent_message_delta",
+        "session_id": "sess_3",
+        "agent": "claude",
+        "delta": "visible answer",
+    }
+
+
+def test_claude_current_stream_tool_use_marks_executing():
+    unifier = ProtocolUnifier()
+    event = unifier.claude_to_unified(
+        json.dumps({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "tool_use", "name": "Bash", "input": {"command": "pwd"}},
+                ],
+            },
+        }),
+        "sess_3",
+    )
+
+    assert event == {
+        "type": "task_update",
+        "session_id": "sess_3",
+        "agent": "claude",
+        "state": "EXECUTING",
+    }
+
+
+def test_claude_current_stream_result_success_completes_task():
+    unifier = ProtocolUnifier()
+    event = unifier.claude_to_unified(
+        json.dumps({
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": "done",
+        }),
+        "sess_3",
+    )
+
+    assert event == {
+        "type": "task_completed",
+        "session_id": "sess_3",
+        "agent": "claude",
+        "summary": "done",
+    }
