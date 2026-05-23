@@ -2,7 +2,7 @@
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Dict
+from typing import Any, Dict, Iterable
 
 
 @dataclass(frozen=True)
@@ -34,4 +34,19 @@ class LocalApiError:
             "type": "error",
             "code": self.code,
             "message": self.message,
+        }
+
+
+@dataclass(frozen=True)
+class HelloAck:
+    client_kind: str
+    client_id: str
+    capabilities: Iterable[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "type": "hello_ack",
+            "client_kind": self.client_kind,
+            "client_id": self.client_id,
+            "capabilities": sorted(self.capabilities),
         }

@@ -9,6 +9,7 @@ from .device_transport import (
     SimulatedTransport,
 )
 from .manager import DeviceManager, DeviceRecord
+from .projection import project_device_snapshot_frames, project_slot_snapshot_frames
 from .protocol_codec import DeviceProtocolCodec
 from .slot_mapper import DeviceSlotMapper, SlotSnapshot
 
@@ -24,4 +25,6 @@ __all__ = [
     "DeviceTransportError",
     "SimulatedTransport",
     "SlotSnapshot",
+    "project_device_snapshot_frames",
+    "project_slot_snapshot_frames",
 ]

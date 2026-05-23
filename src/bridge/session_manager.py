@@ -132,6 +132,12 @@ class SessionManager:
         self._persist()
         return session
 
+    def restore(self, session: Session) -> None:
+        """Restore a previously persisted session into the in-memory cache."""
+        with self._lock:
+            self._sessions[session.session_id] = session
+            self._enforce_limit(locked=True)
+
     def get(self, session_id: str) -> Optional[Session]:
         with self._lock:
             return self._sessions.get(session_id)

@@ -37,15 +37,6 @@ from security import (  # noqa: E402
 
 def test_runtime_builds_snapshot_and_routes_events():
     runtime = build_runtime()
-
-    def handle(command):
-        return EventEnvelope(
-            seq=0,
-            type="system.snapshot.generated",
-            payload={"command_id": command.command_id},
-        )
-
-    runtime.command_router.register("system.snapshot.request", handle)
     event = runtime.command_router.dispatch(CommandEnvelope(
         command_id="cmd_test",
         type="system.snapshot.request",
@@ -55,6 +46,7 @@ def test_runtime_builds_snapshot_and_routes_events():
 
     assert event.seq == 1
     assert event.payload["command_id"] == "cmd_test"
+    assert event.type == "system.snapshot.generated"
     assert snapshot.last_event_seq == 1
     assert set(snapshot.to_dict().keys()) == {
         "snapshot_id",
@@ -67,6 +59,25 @@ def test_runtime_builds_snapshot_and_routes_events():
         "notifications",
         "permissions",
     }
+
+
+def test_runtime_applies_command_event_to_state_store_before_publish():
+    runtime = build_runtime()
+
+    event = runtime.command_router.dispatch(CommandEnvelope(
+        command_id="cmd_notify",
+        type="notification.create",
+        source=CommandSource(kind="test-client", client_id="pytest"),
+        payload={"notification_id": "note_1", "level": "info", "message": "Ready"},
+    ))
+    snapshot = runtime.snapshot().to_dict()
+
+    assert event.type == "notification.created"
+    assert event.seq == 1
+    assert snapshot["last_event_seq"] == 1
+    assert snapshot["notifications"] == [
+        {"notification_id": "note_1", "level": "info", "message": "Ready"}
+    ]
 
 
 def test_agent_registry_enforces_identity_hierarchy():

@@ -3,6 +3,8 @@
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
+from .device_transport import DeviceTransportError
+
 
 @dataclass
 class SlotSnapshot:
@@ -12,6 +14,7 @@ class SlotSnapshot:
     session_slots: Dict[int, str] = field(default_factory=dict)
     run_slots: Dict[int, str] = field(default_factory=dict)
     permission_slots: Dict[int, str] = field(default_factory=dict)
+    notification_slots: Dict[int, str] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -21,6 +24,7 @@ class SlotSnapshot:
             "session_slots": {str(k): v for k, v in self.session_slots.items()},
             "run_slots": {str(k): v for k, v in self.run_slots.items()},
             "permission_slots": {str(k): v for k, v in self.permission_slots.items()},
+            "notification_slots": {str(k): v for k, v in self.notification_slots.items()},
         }
 
 
@@ -34,6 +38,7 @@ class DeviceSlotMapper:
         self._session_slots: Dict[int, str] = {}
         self._run_slots: Dict[int, str] = {}
         self._permission_slots: Dict[int, str] = {}
+        self._notification_slots: Dict[int, str] = {}
 
     @property
     def generation(self) -> int:
@@ -47,6 +52,7 @@ class DeviceSlotMapper:
             session_slots=dict(self._session_slots),
             run_slots=dict(self._run_slots),
             permission_slots=dict(self._permission_slots),
+            notification_slots=dict(self._notification_slots),
         )
 
     def assign_agent(self, instance_id: str) -> int:
@@ -60,6 +66,9 @@ class DeviceSlotMapper:
 
     def assign_permission(self, permission_id: str) -> int:
         return self._assign(self._permission_slots, permission_id)
+
+    def assign_notification(self, notification_id: str) -> int:
+        return self._assign(self._notification_slots, notification_id)
 
     def resolve_session(self, slot_id: int, generation: int) -> Optional[str]:
         self._require_generation(generation)
@@ -76,4 +85,14 @@ class DeviceSlotMapper:
 
     def _require_generation(self, generation: int) -> None:
         if generation != self._generation:
-            raise ValueError("slot generation mismatch")
+            raise DeviceTransportError(
+                code="UNKNOWN_SLOT_GENERATION",
+                message="slot generation mismatch",
+                transport_kind="device_slot_mapper",
+                device_id=self.device_id,
+                recoverable=True,
+                details={
+                    "expected_generation": self._generation,
+                    "received_generation": generation,
+                },
+            )

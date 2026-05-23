@@ -19,9 +19,17 @@ class DeviceRecord:
         return {
             "device_id": self.device_id,
             "transport_kind": self.capabilities.transport_kind,
+            "hardware_revision": self.capabilities.hardware_revision,
+            "firmware_version": self.capabilities.firmware_version,
+            "device_family": self.capabilities.device_family,
             "protocol_version": self.capabilities.protocol_version,
             "max_payload_size": self.capabilities.max_payload_size,
             "supported_message_types": sorted(self.capabilities.supported_message_types),
+            "supported_profile_features": sorted(self.capabilities.supported_profile_features),
+            "supported_screen_widgets": sorted(self.capabilities.supported_screen_widgets),
+            "supports_agent_slots": self.capabilities.supports_agent_slots,
+            "supports_config_sync": self.capabilities.supports_config_sync,
+            "supports_firmware_update": self.capabilities.supports_firmware_update,
             "is_open": self.status.is_open,
             "queued_frames": self.status.queued_frames,
             "connected_at": self.connected_at,
@@ -47,6 +55,11 @@ class DeviceManager:
         self._transports[capabilities.device_id] = transport
         self._records[capabilities.device_id] = record
         return record
+
+    async def negotiate_transport(self, transport: DeviceTransport) -> DeviceRecord:
+        """Open a transport and record the capability snapshot it exposes."""
+        await transport.open()
+        return self.register_transport(transport)
 
     def refresh_status(self, device_id: str) -> Optional[DeviceRecord]:
         transport = self._transports.get(device_id)

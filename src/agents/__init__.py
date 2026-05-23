@@ -8,6 +8,11 @@ from .identity import (
     AgentSession,
     RunState,
 )
+from .adapters import (
+    ClaudeAgentSdkPermissionAdapter,
+    ClaudeSdkPermissionBridge,
+    UnsupportedPermissionAdapter,
+)
 from .registry import AgentRegistry
 
 __all__ = [
@@ -17,5 +22,8 @@ __all__ = [
     "AgentRegistry",
     "AgentRun",
     "AgentSession",
+    "ClaudeAgentSdkPermissionAdapter",
+    "ClaudeSdkPermissionBridge",
     "RunState",
+    "UnsupportedPermissionAdapter",
 ]

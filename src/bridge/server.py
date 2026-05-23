@@ -18,13 +18,38 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, Optional, Set, Tuple
 
 import yaml
 
+SRC_DIR = Path(__file__).resolve().parents[1]
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
 from agent_proxy import AgentProxy
+from app import build_runtime
+from core import CommandEnvelope, CommandSource
+from persistence import SQLiteAppStore
 from protocol_unifier import ProtocolUnifier
-from session_manager import AgentType, AgentState, SessionManager
+from session_manager import AgentType, AgentState, Session, SessionManager
+from local_api.schemas import HelloAck
+from security import (
+    ApprovalMode,
+    ApprovalPolicy,
+    ApprovalPolicyEngine,
+    CAP_AGENT_LAUNCH,
+    CAP_NOTIFICATION_CREATE,
+    CAP_PERMISSION_RESPOND,
+    CAP_PERMISSION_RESPOND_LOW_RISK,
+    CAP_SESSION_LIST,
+    ClientIdentity,
+    ClientKind,
+    PolicyDecision,
+    RiskLevel,
+    SecurityConfig,
+    build_client_identity,
+    default_capabilities_for,
+)
 
 
 @dataclass
@@ -34,6 +59,11 @@ class PendingPermission:
     agent: AgentType
     created_at: float
     timeout_sec: int
+    risk_level: RiskLevel = RiskLevel.MEDIUM
+    tool: str = "unknown"
+    description: str = ""
+    run_id: Optional[str] = None
+    native: Optional[Dict[str, Any]] = None
 
 
 class LocalCoreServiceMVP:
@@ -46,12 +76,15 @@ class LocalCoreServiceMVP:
         # Sub-components
         self.session_mgr = SessionManager(
             max_sessions=config["session"]["cache_size"],
-            persist_dir=config["session"].get("persist_dir"),
+            persist_dir=config["session"].get("persist_dir") if config["session"].get("persist_to_disk") else None,
             cleanup_after_hours=config["session"]["cleanup_after_hours"],
         )
         self.unifier = ProtocolUnifier(
             max_delta_size=config["unifier"]["max_delta_size"],
         )
+        self.runtime = build_runtime()
+        self.app_store = self._init_app_store(config.get("persistence", {}))
+        self._restore_sessions_from_app_store()
 
         # Agent proxies
         self.agents: Dict[AgentType, AgentProxy] = {}
@@ -60,6 +93,13 @@ class LocalCoreServiceMVP:
         # Local API client state. This is not the product device transport.
         self.connected_clients: Set[asyncio.Queue] = set()
         self.connected_devices = self.connected_clients  # Backward-compatible alias.
+        self.client_identities: Dict[asyncio.Queue, ClientIdentity] = {}
+        self.security = SecurityConfig.from_dict(config.get("security"))
+        self.approval_policy = ApprovalPolicy(
+            policy_id="default",
+            mode=ApprovalMode(config.get("approval_policy", {}).get("mode", ApprovalMode.MANUAL.value)),
+        )
+        self.approval_policy_engine = ApprovalPolicyEngine()
         self.pending_permissions: Dict[str, PendingPermission] = {}
         self._server = None
         self._shutdown_event: Optional[asyncio.Event] = None
@@ -104,12 +144,41 @@ class LocalCoreServiceMVP:
             status = "available" if proxy.is_available() else "NOT FOUND"
             self.logger.info(f"Agent {agent_key}: {status} ({proxy._executable or 'PATH'})")
 
+    def _init_app_store(self, cfg: Dict[str, Any]) -> Optional[SQLiteAppStore]:
+        if not cfg.get("enabled", False):
+            return None
+        db_path = Path(cfg.get("app_store_path") or "data/app.db")
+        if not db_path.is_absolute():
+            db_path = Path(__file__).resolve().parents[2] / db_path
+        store = SQLiteAppStore.open(db_path)
+        self.logger.info(f"SQLite app store opened at {db_path}")
+        return store
+
+    def _restore_sessions_from_app_store(self) -> None:
+        if not self.app_store:
+            return
+        restored = 0
+        for item in self.app_store.sessions.list():
+            try:
+                payload = dict(item)
+                payload.setdefault("session_id", payload.get("id"))
+                self.session_mgr.restore(Session.from_dict(payload))
+                restored += 1
+            except Exception as exc:
+                self.logger.warning(f"SQLite session restore skipped: {exc}")
+        if restored:
+            self.logger.info(f"Restored {restored} sessions from SQLite app store")
+
     # ------------------------------------------------------------------ #
     #  Local API WebSocket handlers
     # ------------------------------------------------------------------ #
 
     async def _handle_local_api_client(self, websocket) -> None:
         """Handle a single local WebSocket API client connection."""
+        if not self._is_websocket_origin_allowed(websocket):
+            await websocket.close(code=1008, reason="origin not allowed")
+            return
+
         client_queue = asyncio.Queue()
         send_task: Optional[asyncio.Task] = None
         self.connected_clients.add(client_queue)
@@ -128,7 +197,7 @@ class LocalCoreServiceMVP:
                     await self._send_error(client_queue, "INVALID_JSON", "Message is not valid JSON")
                     continue
 
-                await self._handle_local_api_message(msg, client_queue)
+                await self._handle_local_api_message(msg, client_queue, websocket)
 
         except Exception as exc:
             self.logger.warning(f"Local API client {peer} error: {exc}")
@@ -140,6 +209,7 @@ class LocalCoreServiceMVP:
                 except asyncio.CancelledError:
                     pass
             self.connected_clients.discard(client_queue)
+            self.client_identities.pop(client_queue, None)
             self.logger.info(f"Local API client disconnected: {peer}")
 
     async def _local_api_sender(self, websocket, queue: asyncio.Queue) -> None:
@@ -153,13 +223,24 @@ class LocalCoreServiceMVP:
             except Exception:
                 break
 
-    async def _handle_local_api_message(self, msg: Dict[str, Any], client_queue: asyncio.Queue) -> None:
+    async def _handle_local_api_message(
+        self,
+        msg: Dict[str, Any],
+        client_queue: asyncio.Queue,
+        websocket: Any = None,
+    ) -> None:
         """Process a single message from a local API client."""
         msg_type = msg.get("type", "")
         self.logger.debug(f"Local API msg: {msg_type}")
 
-        if msg_type == "agent_launch":
+        if msg_type == "hello":
+            await self._cmd_hello(msg, client_queue, websocket)
+        elif self.security.auth_enabled and client_queue not in self.client_identities:
+            await self._send_error(client_queue, "AUTH_REQUIRED", "hello with a valid launch token is required")
+        elif msg_type == "agent_launch":
             await self._cmd_agent_launch(msg, client_queue)
+        elif msg_type == "command":
+            await self._cmd_structured_command(msg, client_queue)
         elif msg_type == "permission_response":
             await self._cmd_permission_response(msg, client_queue)
         elif msg_type == "interrupt":
@@ -187,7 +268,95 @@ class LocalCoreServiceMVP:
     #  Local API commands
     # ------------------------------------------------------------------ #
 
+    async def _cmd_hello(
+        self,
+        msg: Dict[str, Any],
+        queue: asyncio.Queue,
+        websocket: Any = None,
+    ) -> None:
+        peer = getattr(websocket, "remote_address", None)
+        if not self.security.validate_token(msg.get("token"), self._is_loopback_peer(peer)):
+            await self._send_error(queue, "AUTH_FAILED", "invalid or missing launch token")
+            return
+
+        client_kind = msg.get("client_kind")
+        client_id = msg.get("client_id")
+        requested_capabilities = msg.get("capabilities", [])
+        if not isinstance(client_kind, str) or not isinstance(client_id, str) or not client_id:
+            await self._send_error(queue, "INVALID_HELLO", "client_kind and client_id are required")
+            return
+        if not isinstance(requested_capabilities, list):
+            await self._send_error(queue, "INVALID_HELLO", "capabilities must be a list")
+            return
+
+        try:
+            granted = self.security.granted_capabilities(
+                msg.get("token"),
+                client_kind,
+                client_id,
+                self._is_loopback_peer(peer),
+            )
+        except ValueError as exc:
+            await self._send_error(queue, "AUTH_FAILED", str(exc))
+            return
+
+        try:
+            identity = build_client_identity(
+                client_kind,
+                client_id,
+                set(requested_capabilities).intersection(granted),
+            )
+        except ValueError as exc:
+            await self._send_error(queue, "INVALID_HELLO", str(exc))
+            return
+
+        self.client_identities[queue] = identity
+        await queue.put(json.dumps(HelloAck(
+            client_kind=identity.kind.value,
+            client_id=identity.client_id,
+            capabilities=identity.capabilities,
+        ).to_dict(), ensure_ascii=False))
+
+    async def _cmd_structured_command(self, msg: Dict[str, Any], queue: asyncio.Queue) -> None:
+        try:
+            command_data = msg.get("command")
+            if not isinstance(command_data, dict):
+                raise ValueError("command must be an object")
+            command = CommandEnvelope.from_dict(command_data)
+        except ValueError as exc:
+            await self._send_error(queue, "INVALID_COMMAND", str(exc))
+            return
+
+        required_capability = self._capability_for_command(command.type)
+        if required_capability and not await self._require_capability(queue, required_capability):
+            return
+        command = self._command_from_client_identity(command, queue)
+
+        self._sync_runtime_state()
+        try:
+            event = self.runtime.command_router.dispatch(command)
+        except KeyError as exc:
+            await self._send_error(queue, "UNKNOWN_COMMAND", str(exc))
+            return
+
+        if command.type == "system.snapshot.request":
+            self._sync_runtime_state()
+            payload = {
+                "type": "snapshot",
+                "command_id": command.command_id,
+                "snapshot": self.runtime.snapshot().to_dict(),
+                "timestamp": int(time.time()),
+            }
+            await queue.put(json.dumps(payload, ensure_ascii=False))
+            self._broadcast_core_event(event)
+            return
+
+        self._broadcast_core_event(event)
+
     async def _cmd_agent_launch(self, msg: Dict[str, Any], queue: asyncio.Queue) -> None:
+        if not await self._require_capability(queue, CAP_AGENT_LAUNCH):
+            return
+
         agent_str = msg.get("agent", "claude")
         session_id = msg.get("session_id", "new")
         context = msg.get("context", "")
@@ -205,6 +374,7 @@ class LocalCoreServiceMVP:
         if session_id == "new":
             sess = self.session_mgr.create(agent_type)
             session_id = sess.session_id
+            self._persist_session(session_id)
             try:
                 await proxy.launch(session_id, context)
             except Exception as exc:
@@ -229,35 +399,75 @@ class LocalCoreServiceMVP:
 
     async def _cmd_permission_response(self, msg: Dict[str, Any], queue: asyncio.Queue) -> None:
         request_id = msg.get("request_id", "")
-        approved = msg.get("approved", False)
+        session_id = msg.get("session_id")
+        try:
+            approved = self._parse_approved(msg.get("approved", False))
+        except ValueError as exc:
+            await self._send_error(queue, "INVALID_PERMISSION_RESPONSE", str(exc))
+            return
+
         self.logger.info(f"Permission {request_id}: {'APPROVED' if approved else 'DENIED'}")
         self._prune_expired_permissions()
 
-        pending = self.pending_permissions.pop(request_id, None)
+        pending_key, pending = self._find_pending_permission(request_id, session_id)
         if not pending:
             await self._send_error(queue, "REQUEST_NOT_FOUND", f"Permission request {request_id} not found")
             return
 
+        allowed, code, reason = self._can_submit_permission_response(queue, pending, approved)
+        if not allowed:
+            await self._send_error(queue, code, reason)
+            return
+
         proxy = self.agents.get(pending.agent)
-        result = {"accepted": True, "forwarded": False}
+        result = {"accepted": True, "forwarded": False, "evidence": {}}
         if proxy:
-            result = await proxy.handle_permission_response(
-                pending.session_id,
-                request_id,
-                bool(approved),
+            try:
+                result = await proxy.handle_permission_response(
+                    pending.session_id,
+                    request_id,
+                    approved,
+                )
+            except Exception as exc:
+                self.logger.warning(f"Permission forward failed for {request_id}: {exc}")
+                await self._send_error(queue, "PERMISSION_FORWARD_FAILED", str(exc))
+                return
+
+        if not result.get("accepted", True):
+            await self._send_error(
+                queue,
+                "PERMISSION_REJECTED",
+                "permission adapter rejected the response",
             )
+            return
+
+        if proxy and not result.get("forwarded", False) and self._requires_native_forwarding(pending.agent, result):
+            await self._send_error(
+                queue,
+                "PERMISSION_FORWARD_FAILED",
+                result.get("evidence", {}).get("reason", "permission was not forwarded to provider"),
+            )
+            return
+
+        self.pending_permissions.pop(pending_key, None)
 
         self.session_mgr.update_state(pending.session_id, AgentState.WORKING)
+        self._append_permission_history(queue, pending, approved, result)
+        self._persist_session(pending.session_id)
         ack = self.unifier.encode_device_message({
             "type": "permission_ack",
             "request_id": request_id,
             "session_id": pending.session_id,
-            "approved": bool(approved),
+            "approved": approved,
             "forwarded": bool(result.get("forwarded", False)),
+            "evidence": result.get("evidence", {}),
         })
         await queue.put(ack)
 
     async def _cmd_interrupt(self, msg: Dict[str, Any], queue: asyncio.Queue) -> None:
+        if not await self._require_capability(queue, CAP_AGENT_LAUNCH):
+            return
+
         session_id = msg.get("session_id", "")
         sess = self.session_mgr.get(session_id)
         if not sess:
@@ -268,8 +478,12 @@ class LocalCoreServiceMVP:
         if proxy:
             await proxy.send_interrupt(session_id)
             self.session_mgr.update_state(session_id, AgentState.CANCELLED)
+            self._persist_session(session_id)
 
     async def _cmd_list_sessions(self, msg: Dict[str, Any], queue: asyncio.Queue) -> None:
+        if not await self._require_capability(queue, CAP_SESSION_LIST):
+            return
+
         agent_str = msg.get("agent", "all")
         agent_type = AgentType.CLAUDE if agent_str == "claude" else (AgentType.CODEX if agent_str == "codex" else None)
 
@@ -289,9 +503,47 @@ class LocalCoreServiceMVP:
     #  Agent event forwarder
     # ------------------------------------------------------------------ #
 
+    def _sync_runtime_state(self) -> None:
+        self._prune_expired_permissions()
+        store = self.runtime.state_store
+        store.sessions = {
+            session.session_id: session.to_dict()
+            for session in self.session_mgr.list_all()
+        }
+        store.permissions = {
+            request_id: {
+                "request_id": pending.request_id,
+                "session_id": pending.session_id,
+                "agent": pending.agent.value,
+                "timeout_sec": pending.timeout_sec,
+                "risk_level": pending.risk_level.value,
+                "tool": pending.tool,
+                "description": pending.description,
+                "run_id": pending.run_id,
+            }
+            for request_id, pending in self.pending_permissions.items()
+        }
+        store.devices = {
+            device_id: record.to_dict()
+            for device_id, record in self.runtime.device_manager.list_records().items()
+        }
+
+    def _broadcast_core_event(self, event) -> None:
+        payload = json.dumps({
+            "type": "event",
+            "event": event.to_dict(),
+            "timestamp": int(time.time()),
+        }, ensure_ascii=False)
+        for queue in list(self.connected_clients):
+            try:
+                queue.put_nowait(payload)
+            except Exception:
+                pass
+
     def _on_agent_event(self, json_line: str) -> None:
         """Called by AgentProxy whenever a unified event is produced."""
         self._track_permission_event(json_line)
+        self._persist_event_state(json_line)
         # Broadcast to all connected local API clients.
         for queue in list(self.connected_clients):
             try:
@@ -314,14 +566,21 @@ class LocalCoreServiceMVP:
         if not request_id or not session_id or not agent:
             return
 
-        self.pending_permissions[request_id] = PendingPermission(
+        permission_key = self._pending_permission_key(request_id, session_id)
+        self.pending_permissions[permission_key] = PendingPermission(
             request_id=request_id,
             session_id=session_id,
             agent=agent,
             created_at=time.time(),
             timeout_sec=int(event.get("timeout_sec", self.cfg["unifier"].get("permission_timeout_sec", 30))),
+            risk_level=self._risk_from_event(event.get("risk_level")),
+            tool=str(event.get("tool", "unknown")),
+            description=str(event.get("description", "")),
+            run_id=event.get("run_id") if isinstance(event.get("run_id"), str) else None,
+            native=event.get("native") if isinstance(event.get("native"), dict) else None,
         )
         self.session_mgr.update_state(session_id, AgentState.WAITING_PERMISSION)
+        self._persist_session(session_id)
 
     def _prune_expired_permissions(self) -> None:
         now = time.time()
@@ -333,12 +592,230 @@ class LocalCoreServiceMVP:
         for request_id in expired:
             del self.pending_permissions[request_id]
 
+    def _persist_event_state(self, json_line: str) -> None:
+        if not self.app_store:
+            return
+        try:
+            event = json.loads(json_line)
+        except json.JSONDecodeError:
+            return
+        session_id = event.get("session_id")
+        if isinstance(session_id, str) and session_id:
+            self._persist_session(session_id)
+
+    def _persist_session(self, session_id: str) -> None:
+        if not self.app_store:
+            return
+        session = self.session_mgr.get(session_id)
+        if not session:
+            return
+        try:
+            payload = session.to_dict()
+            payload["id"] = session.session_id
+            self.app_store.sessions.upsert(payload)
+        except Exception as exc:
+            self.logger.warning(f"SQLite session persist failed for {session_id}: {exc}")
+
+    def _append_permission_history(
+        self,
+        queue: asyncio.Queue,
+        pending: PendingPermission,
+        approved: bool,
+        result: Dict[str, Any],
+    ) -> None:
+        if not self.app_store:
+            return
+        client = self._client_for_queue(queue)
+        try:
+            self.app_store.permission_history.append({
+                "permission_id": pending.request_id,
+                "session_id": pending.session_id,
+                "run_id": pending.run_id,
+                "action_type": pending.tool,
+                "risk_level": pending.risk_level.value,
+                "decision": "approve" if approved else "deny",
+                "source_client": client.client_id,
+                "timestamp": int(time.time()),
+                "summary": pending.description or f"{'Approved' if approved else 'Denied'} {pending.agent.value} permission",
+                "forwarded": bool(result.get("forwarded", False)),
+                "evidence": result.get("evidence", {}),
+                "native": pending.native,
+            })
+        except Exception as exc:
+            self.logger.warning(f"SQLite permission history append failed for {pending.request_id}: {exc}")
+
     @staticmethod
     def _agent_from_string(value: str) -> Optional[AgentType]:
         try:
             return AgentType(value)
         except ValueError:
             return None
+
+    def register_client_identity(
+        self,
+        queue: asyncio.Queue,
+        client_kind: str,
+        client_id: str,
+        capabilities: Set[str],
+    ) -> ClientIdentity:
+        identity = build_client_identity(client_kind, client_id, capabilities)
+        self.client_identities[queue] = identity
+        return identity
+
+    def _client_for_queue(self, queue: asyncio.Queue) -> ClientIdentity:
+        identity = self.client_identities.get(queue)
+        if identity:
+            return identity
+        return ClientIdentity(
+            kind=ClientKind.DESKTOP_UI,
+            client_id="legacy-local-api",
+            capabilities=default_capabilities_for(ClientKind.DESKTOP_UI),
+        )
+
+    def _can_submit_permission_response(
+        self,
+        queue: asyncio.Queue,
+        pending: PendingPermission,
+        approved: bool,
+    ) -> Tuple[bool, str, str]:
+        client = self._client_for_queue(queue)
+        policy = self.approval_policy_engine.evaluate(
+            self.approval_policy,
+            pending.risk_level,
+            client,
+        )
+        if policy.decision == PolicyDecision.DENY:
+            return False, "POLICY_DENIED", policy.reason
+        if (
+            policy.decision == PolicyDecision.REQUIRE_DESKTOP_CONFIRM
+            and client.kind not in {ClientKind.DESKTOP_UI, ClientKind.BROWSER_DEV_UI}
+        ):
+            return False, "REQUIRE_DESKTOP_CONFIRM", policy.reason
+
+        can_respond = client.has_capability(CAP_PERMISSION_RESPOND)
+        can_respond_low_risk = (
+            client.kind == ClientKind.DEVICE_TRANSPORT
+            and approved
+            and pending.risk_level == RiskLevel.LOW
+            and client.has_capability(CAP_PERMISSION_RESPOND_LOW_RISK)
+        )
+        if not can_respond and not can_respond_low_risk:
+            return False, "CAPABILITY_DENIED", "client cannot respond to permission requests"
+
+        if client.kind == ClientKind.TEST_CLIENT and approved:
+            return False, "CAPABILITY_DENIED", "test clients cannot approve real permission requests"
+
+        if client.kind == ClientKind.DEVICE_TRANSPORT and approved and pending.risk_level != RiskLevel.LOW:
+            return (
+                False,
+                "REQUIRE_DESKTOP_CONFIRM",
+                "device transport can directly approve only low-risk requests",
+            )
+
+        return True, "", ""
+
+    @staticmethod
+    def _risk_from_event(value: Any) -> RiskLevel:
+        try:
+            return RiskLevel(value)
+        except (TypeError, ValueError):
+            return RiskLevel.MEDIUM
+
+    @staticmethod
+    def _parse_approved(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"1", "true", "yes", "y", "approve", "approved"}:
+                return True
+            if lowered in {"0", "false", "no", "n", "deny", "denied"}:
+                return False
+        raise ValueError("approved must be a boolean or an explicit approve/deny string")
+
+    def _pending_permission_key(self, request_id: str, session_id: str) -> str:
+        existing = self.pending_permissions.get(request_id)
+        if existing is None or existing.session_id == session_id:
+            return request_id
+        return f"{session_id}:{request_id}"
+
+    def _find_pending_permission(
+        self,
+        request_id: str,
+        session_id: Any = None,
+    ) -> Tuple[str, Optional[PendingPermission]]:
+        if isinstance(session_id, str) and session_id:
+            matches = [
+                (key, pending)
+                for key, pending in self.pending_permissions.items()
+                if pending.request_id == request_id and pending.session_id == session_id
+            ]
+        else:
+            matches = [
+                (key, pending)
+                for key, pending in self.pending_permissions.items()
+                if pending.request_id == request_id
+            ]
+
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            return "", None
+        return "", None
+
+    @staticmethod
+    def _requires_native_forwarding(agent: AgentType, result: Dict[str, Any]) -> bool:
+        if agent != AgentType.CLAUDE:
+            return False
+        adapter = result.get("evidence", {}).get("adapter")
+        return adapter not in {"fake", "unsupported"}
+
+    async def _require_capability(self, queue: asyncio.Queue, capability: str) -> bool:
+        client = self._client_for_queue(queue)
+        if client.has_capability(capability):
+            return True
+        await self._send_error(queue, "CAPABILITY_DENIED", f"client lacks capability: {capability}")
+        return False
+
+    @staticmethod
+    def _capability_for_command(command_type: str) -> Optional[str]:
+        return {
+            "system.snapshot.request": CAP_SESSION_LIST,
+            "notification.create": CAP_NOTIFICATION_CREATE,
+        }.get(command_type)
+
+    def _command_from_client_identity(
+        self,
+        command: CommandEnvelope,
+        queue: asyncio.Queue,
+    ) -> CommandEnvelope:
+        client = self._client_for_queue(queue)
+        return CommandEnvelope(
+            type=command.type,
+            source=CommandSource(kind=client.kind.value, client_id=client.client_id),
+            payload=dict(command.payload),
+            target=command.target,
+            command_id=command.command_id,
+            timestamp=command.timestamp,
+        )
+
+    def _is_websocket_origin_allowed(self, websocket: Any) -> bool:
+        origin = None
+        headers = getattr(websocket, "request_headers", None)
+        if headers is not None:
+            origin = headers.get("Origin") or headers.get("origin")
+        request = getattr(websocket, "request", None)
+        request_headers = getattr(request, "headers", None)
+        if origin is None and request_headers is not None:
+            origin = request_headers.get("Origin") or request_headers.get("origin")
+        return self.security.origin_allowed(origin)
+
+    @staticmethod
+    def _is_loopback_peer(peer: Any) -> bool:
+        if not peer:
+            return False
+        host = peer[0] if isinstance(peer, tuple) else str(peer)
+        return host in {"127.0.0.1", "::1", "localhost"}
 
     async def _send_error(self, queue: asyncio.Queue, code: str, message: str) -> None:
         payload = {
@@ -385,8 +862,12 @@ class LocalCoreServiceMVP:
 
         # Cleanup agent processes
         for proxy in self.agents.values():
-            for session_id in list(proxy._processes.keys()):
+            session_ids = set(proxy._processes.keys())
+            session_ids.update(getattr(proxy, "_sdk_tasks", {}).keys())
+            for session_id in list(session_ids):
                 await proxy.terminate(session_id)
+        if self.app_store:
+            self.app_store.close()
 
     def _request_shutdown(self) -> None:
         if self._shutdown_event:

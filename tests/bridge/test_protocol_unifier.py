@@ -130,3 +130,46 @@ def test_claude_current_stream_result_success_completes_task():
         "agent": "claude",
         "summary": "done",
     }
+
+
+def test_claude_control_request_preserves_native_metadata():
+    unifier = ProtocolUnifier()
+    native = {
+        "type": "control_request",
+        "subtype": "can_use_tool",
+        "request_id": "req_7",
+        "data": {"tool": "Bash", "description": "Run pytest"},
+        "permission_context": {"cwd": "C:/repo"},
+    }
+
+    event = unifier.claude_to_unified(json.dumps(native), "sess_7")
+
+    assert event["type"] == "permission_request"
+    assert event["request_id"] == "req_7"
+    assert event["tool"] == "Bash"
+    assert event["description"] == "Run pytest"
+    assert event["native"] == native
+
+
+def test_permission_decision_encodes_claude_control_response_with_metadata():
+    unifier = ProtocolUnifier()
+    native = {
+        "type": "control_request",
+        "subtype": "can_use_tool",
+        "request_id": "req_8",
+        "data": {"tool": "Edit"},
+    }
+
+    response = unifier.encode_permission_decision(
+        agent="claude",
+        request_id="req_8",
+        approved=True,
+        native_request=native,
+    )
+
+    assert response == {
+        "type": "control_response",
+        "request_id": "req_8",
+        "response": {"approved": True},
+        "metadata": {"source_type": "control_request", "source_subtype": "can_use_tool"},
+    }

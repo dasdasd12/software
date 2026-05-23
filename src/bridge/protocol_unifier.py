@@ -128,6 +128,7 @@ class ProtocolUnifier:
                     request_id=obj.get("request_id", f"req_{int(time.time())}"),
                     tool=data.get("tool", "unknown"),
                     description=data.get("description", "Claude requests tool access."),
+                    native=obj,
                 )
 
         # Claude error events
@@ -180,6 +181,34 @@ class ProtocolUnifier:
         except json.JSONDecodeError:
             return None
 
+    def encode_permission_decision(
+        self,
+        agent: Any,
+        request_id: str,
+        approved: bool,
+        native_request: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Encode a local permission decision back to a provider-native payload."""
+        agent_value = agent.value if hasattr(agent, "value") else str(agent)
+        if agent_value == AgentType.CLAUDE.value:
+            response: Dict[str, Any] = {
+                "type": "control_response",
+                "request_id": request_id,
+                "response": {"approved": bool(approved)},
+            }
+            if native_request:
+                response["metadata"] = {
+                    "source_type": native_request.get("type"),
+                    "source_subtype": native_request.get("subtype"),
+                }
+            return response
+
+        return {
+            "type": "permission_response",
+            "request_id": request_id,
+            "approved": bool(approved),
+        }
+
     # ------------------------------------------------------------------ #
     #  Internal builders
     # ------------------------------------------------------------------ #
@@ -221,8 +250,9 @@ class ProtocolUnifier:
         }
 
     def _mk_permission_request(self, session_id: str, agent: AgentType,
-                               request_id: str, tool: str, description: str) -> Dict[str, Any]:
-        return {
+                               request_id: str, tool: str, description: str,
+                               native: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        payload = {
             "type": "permission_request",
             "request_id": request_id,
             "session_id": session_id,
@@ -231,3 +261,6 @@ class ProtocolUnifier:
             "description": description,
             "timeout_sec": 30,
         }
+        if native is not None:
+            payload["native"] = native
+        return payload

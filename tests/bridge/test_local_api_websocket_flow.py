@@ -39,9 +39,12 @@ class FakeProxy:
         return {
             "accepted": True,
             "forwarded": False,
-            "session_id": session_id,
-            "request_id": request_id,
-            "approved": approved,
+            "evidence": {
+                "adapter": "fake",
+                "session_id": session_id,
+                "request_id": request_id,
+                "approved": approved,
+            },
         }
 
     async def _emit_events(self, session_id):
@@ -137,6 +140,78 @@ def test_list_sessions_over_local_api_returns_protocol_fields():
     asyncio.run(with_local_api(run_client))
 
 
+def test_structured_snapshot_command_returns_snapshot_with_runtime_state():
+    async def run_client(service, uri):
+        session = service.session_mgr.create(AgentType.CODEX)
+        service._on_agent_event(service.unifier.encode_device_message({
+            "type": "permission_request",
+            "request_id": "req_snapshot",
+            "session_id": session.session_id,
+            "agent": "codex",
+            "tool": "shell",
+            "description": "Run command",
+            "timeout_sec": 30,
+        }))
+
+        async with websockets.connect(uri) as ws:
+            await ws.send(json.dumps({
+                "type": "command",
+                "command": {
+                    "command_id": "cmd_snapshot",
+                    "type": "system.snapshot.request",
+                    "source": {"kind": "test-client", "client_id": "pytest"},
+                    "payload": {},
+                },
+            }))
+            payload = await recv_json(ws)
+
+            assert payload["type"] == "snapshot"
+            assert payload["command_id"] == "cmd_snapshot"
+            snapshot = payload["snapshot"]
+            assert session.session_id in snapshot["sessions"]
+            assert snapshot["sessions"][session.session_id]["agent"] == "codex"
+            assert snapshot["permissions"][0]["request_id"] == "req_snapshot"
+            assert snapshot["permissions"][0]["session_id"] == session.session_id
+            assert snapshot["permissions"][0]["agent"] == "codex"
+            assert snapshot["permissions"][0]["timeout_sec"] == 30
+            assert set(snapshot.keys()) >= {
+                "sessions", "permissions", "devices", "profiles", "notifications"
+            }
+
+    asyncio.run(with_local_api(run_client))
+
+
+def test_structured_command_publishes_event_message_to_connected_clients():
+    async def run_client(service, uri):
+        async with websockets.connect(uri) as ws:
+            await ws.send(json.dumps({
+                "type": "command",
+                "command": {
+                    "command_id": "cmd_note",
+                    "type": "notification.create",
+                    "source": {"kind": "test-client", "client_id": "pytest"},
+                    "payload": {
+                        "notification_id": "note_ws",
+                        "level": "info",
+                        "message": "Ready",
+                    },
+                },
+            }))
+            payload = await recv_json(ws)
+
+            assert payload["type"] == "event"
+            event = payload["event"]
+            assert event["type"] == "notification.created"
+            assert event["seq"] == 1
+            assert event["payload"] == {
+                "notification_id": "note_ws",
+                "level": "info",
+                "message": "Ready",
+            }
+
+    asyncio.run(with_local_api(run_client))
+
+
 def test_agent_launch_uses_fake_proxy_and_broadcasts_events():
     async def run_client(service, uri):
         async with websockets.connect(uri) as ws:
@@ -183,6 +258,7 @@ def test_permission_response_round_trip_over_local_api():
             assert ack["request_id"] == "req_ws"
             assert ack["session_id"] == session.session_id
             assert ack["approved"] is True
+            assert ack["evidence"]["adapter"] == "fake"
             assert "req_ws" not in service.pending_permissions
             assert service.agents[AgentType.CODEX].permission_responses == [
                 (session.session_id, "req_ws", True)

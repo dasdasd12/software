@@ -40,6 +40,8 @@ desktop.ini
 *.bak
 *.swp
 *~
+data/
+sessions/
 
 # Docs（可选，如果你不想把大二进制文件进仓库）
 # *.pdf

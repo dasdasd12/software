@@ -8,14 +8,19 @@ dongle transports.
 import asyncio
 import base64
 import json
-from dataclasses import dataclass
-from typing import Iterable, Optional, Protocol, Set
+from dataclasses import dataclass, field
+from typing import Any, Dict, Iterable, Optional, Set
+
+try:
+    from typing import Protocol
+except ImportError:  # pragma: no cover - Python < 3.8 compatibility
+    from typing_extensions import Protocol
 
 
 DEFAULT_PROTOCOL_VERSION = 1
 
 
-class DeviceTransportError(RuntimeError):
+class DeviceTransportError(ValueError):
     """Structured transport error suitable for tests and diagnostics."""
 
     def __init__(
@@ -26,6 +31,7 @@ class DeviceTransportError(RuntimeError):
         device_id: str,
         frame_type: Optional[str] = None,
         recoverable: bool = True,
+        details: Optional[Dict[str, Any]] = None,
     ):
         super().__init__(message)
         self.code = code
@@ -34,9 +40,10 @@ class DeviceTransportError(RuntimeError):
         self.device_id = device_id
         self.frame_type = frame_type
         self.recoverable = recoverable
+        self.details = dict(details or {})
 
     def to_dict(self):
-        return {
+        data = {
             "code": self.code,
             "message": self.message,
             "transport_kind": self.transport_kind,
@@ -44,6 +51,8 @@ class DeviceTransportError(RuntimeError):
             "frame_type": self.frame_type,
             "recoverable": self.recoverable,
         }
+        data.update(self.details)
+        return data
 
 
 @dataclass(frozen=True)
@@ -83,6 +92,14 @@ class DeviceCapabilities:
     protocol_version: int
     max_payload_size: int
     supported_message_types: Set[str]
+    hardware_revision: str = "simulated"
+    firmware_version: str = "simulated"
+    device_family: str = "simulated"
+    supported_profile_features: Set[str] = field(default_factory=set)
+    supported_screen_widgets: Set[str] = field(default_factory=set)
+    supports_agent_slots: bool = False
+    supports_config_sync: bool = False
+    supports_firmware_update: bool = False
 
 
 @dataclass(frozen=True)
@@ -122,21 +139,52 @@ class SimulatedTransport:
         protocol_version: int = DEFAULT_PROTOCOL_VERSION,
         max_payload_size: int = 1024,
         supported_message_types: Optional[Iterable[str]] = None,
+        hardware_revision: str = "simulated",
+        firmware_version: str = "simulated",
+        device_family: str = "simulated",
+        supported_profile_features: Optional[Iterable[str]] = None,
+        supported_screen_widgets: Optional[Iterable[str]] = None,
+        supports_agent_slots: bool = False,
+        supports_config_sync: bool = False,
+        supports_firmware_update: bool = False,
     ):
         self._device_id = device_id
         self._protocol_version = protocol_version
         self._max_payload_size = max_payload_size
         self._supported_message_types = set(supported_message_types or {
             "HELLO_REQ",
+            "HELLO_RESP",
+            "CAPABILITIES_RESP",
+            "SLOT_MAP_BEGIN",
+            "SLOT_MAP_ITEM",
+            "SLOT_MAP_END",
+            "DEVICE_SNAPSHOT_BEGIN",
+            "DEVICE_SNAPSHOT_END",
+            "SCREEN_FOCUS_SET",
+            "NOTIFICATION_PUSH",
             "HEARTBEAT",
             "PERMISSION_REQUEST_PUSH",
             "PERMISSION_RESPONSE_CMD",
+            "PROFILE_SYNC_BEGIN",
+            "PROFILE_SYNC_CHUNK",
+            "PROFILE_SYNC_END",
+            "PROFILE_SUMMARY_SET",
             "ERROR_RESP",
         })
-        self._queue: asyncio.Queue[DeviceFrame] = asyncio.Queue()
+        self._hardware_revision = hardware_revision
+        self._firmware_version = firmware_version
+        self._device_family = device_family
+        self._supported_profile_features = set(supported_profile_features or set())
+        self._supported_screen_widgets = set(supported_screen_widgets or set())
+        self._supports_agent_slots = supports_agent_slots
+        self._supports_config_sync = supports_config_sync
+        self._supports_firmware_update = supports_firmware_update
+        self._queue: Optional[asyncio.Queue[DeviceFrame]] = None
         self._is_open = False
 
     async def open(self) -> None:
+        if self._queue is None:
+            self._queue = asyncio.Queue()
         self._is_open = True
 
     async def close(self) -> None:
@@ -153,10 +201,14 @@ class SimulatedTransport:
                 frame_type=frame.frame_type,
                 recoverable=True,
             )
+        if self._queue is None:
+            self._queue = asyncio.Queue()
         await self._queue.put(frame)
 
     async def read_frame(self) -> DeviceFrame:
         self._ensure_open()
+        if self._queue is None:
+            self._queue = asyncio.Queue()
         return await self._queue.get()
 
     def get_capabilities(self) -> DeviceCapabilities:
@@ -166,6 +218,14 @@ class SimulatedTransport:
             protocol_version=self._protocol_version,
             max_payload_size=self._max_payload_size,
             supported_message_types=set(self._supported_message_types),
+            hardware_revision=self._hardware_revision,
+            firmware_version=self._firmware_version,
+            device_family=self._device_family,
+            supported_profile_features=set(self._supported_profile_features),
+            supported_screen_widgets=set(self._supported_screen_widgets),
+            supports_agent_slots=self._supports_agent_slots,
+            supports_config_sync=self._supports_config_sync,
+            supports_firmware_update=self._supports_firmware_update,
         )
 
     def get_status(self) -> DeviceStatus:
@@ -173,7 +233,7 @@ class SimulatedTransport:
             device_id=self._device_id,
             transport_kind="simulated",
             is_open=self._is_open,
-            queued_frames=self._queue.qsize(),
+            queued_frames=self._queue.qsize() if self._queue is not None else 0,
         )
 
     def _ensure_open(self, frame_type: Optional[str] = None) -> None:

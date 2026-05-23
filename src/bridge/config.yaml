@@ -25,8 +25,8 @@ agents:
     enabled: true
     # Path to Claude Code CLI (leave empty to use PATH)
     executable: ""
-    # Launch mode: "sdk_url" (WebSocket) or "headless" (stdio)
-    mode: "headless"
+    # Launch mode: "agent_sdk" (Python SDK permission callbacks), "headless" (stdio), or "sdk_url" (remote worker only)
+    mode: "agent_sdk"
     # Additional CLI arguments. The service adds -p --output-format stream-json --verbose.
     args: []
     # Environment variables
@@ -57,13 +57,18 @@ agents:
 session:
   # Maximum concurrent sessions per agent
   max_concurrent: 8
-  # Persist completed sessions to disk
-  persist_to_disk: true
+  # Legacy JSON session persistence; product state is stored in SQLite below.
+  persist_to_disk: false
   persist_dir: "./sessions"
   # Auto-cleanup completed/failed sessions after N hours
   cleanup_after_hours: 24
   # LRU cache size (must match device-side AGENT_SESSION_CACHE_MAX)
   cache_size: 50
+
+# SQLite app store for product state and audit history.
+persistence:
+  enabled: true
+  app_store_path: "./data/app.db"
 
 # Protocol unifier settings
 unifier:
