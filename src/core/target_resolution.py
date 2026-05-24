@@ -87,10 +87,10 @@ class TargetResolver:
                 continue
             match = self._first(
                 pending,
-                lambda item, field=field, value=value: self._permission_matches_focus_scope(
+                lambda item, field=field: self._permission_matches_focus_scope(
                     item,
+                    focus,
                     field,
-                    value,
                 ),
             )
             if match:
@@ -192,17 +192,39 @@ class TargetResolver:
         status = str(record.get("status", "pending")).lower()
         return status in {"pending", "waiting", "waiting_permission"}
 
-    @staticmethod
     def _permission_matches_focus_scope(
+        self,
         permission: Mapping[str, Any],
+        focus: Any,
         focus_field: str,
-        focus_value: str,
     ) -> bool:
+        focus_value = self._focus_value(focus, focus_field)
         if permission.get(focus_field) != focus_value:
             return False
+        if focus_field == "run_id":
+            return (
+                self._permission_parent_matches_focus(permission, focus, "session_id")
+                and self._permission_parent_matches_focus(permission, focus, "instance_id")
+            )
+        if focus_field == "session_id":
+            return (
+                not permission.get("run_id")
+                and self._permission_parent_matches_focus(permission, focus, "instance_id")
+            )
         if focus_field == "instance_id":
             return not permission.get("session_id") and not permission.get("run_id")
         return True
+
+    def _permission_parent_matches_focus(
+        self,
+        permission: Mapping[str, Any],
+        focus: Any,
+        parent_field: str,
+    ) -> bool:
+        permission_value = permission.get(parent_field)
+        if not permission_value:
+            return True
+        return permission_value == self._focus_value(focus, parent_field)
 
     @staticmethod
     def _is_global_permission(permission: Mapping[str, Any]) -> bool:

@@ -227,6 +227,110 @@ def test_focused_permission_unresolved_when_only_other_scoped_permissions_exist(
     assert result.code == "UNRESOLVED_TARGET"
 
 
+def test_focused_permission_rejects_run_id_collision_with_parent_scope_mismatch():
+    resolver = TargetResolver()
+
+    result = resolver.resolve(
+        "focused_permission",
+        focus=ScreenFocus(
+            device_id="kbd_01",
+            mode="run",
+            instance_id="codex-software",
+            session_id="sess_01",
+            run_id="run_01",
+        ),
+        permissions=[
+            {
+                "request_id": "perm_wrong_parent",
+                "instance_id": "claude-hardware",
+                "session_id": "sess_other",
+                "run_id": "run_01",
+                "priority": 100,
+            }
+        ],
+    )
+
+    assert not result.resolved
+    assert result.code == "UNRESOLVED_TARGET"
+
+
+def test_focused_permission_rejects_session_id_match_with_instance_mismatch():
+    resolver = TargetResolver()
+
+    result = resolver.resolve(
+        "focused_permission",
+        focus=ScreenFocus(
+            device_id="kbd_01",
+            mode="session",
+            instance_id="codex-software",
+            session_id="sess_01",
+        ),
+        permissions=[
+            {
+                "request_id": "perm_wrong_instance",
+                "instance_id": "claude-hardware",
+                "session_id": "sess_01",
+                "priority": 100,
+            }
+        ],
+    )
+
+    assert not result.resolved
+    assert result.code == "UNRESOLVED_TARGET"
+
+
+def test_focused_permission_resolves_valid_run_scope_with_matching_parents():
+    resolver = TargetResolver()
+
+    result = resolver.resolve(
+        "focused_permission",
+        focus=ScreenFocus(
+            device_id="kbd_01",
+            mode="run",
+            instance_id="codex-software",
+            session_id="sess_01",
+            run_id="run_01",
+        ),
+        permissions=[
+            {
+                "request_id": "perm_run",
+                "instance_id": "codex-software",
+                "session_id": "sess_01",
+                "run_id": "run_01",
+                "priority": 100,
+            }
+        ],
+    )
+
+    assert result.resolved
+    assert result.target["permission_id"] == "perm_run"
+
+
+def test_focused_permission_resolves_valid_session_scope_with_matching_parent():
+    resolver = TargetResolver()
+
+    result = resolver.resolve(
+        "focused_permission",
+        focus=ScreenFocus(
+            device_id="kbd_01",
+            mode="session",
+            instance_id="codex-software",
+            session_id="sess_01",
+        ),
+        permissions=[
+            {
+                "request_id": "perm_session",
+                "instance_id": "codex-software",
+                "session_id": "sess_01",
+                "priority": 100,
+            }
+        ],
+    )
+
+    assert result.resolved
+    assert result.target["permission_id"] == "perm_session"
+
+
 def test_focused_run_requires_explicit_active_run_for_session_focus():
     resolver = TargetResolver()
     focus = ScreenFocus(device_id="kbd_01", mode="session", session_id="sess_01")
