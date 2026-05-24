@@ -33,8 +33,6 @@ SUPPORTED_AGENT_TARGETS = {
     "focused_session",
     "focused_run",
     "focused_permission",
-    "workspace_default",
-    "preferred_instance",
 }
 AGENT_ACTION_TARGETS = {
     "agent.permission.respond": {"focused_permission"},

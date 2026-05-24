@@ -10,7 +10,7 @@ BRIDGE_DIR = Path(__file__).resolve().parents[2] / "src" / "bridge"
 sys.path.insert(0, str(BRIDGE_DIR))
 
 from server import LocalCoreServiceMVP  # noqa: E402
-from session_manager import AgentType  # noqa: E402
+from session_manager import AgentState, AgentType  # noqa: E402
 
 
 class FakeProxy:
@@ -18,6 +18,7 @@ class FakeProxy:
         self.service = service
         self.agent_type = agent_type
         self.launched = []
+        self.interrupted = []
         self.permission_responses = []
 
     def is_available(self):
@@ -32,6 +33,7 @@ class FakeProxy:
         return await self.launch(session_id, "")
 
     async def send_interrupt(self, session_id):
+        self.interrupted.append(session_id)
         return True
 
     async def handle_permission_response(self, session_id, request_id, approved):
@@ -169,13 +171,33 @@ def test_structured_snapshot_command_returns_snapshot_with_runtime_state():
             assert payload["command_id"] == "cmd_snapshot"
             snapshot = payload["snapshot"]
             assert session.session_id in snapshot["sessions"]
+            assert "codex-default" in snapshot["agents"]
+            assert snapshot["agents"]["codex-default"] == {
+                "instance_id": "codex-default",
+                "provider_id": "codex",
+                "agent": "codex",
+                "label": "Codex",
+                "status": "available",
+            }
             assert snapshot["sessions"][session.session_id]["agent"] == "codex"
+            assert snapshot["sessions"][session.session_id]["provider_id"] == "codex"
+            assert snapshot["sessions"][session.session_id]["instance_id"] == "codex-default"
+            active_run_id = snapshot["sessions"][session.session_id]["active_run_id"]
+            assert active_run_id in snapshot["runs"]
+            assert snapshot["runs"][active_run_id] == {
+                "run_id": active_run_id,
+                "session_id": session.session_id,
+                "instance_id": "codex-default",
+                "provider_id": "codex",
+                "agent": "codex",
+                "state": "WAITING_PERMISSION",
+            }
             assert snapshot["permissions"][0]["request_id"] == "req_snapshot"
             assert snapshot["permissions"][0]["session_id"] == session.session_id
             assert snapshot["permissions"][0]["agent"] == "codex"
             assert snapshot["permissions"][0]["timeout_sec"] == 30
             assert set(snapshot.keys()) >= {
-                "sessions", "permissions", "devices", "profiles", "notifications"
+                "agents", "sessions", "runs", "permissions", "devices", "profiles", "notifications"
             }
 
     asyncio.run(with_local_api(run_client))
@@ -239,6 +261,106 @@ def test_non_permission_structured_command_unresolved_target_returns_error_not_e
             except asyncio.TimeoutError:
                 extra = None
             assert extra is None
+
+    asyncio.run(with_local_api(run_client))
+
+
+def test_structured_interrupt_resolves_focused_run_from_synced_session_state():
+    async def run_client(service, uri):
+        session = service.session_mgr.create(AgentType.CODEX)
+        service.session_mgr.update_state(session.session_id, AgentState.SUBMITTED)
+
+        async with websockets.connect(uri) as ws:
+            await ws.send(json.dumps({
+                "type": "command",
+                "command": {
+                    "command_id": "cmd_focus_session",
+                    "type": "agent.focus.set",
+                    "source": {
+                        "kind": "keyboard-device",
+                        "client_id": "kbd_01",
+                        "device_id": "kbd_01",
+                    },
+                    "target": {"device_id": "legacy-local-api"},
+                    "payload": {
+                        "mode": "session",
+                        "session_id": session.session_id,
+                    },
+                },
+            }))
+            focus_event = await recv_json(ws)
+            assert focus_event["type"] == "event"
+            assert focus_event["event"]["type"] == "agent.focus.changed"
+
+            await ws.send(json.dumps({
+                "type": "command",
+                "command": {
+                    "command_id": "cmd_interrupt_focused_run",
+                    "type": "agent.run.interrupt",
+                    "source": {
+                        "kind": "keyboard-device",
+                        "client_id": "kbd_01",
+                        "device_id": "kbd_01",
+                    },
+                    "target": "focused_run",
+                    "payload": {},
+                },
+            }))
+            payload = await recv_json(ws)
+
+            assert payload["type"] == "event"
+            assert payload["event"]["type"] == "agent.run.interrupted"
+            assert payload["event"]["payload"]["session_id"] == session.session_id
+            assert service.agents[AgentType.CODEX].interrupted == [session.session_id]
+
+    asyncio.run(with_local_api(run_client))
+
+
+def test_structured_launch_resolves_active_agent_to_synced_default_instance():
+    async def run_client(service, uri):
+        async with websockets.connect(uri) as ws:
+            await ws.send(json.dumps({
+                "type": "command",
+                "command": {
+                    "command_id": "cmd_focus_codex",
+                    "type": "agent.focus.set",
+                    "source": {
+                        "kind": "keyboard-device",
+                        "client_id": "kbd_01",
+                        "device_id": "kbd_01",
+                    },
+                    "target": {"device_id": "legacy-local-api"},
+                    "payload": {
+                        "mode": "instance",
+                        "instance_id": "codex-default",
+                    },
+                },
+            }))
+            focus_event = await recv_json(ws)
+            assert focus_event["type"] == "event"
+            assert focus_event["event"]["type"] == "agent.focus.changed"
+
+            await ws.send(json.dumps({
+                "type": "command",
+                "command": {
+                    "command_id": "cmd_launch_active_agent",
+                    "type": "agent.session.launch_or_resume",
+                    "source": {
+                        "kind": "keyboard-device",
+                        "client_id": "kbd_01",
+                        "device_id": "kbd_01",
+                    },
+                    "target": "active_agent",
+                    "payload": {"context": "from active agent"},
+                },
+            }))
+            payload = await recv_json(ws)
+
+            assert payload["type"] == "event"
+            assert payload["event"]["type"] == "agent.session.created"
+            assert service.agents[AgentType.CODEX].launched == [
+                (payload["event"]["payload"]["session_id"], "from active agent")
+            ]
 
     asyncio.run(with_local_api(run_client))
 

@@ -78,6 +78,17 @@ class PendingPermission:
 class LocalCoreServiceMVP:
     """Local Core Service MVP for local APIs, sessions, permissions, and agents."""
 
+    _COMPAT_ACTIVE_RUN_STATES = {
+        AgentState.SUBMITTED,
+        AgentState.WORKING,
+        AgentState.RUNNING,
+        AgentState.THINKING,
+        AgentState.EXECUTING,
+        AgentState.WAITING_PERMISSION,
+        AgentState.WAITING_INPUT,
+        AgentState.PAUSED,
+    }
+
     def __init__(self, config: Dict[str, Any]):
         self.cfg = config
         self._setup_logging()
@@ -572,20 +583,50 @@ class LocalCoreServiceMVP:
     def _sync_runtime_state(self) -> None:
         self._prune_expired_permissions()
         store = self.runtime.state_store
-        store.sessions = {
-            session.session_id: session.to_dict()
-            for session in self.session_mgr.list_all()
+        store.agents = {
+            record["instance_id"]: record
+            for record in (
+                self._default_instance_record(agent, proxy)
+                for agent, proxy in self.agents.items()
+            )
         }
+        sessions: Dict[str, Dict[str, Any]] = {}
+        runs: Dict[str, Dict[str, Any]] = {}
+        pending_run_ids = self._pending_permission_run_ids_by_session()
+        for session in self.session_mgr.list_all():
+            provider_id = session.agent.value
+            instance_id = self._default_instance_id(session.agent)
+            session_record = dict(session.to_dict())
+            session_record.update({
+                "provider_id": provider_id,
+                "agent": provider_id,
+                "instance_id": instance_id,
+            })
+            run_id = self._compat_active_run_id(session, pending_run_ids)
+            if run_id:
+                session_record["active_run_id"] = run_id
+                runs[run_id] = {
+                    "run_id": run_id,
+                    "session_id": session.session_id,
+                    "instance_id": instance_id,
+                    "provider_id": provider_id,
+                    "agent": provider_id,
+                    "state": session.state.value,
+                }
+            sessions[session.session_id] = session_record
+        store.sessions = sessions
+        store.runs = runs
         store.permissions = {
             request_id: {
                 "request_id": pending.request_id,
                 "session_id": pending.session_id,
+                "provider_id": pending.agent.value,
                 "agent": pending.agent.value,
                 "timeout_sec": pending.timeout_sec,
                 "risk_level": pending.risk_level.value,
                 "tool": pending.tool,
                 "description": pending.description,
-                "run_id": pending.run_id,
+                "run_id": self._pending_run_id(pending),
             }
             for request_id, pending in self.pending_permissions.items()
         }
@@ -593,6 +634,60 @@ class LocalCoreServiceMVP:
             device_id: record.to_dict()
             for device_id, record in self.runtime.device_manager.list_records().items()
         }
+
+    def _default_instance_record(self, agent: AgentType, proxy: AgentProxy) -> Dict[str, Any]:
+        status = "available"
+        is_available = getattr(proxy, "is_available", None)
+        if callable(is_available) and not is_available():
+            status = "unavailable"
+        return {
+            "instance_id": self._default_instance_id(agent),
+            "provider_id": agent.value,
+            "agent": agent.value,
+            "label": agent.value.capitalize(),
+            "status": status,
+        }
+
+    def _default_instance_id(self, agent: AgentType) -> str:
+        agent_cfg = self.cfg.get("agents", {}).get(agent.value, {})
+        instance_id = agent_cfg.get("instance_id") if isinstance(agent_cfg, dict) else None
+        if isinstance(instance_id, str) and instance_id:
+            return instance_id
+        return f"{agent.value}-default"
+
+    def _pending_permission_run_ids_by_session(self) -> Dict[str, str]:
+        run_ids: Dict[str, str] = {}
+        for pending in self.pending_permissions.values():
+            run_id = self._pending_run_id(pending)
+            if run_id:
+                run_ids.setdefault(pending.session_id, run_id)
+        return run_ids
+
+    def _compat_active_run_id(
+        self,
+        session: Session,
+        pending_run_ids: Dict[str, str],
+    ) -> Optional[str]:
+        if session.state not in self._COMPAT_ACTIVE_RUN_STATES:
+            return None
+        return pending_run_ids.get(session.session_id) or f"run_{session.session_id}"
+
+    @staticmethod
+    def _pending_run_id(pending: PendingPermission) -> Optional[str]:
+        if pending.run_id:
+            return pending.run_id
+        native = pending.native if isinstance(pending.native, dict) else {}
+        for key in ("run_id", "runId"):
+            value = native.get(key)
+            if isinstance(value, str) and value:
+                return value
+        params = native.get("params")
+        if isinstance(params, dict):
+            for key in ("run_id", "runId"):
+                value = params.get(key)
+                if isinstance(value, str) and value:
+                    return value
+        return None
 
     def _broadcast_core_event(self, event) -> None:
         payload = json.dumps({

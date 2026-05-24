@@ -278,6 +278,24 @@ def test_profile_validation_accepts_active_agent_alias():
     validate_profile(profile, layout_keys={"K_ENTER"})
 
 
+def test_profile_validation_rejects_unimplemented_launch_selectors():
+    for selector in ("workspace_default", "preferred_instance"):
+        profile = Profile(
+            id=f"{selector}_profile",
+            name=f"{selector} Profile",
+            target_device_family="ai_keyboard_ch32h417",
+            layers=[{"id": "layer_fn"}],
+            agent_bindings=[AgentBinding(
+                id=f"launch_{selector}",
+                trigger=BindingTrigger(source="key", key="K_ENTER", event="press", layer="layer_fn"),
+                action=KeyboardAction(type="agent.session.launch_or_resume", target=selector),
+            )],
+        )
+
+        with pytest.raises(ProfileValidationError, match="unsupported|incompatible"):
+            validate_profile(profile, layout_keys={"K_ENTER"})
+
+
 def test_profile_validation_rejects_interrupt_with_active_agent_alias():
     profile = Profile(
         id="interrupt_active_agent_profile",
