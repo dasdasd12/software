@@ -192,19 +192,37 @@ def test_agent_actions_in_keymap_and_layers_are_service_required():
     profile = _profile(
         keymap={
             "physical_layout_id": "ansi_75_ai_keyboard",
-            "bindings": {"K_ESC": {"type": "agent.run.interrupt", "target": "focused_run"}},
+            "bindings": {
+                "K_ESC": KeyboardAction(
+                    type="agent.run.interrupt",
+                    target="focused_run",
+                    payload={
+                        "action_type": "spoofed.action",
+                        "target": "spoofed_target",
+                        "key_id": "K_A",
+                        "layer_id": "spoofed_layer",
+                        "reason": "manual",
+                    },
+                )
+            },
         },
         layers=[
             {
                 "id": "layer_fn",
                 "activation": {"type": "hold_key", "key": "K_FN"},
                 "keymap": {
-                    "K_ENTER": {
-                        "type": "agent.permission.respond",
-                        "target": "focused_permission",
-                        "decision": "approve",
-                        "risk_ack": "low",
-                    }
+                    "K_ENTER": KeyboardAction(
+                        type="agent.permission.respond",
+                        target="focused_permission",
+                        payload={
+                            "action_type": "spoofed.action",
+                            "target": "spoofed_target",
+                            "key_id": "K_A",
+                            "layer_id": "spoofed_layer",
+                            "decision": "approve",
+                            "risk_ack": "low",
+                        },
+                    )
                 },
             }
         ],
@@ -223,6 +241,7 @@ def test_agent_actions_in_keymap_and_layers_are_service_required():
             "key_id": "K_ESC",
             "action_type": "agent.run.interrupt",
             "target": "focused_run",
+            "reason": "manual",
         },
         {
             "layer_id": "layer_fn",
@@ -267,7 +286,9 @@ def test_lighting_json_rejects_non_boolean_enabled_value():
 @pytest.mark.parametrize(
     "lighting_config",
     [
+        {"per_key": []},
         {"per_key": {"K_A": 1}},
+        {"layers": [{"id": "base", "per_key": []}]},
         {"layers": [{"id": "base", "per_key": {"K_A": 1}}]},
     ],
 )

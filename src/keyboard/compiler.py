@@ -94,11 +94,16 @@ def _service_required_action(
     key_id: Optional[str] = None,
     layer_id: Optional[str] = None,
 ) -> Dict[str, Any]:
+    reserved_fields = {"action_type", "target", "key_id", "layer_id"}
     data: Dict[str, Any] = {
+        key: value
+        for key, value in action.payload.items()
+        if key not in reserved_fields
+    }
+    data.update({
         "action_type": action.type,
         "target": action.target,
-    }
-    data.update(dict(action.payload))
+    })
     if layer_id is not None:
         data["layer_id"] = layer_id
     if key_id is not None:

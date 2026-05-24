@@ -46,7 +46,10 @@ class LightingConfig:
 def lighting_layer_from_dict(data: Dict[str, Any]) -> LightingLayer:
     if not isinstance(data, dict):
         raise LightingConfigParseError("lighting_config.layers items must be objects")
-    per_key = _parse_per_key(data.get("per_key") or {}, "lighting_config.layers.per_key")
+    per_key = _parse_per_key(
+        data["per_key"] if "per_key" in data else {},
+        "lighting_config.layers.per_key",
+    )
     return LightingLayer(
         id=data.get("id", ""),
         effect=data.get("effect", "static"),
@@ -65,7 +68,7 @@ def lighting_config_from_dict(data: Optional[Dict[str, Any]]) -> Optional[Lighti
     if not isinstance(enabled, bool):
         raise LightingConfigParseError("lighting_config.enabled must be a boolean")
     if "per_key" in data:
-        _parse_per_key(data.get("per_key") or {}, "lighting_config.per_key")
+        _parse_per_key(data["per_key"], "lighting_config.per_key")
     layers = data.get("layers", [])
     if not isinstance(layers, list):
         raise LightingConfigParseError("lighting_config.layers must be a list")
