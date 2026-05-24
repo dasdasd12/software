@@ -42,6 +42,7 @@ desktop.ini
 *~
 data/
 sessions/
+.worktrees/
 
 # Docs（可选，如果你不想把大二进制文件进仓库）
 # *.pdf
