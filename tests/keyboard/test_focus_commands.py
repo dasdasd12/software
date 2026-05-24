@@ -175,6 +175,90 @@ def test_focused_permission_resolves_by_run_session_instance_then_priority():
     assert global_result.target["permission_id"] == "perm_global"
 
 
+def test_focused_permission_global_fallback_never_selects_other_scoped_permission():
+    resolver = TargetResolver()
+    permissions = [
+        {
+            "request_id": "perm_other_session",
+            "instance_id": "codex-software",
+            "session_id": "sess_other",
+            "priority": 100,
+        },
+        {"request_id": "perm_global", "priority": 1},
+    ]
+
+    result = resolver.resolve(
+        "focused_permission",
+        focus=ScreenFocus(
+            device_id="kbd_01",
+            mode="session",
+            instance_id="codex-software",
+            session_id="sess_focus",
+        ),
+        permissions=permissions,
+    )
+
+    assert result.resolved
+    assert result.target["permission_id"] == "perm_global"
+
+
+def test_focused_permission_unresolved_when_only_other_scoped_permissions_exist():
+    resolver = TargetResolver()
+
+    result = resolver.resolve(
+        "focused_permission",
+        focus=ScreenFocus(
+            device_id="kbd_01",
+            mode="session",
+            instance_id="codex-software",
+            session_id="sess_focus",
+        ),
+        permissions=[
+            {
+                "request_id": "perm_other_session",
+                "instance_id": "codex-software",
+                "session_id": "sess_other",
+                "priority": 100,
+            }
+        ],
+    )
+
+    assert not result.resolved
+    assert result.code == "UNRESOLVED_TARGET"
+
+
+def test_focused_run_requires_explicit_active_run_for_session_focus():
+    resolver = TargetResolver()
+    focus = ScreenFocus(device_id="kbd_01", mode="session", session_id="sess_01")
+    runs = {
+        "run_01": {"run_id": "run_01", "session_id": "sess_01"},
+        "run_02": {"run_id": "run_02", "session_id": "sess_01"},
+    }
+
+    unresolved = resolver.resolve(
+        "focused_run",
+        focus=focus,
+        sessions={"sess_01": {"session_id": "sess_01"}},
+        runs=runs,
+    )
+    active = resolver.resolve(
+        "focused_run",
+        focus=focus,
+        sessions={"sess_01": {"session_id": "sess_01", "active_run_id": "run_02"}},
+        runs=runs,
+    )
+
+    assert not unresolved.resolved
+    assert active.resolved
+    assert active.target["run_id"] == "run_02"
+
+
+def test_empty_snapshot_contains_focus_map():
+    runtime = build_runtime()
+
+    assert runtime.snapshot().to_dict()["focus"] == {}
+
+
 def test_unresolved_focused_run_and_session_emit_structured_error_events():
     runtime = build_runtime()
     calls = []

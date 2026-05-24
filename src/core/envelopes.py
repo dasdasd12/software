@@ -8,7 +8,7 @@ semantics.
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, Mapping, Optional, Union
 
 
 def _new_id(prefix: str) -> str:
@@ -46,7 +46,7 @@ class CommandEnvelope:
     type: str
     source: CommandSource
     payload: Dict[str, Any] = field(default_factory=dict)
-    target: Optional[Dict[str, Any]] = None
+    target: Optional[Union[Dict[str, Any], str]] = None
     command_id: str = field(default_factory=lambda: _new_id("cmd"))
     timestamp: int = field(default_factory=lambda: int(time.time()))
 
@@ -58,7 +58,9 @@ class CommandEnvelope:
             "payload": dict(self.payload),
             "timestamp": self.timestamp,
         }
-        if self.target is not None:
+        if isinstance(self.target, str):
+            data["target"] = self.target
+        elif self.target is not None:
             data["target"] = dict(self.target)
         return data
 
@@ -73,10 +75,13 @@ class CommandEnvelope:
             raise ValueError("command type is required")
         if not isinstance(payload, dict):
             raise ValueError("command payload must be an object")
+        target = data.get("target")
+        if target is not None and not isinstance(target, (dict, str)):
+            raise ValueError("command target must be an object, string, or null")
         return cls(
             command_id=command_id,
             type=command_type,
-            target=data.get("target"),
+            target=dict(target) if isinstance(target, dict) else target,
             source=CommandSource.from_dict(data.get("source", {})),
             payload=dict(payload),
             timestamp=int(data.get("timestamp", int(time.time()))),

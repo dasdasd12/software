@@ -55,6 +55,7 @@ def test_runtime_builds_snapshot_and_routes_events():
         "sessions",
         "runs",
         "devices",
+        "focus",
         "profiles",
         "notifications",
         "permissions",

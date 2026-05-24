@@ -12,11 +12,10 @@ class RuntimeSnapshot(Snapshot):
 
     def to_dict(self) -> Dict[str, Any]:
         data = super().to_dict()
-        if self.focus:
-            data["focus"] = {
-                device_id: dict(focus)
-                for device_id, focus in self.focus.items()
-            }
+        data["focus"] = {
+            device_id: dict(focus)
+            for device_id, focus in self.focus.items()
+        }
         return data
 
 

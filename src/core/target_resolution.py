@@ -85,12 +85,20 @@ class TargetResolver:
             value = self._focus_value(focus, field)
             if not value:
                 continue
-            match = self._first(pending, lambda item, field=field, value=value: item.get(field) == value)
+            match = self._first(
+                pending,
+                lambda item, field=field, value=value: self._permission_matches_focus_scope(
+                    item,
+                    field,
+                    value,
+                ),
+            )
             if match:
                 return TargetResolution.resolved_target(selector, self._permission_target(match))
 
-        if pending:
-            return TargetResolution.resolved_target(selector, self._permission_target(pending[0]))
+        global_match = self._first(pending, self._is_global_permission)
+        if global_match:
+            return TargetResolution.resolved_target(selector, self._permission_target(global_match))
         return TargetResolution.unresolved(selector, "no pending permission matches the focused target")
 
     def _resolve_focused_run(
@@ -113,13 +121,6 @@ class TargetResolver:
             active_run_id = session.get("active_run_id") or session.get("run_id")
             if active_run_id and active_run_id in runs_by_id:
                 return TargetResolution.resolved_target(selector, self._run_target(runs_by_id[active_run_id]))
-            matching = [
-                run
-                for run in runs_by_id.values()
-                if run.get("session_id") == session_id
-            ]
-            if matching:
-                return TargetResolution.resolved_target(selector, self._run_target(matching[0]))
 
         return TargetResolution.unresolved(selector, "focused run does not exist")
 
@@ -190,6 +191,26 @@ class TargetResolver:
     def _is_pending_permission(record: Mapping[str, Any]) -> bool:
         status = str(record.get("status", "pending")).lower()
         return status in {"pending", "waiting", "waiting_permission"}
+
+    @staticmethod
+    def _permission_matches_focus_scope(
+        permission: Mapping[str, Any],
+        focus_field: str,
+        focus_value: str,
+    ) -> bool:
+        if permission.get(focus_field) != focus_value:
+            return False
+        if focus_field == "instance_id":
+            return not permission.get("session_id") and not permission.get("run_id")
+        return True
+
+    @staticmethod
+    def _is_global_permission(permission: Mapping[str, Any]) -> bool:
+        return (
+            not permission.get("instance_id")
+            and not permission.get("session_id")
+            and not permission.get("run_id")
+        )
 
     def _records_by_id(self, source: Any, id_field: str) -> Dict[str, Dict[str, Any]]:
         records: Dict[str, Dict[str, Any]] = {}
