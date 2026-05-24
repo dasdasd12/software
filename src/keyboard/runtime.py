@@ -81,6 +81,12 @@ class KeyboardRuntime:
             existing_sessions=self.state_store.sessions.keys(),
             existing_runs=self.state_store.runs.keys(),
         )
+        focus_changed = self._focus_identity(previous_focus) != self._focus_identity(focus)
+        if focus_changed and not self._focus_ancestry_is_safe(focus):
+            self.focus_manager.set_focus(previous_focus)
+            focus = previous_focus
+            focus_changed = False
+
         resolution = self.target_resolver.resolve(
             selector,
             focus=focus,
@@ -89,7 +95,7 @@ class KeyboardRuntime:
             runs=self.state_store.runs,
             permissions=self.state_store.permissions.values(),
         )
-        if self._focus_identity(previous_focus) != self._focus_identity(focus):
+        if focus_changed:
             if not resolution.resolved:
                 self.focus_manager.set_focus(previous_focus)
                 return resolution
@@ -209,3 +215,51 @@ class KeyboardRuntime:
             focus.run_id,
             focus.selected_notification_id,
         )
+
+    def _focus_ancestry_is_safe(self, focus: ScreenFocus) -> bool:
+        if focus.run_id:
+            run = self._record_by_id(self.state_store.runs, focus.run_id, "run_id")
+            if run and not self._record_matches_focus_parents(
+                run,
+                focus,
+                parent_fields=("session_id", "instance_id"),
+            ):
+                return False
+        if focus.session_id:
+            session = self._record_by_id(self.state_store.sessions, focus.session_id, "session_id")
+            if session and not self._record_matches_focus_parents(
+                session,
+                focus,
+                parent_fields=("instance_id",),
+            ):
+                return False
+        return True
+
+    def _record_by_id(
+        self,
+        records: Mapping[str, Any],
+        record_id: str,
+        id_field: str,
+    ) -> Dict[str, Any]:
+        value = records.get(record_id)
+        if isinstance(value, Mapping):
+            record = dict(value)
+        else:
+            to_dict = getattr(value, "to_dict", None)
+            record = dict(to_dict()) if callable(to_dict) else {}
+        if value is not None:
+            record.setdefault(id_field, record_id)
+        return record
+
+    @staticmethod
+    def _record_matches_focus_parents(
+        record: Mapping[str, Any],
+        focus: ScreenFocus,
+        *,
+        parent_fields: tuple,
+    ) -> bool:
+        for field in parent_fields:
+            focus_value = getattr(focus, field, None)
+            if focus_value and record.get(field) != focus_value:
+                return False
+        return True

@@ -648,3 +648,52 @@ def test_unsafe_focus_fallback_to_mismatched_session_does_not_publish_or_mutate_
         if item.type == "agent.focus.changed"
     ]
     assert fallback_events == []
+
+
+def test_focused_permission_global_resolution_does_not_commit_unsafe_focus_fallback():
+    runtime = build_runtime()
+    runtime.state_store.sessions = {
+        "sess_01": {"session_id": "sess_01", "instance_id": "claude-hardware"},
+    }
+    runtime.state_store.permissions = {
+        "perm_global": {"request_id": "perm_global", "priority": 1},
+    }
+    calls = []
+
+    def downstream(command: CommandEnvelope) -> EventEnvelope:
+        calls.append(command)
+        return EventEnvelope(seq=0, type="downstream.called", payload={})
+
+    runtime.keyboard_runtime.register_targeted_handlers(runtime.command_router, {
+        "agent.permission.respond": downstream,
+    })
+    runtime.command_router.dispatch(_command(
+        "agent.focus.set",
+        target={"device_id": "kbd_01"},
+        payload={
+            "mode": "run",
+            "instance_id": "codex-software",
+            "session_id": "sess_01",
+            "run_id": "run_missing",
+        },
+    ))
+    original_focus = runtime.snapshot().to_dict()["focus"]["kbd_01"]
+    after_initial_focus_seq = runtime.event_bus.last_seq
+
+    event = runtime.command_router.dispatch(_command(
+        "agent.permission.respond",
+        target="focused_permission",
+        command_id="cmd_global_permission_unsafe_fallback",
+    ))
+
+    assert event.type in {"downstream.called", "command.target.unresolved"}
+    if calls:
+        assert calls[0].target == {"permission_id": "perm_global"}
+    assert runtime.snapshot().to_dict()["focus"]["kbd_01"] == original_focus
+
+    fallback_events = [
+        item
+        for item in runtime.event_bus.events_after(after_initial_focus_seq)
+        if item.type == "agent.focus.changed"
+    ]
+    assert fallback_events == []
