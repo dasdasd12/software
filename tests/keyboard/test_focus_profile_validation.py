@@ -269,10 +269,72 @@ def test_profile_validation_accepts_active_agent_alias():
         target_device_family="ai_keyboard_ch32h417",
         layers=[{"id": "layer_fn"}],
         agent_bindings=[AgentBinding(
+            id="launch_active",
+            trigger=BindingTrigger(source="key", key="K_ENTER", event="press", layer="layer_fn"),
+            action=KeyboardAction(type="agent.session.launch_or_resume", target="active_agent"),
+        )],
+    )
+
+    validate_profile(profile, layout_keys={"K_ENTER"})
+
+
+def test_profile_validation_rejects_interrupt_with_active_agent_alias():
+    profile = Profile(
+        id="interrupt_active_agent_profile",
+        name="Interrupt Active Agent",
+        target_device_family="ai_keyboard_ch32h417",
+        layers=[{"id": "layer_fn"}],
+        agent_bindings=[AgentBinding(
             id="interrupt_active",
             trigger=BindingTrigger(source="key", key="K_ENTER", event="press", layer="layer_fn"),
             action=KeyboardAction(type="agent.run.interrupt", target="active_agent"),
         )],
     )
 
+    with pytest.raises(ProfileValidationError, match="incompatible agent target"):
+        validate_profile(profile, layout_keys={"K_ENTER"})
+
+
+def test_profile_validation_accepts_interrupt_with_session_selector():
+    profile = Profile(
+        id="interrupt_focused_session_profile",
+        name="Interrupt Focused Session",
+        target_device_family="ai_keyboard_ch32h417",
+        layers=[{"id": "layer_fn"}],
+        agent_bindings=[AgentBinding(
+            id="interrupt_session",
+            trigger=BindingTrigger(source="key", key="K_ENTER", event="press", layer="layer_fn"),
+            action=KeyboardAction(type="agent.run.interrupt", target="focused_session"),
+        )],
+    )
+
     validate_profile(profile, layout_keys={"K_ENTER"})
+
+
+def test_profile_validation_restricts_permission_response_to_focused_permission():
+    valid = Profile(
+        id="respond_focused_permission_profile",
+        name="Respond Focused Permission",
+        target_device_family="ai_keyboard_ch32h417",
+        layers=[{"id": "layer_fn"}],
+        agent_bindings=[AgentBinding(
+            id="respond_permission",
+            trigger=BindingTrigger(source="key", key="K_ENTER", event="press", layer="layer_fn"),
+            action=KeyboardAction(type="agent.permission.respond", target="focused_permission"),
+        )],
+    )
+    invalid = Profile(
+        id="respond_active_agent_profile",
+        name="Respond Active Agent",
+        target_device_family="ai_keyboard_ch32h417",
+        layers=[{"id": "layer_fn"}],
+        agent_bindings=[AgentBinding(
+            id="respond_active",
+            trigger=BindingTrigger(source="key", key="K_ENTER", event="press", layer="layer_fn"),
+            action=KeyboardAction(type="agent.permission.respond", target="active_agent"),
+        )],
+    )
+
+    validate_profile(valid, layout_keys={"K_ENTER"})
+    with pytest.raises(ProfileValidationError, match="incompatible agent target"):
+        validate_profile(invalid, layout_keys={"K_ENTER"})

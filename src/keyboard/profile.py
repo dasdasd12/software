@@ -36,6 +36,12 @@ SUPPORTED_AGENT_TARGETS = {
     "workspace_default",
     "preferred_instance",
 }
+AGENT_ACTION_TARGETS = {
+    "agent.permission.respond": {"focused_permission"},
+    "agent.run.interrupt": {"focused_run", "focused_session"},
+    "agent.session.close": {"focused_run", "focused_session"},
+    "agent.session.launch_or_resume": SUPPORTED_AGENT_TARGETS - {"focused_permission"},
+}
 REQUIRED_FEATURE_BY_ACTION_PREFIX = {
     "hid.": "hid",
     "layer.": "layers",
@@ -301,10 +307,22 @@ def profile_action_to_dict(action: KeyboardAction) -> Dict[str, Any]:
 
 def _validate_profile_action(action: KeyboardAction, device_capabilities: Optional[Any]) -> str:
     action_class = classify_profile_action(action)
-    if action_class == "service_required" and action.target not in SUPPORTED_AGENT_TARGETS:
-        raise ProfileValidationError(f"unsupported agent target: {action.target}")
+    if action_class == "service_required":
+        _validate_agent_action_target(action)
     _validate_action_capability(action.type, device_capabilities)
     return action_class
+
+
+def _validate_agent_action_target(action: KeyboardAction) -> None:
+    allowed_targets = AGENT_ACTION_TARGETS.get(action.type)
+    if allowed_targets is None:
+        raise ProfileValidationError(f"unsupported agent action type: {action.type}")
+    if action.target not in SUPPORTED_AGENT_TARGETS:
+        raise ProfileValidationError(f"unsupported agent target: {action.target}")
+    if action.target not in allowed_targets:
+        raise ProfileValidationError(
+            f"incompatible agent target for {action.type}: {action.target}"
+        )
 
 
 def _known_layout_keys(profile: Profile, layout_keys: Optional[Iterable[str]]) -> set:
