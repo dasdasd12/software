@@ -3,7 +3,7 @@
 from dataclasses import replace
 from typing import Any, Awaitable, Callable, Dict, Mapping, Optional, Union
 
-from core import CommandEnvelope, CommandRouter, EventEnvelope, StateStore
+from core import CommandEnvelope, CommandRouter, EventBus, EventEnvelope, StateStore
 from core.target_resolution import TargetResolution, TargetResolver, symbolic_selector
 
 from .focus import FocusManager, ScreenFocus
@@ -19,10 +19,12 @@ class KeyboardRuntime:
     def __init__(
         self,
         state_store: StateStore,
+        event_bus: Optional[EventBus] = None,
         focus_manager: Optional[FocusManager] = None,
         target_resolver: Optional[TargetResolver] = None,
     ) -> None:
         self.state_store = state_store
+        self.event_bus = event_bus
         self.focus_manager = focus_manager or FocusManager()
         self.target_resolver = target_resolver or TargetResolver()
 
@@ -72,12 +74,15 @@ class KeyboardRuntime:
         selector: str,
     ) -> TargetResolution:
         device_id = self._device_id(command)
+        previous_focus = self.focus_manager.get_focus(device_id)
         focus = self.focus_manager.resolve_focus(
             device_id,
             existing_instances=self.state_store.agents.keys(),
             existing_sessions=self.state_store.sessions.keys(),
             existing_runs=self.state_store.runs.keys(),
         )
+        if self._focus_identity(previous_focus) != self._focus_identity(focus):
+            self._publish_focus_changed(focus)
         return self.target_resolver.resolve(
             selector,
             focus=focus,
@@ -114,6 +119,12 @@ class KeyboardRuntime:
             target={"device_id": focus.device_id},
             payload=focus.to_dict(),
         )
+
+    def _publish_focus_changed(self, focus: ScreenFocus) -> None:
+        event = self._focus_changed_event(focus)
+        self.state_store.apply_event(event)
+        if self.event_bus is not None:
+            self.event_bus.publish(event)
 
     def _unresolved_event(
         self,
@@ -183,3 +194,14 @@ class KeyboardRuntime:
         if instance_id:
             return "instance"
         return "global_dashboard"
+
+    @staticmethod
+    def _focus_identity(focus: ScreenFocus) -> tuple:
+        return (
+            focus.device_id,
+            focus.mode,
+            focus.instance_id,
+            focus.session_id,
+            focus.run_id,
+            focus.selected_notification_id,
+        )

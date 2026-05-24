@@ -46,7 +46,7 @@ def build_runtime() -> LocalCoreRuntime:
     event_bus = EventBus()
     state_store = StateStore()
     command_router = CommandRouter(event_bus, state_store=state_store)
-    keyboard_runtime = KeyboardRuntime(state_store=state_store)
+    keyboard_runtime = KeyboardRuntime(state_store=state_store, event_bus=event_bus)
     _register_system_handlers(command_router)
     keyboard_runtime.register_focus_handlers(command_router)
     return LocalCoreRuntime(

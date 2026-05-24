@@ -210,3 +210,53 @@ def test_unresolved_focused_run_and_session_emit_structured_error_events():
     assert session_event.payload["code"] == "UNRESOLVED_TARGET"
     assert session_event.payload["selector"] == "focused_session"
     assert session_event.payload["command_id"] == "cmd_unresolved_session"
+
+
+def test_symbolic_target_fallback_syncs_snapshot_and_emits_focus_changed():
+    runtime = build_runtime()
+    runtime.state_store.sessions = {
+        "sess_01": {"session_id": "sess_01", "instance_id": "codex-software"},
+    }
+    calls = []
+
+    def downstream(command: CommandEnvelope) -> EventEnvelope:
+        calls.append(command)
+        return EventEnvelope(seq=0, type="downstream.called", payload={})
+
+    runtime.keyboard_runtime.register_targeted_handlers(runtime.command_router, {
+        "agent.session.close": downstream,
+    })
+    runtime.command_router.dispatch(_command(
+        "agent.focus.set",
+        target={"device_id": "kbd_01"},
+        payload={
+            "mode": "run",
+            "instance_id": "codex-software",
+            "session_id": "sess_01",
+            "run_id": "run_missing",
+        },
+    ))
+    after_initial_focus_seq = runtime.event_bus.last_seq
+
+    event = runtime.command_router.dispatch(_command(
+        "agent.session.close",
+        target="focused_session",
+        command_id="cmd_close_fallback_session",
+    ))
+
+    assert event.type == "downstream.called"
+    assert calls[0].target == {"session_id": "sess_01", "instance_id": "codex-software"}
+
+    focus = runtime.snapshot().to_dict()["focus"]["kbd_01"]
+    assert focus["mode"] == "session"
+    assert focus["target"]["session_id"] == "sess_01"
+    assert focus["target"]["run_id"] is None
+
+    fallback_events = [
+        item
+        for item in runtime.event_bus.events_after(after_initial_focus_seq)
+        if item.type == "agent.focus.changed"
+    ]
+    assert len(fallback_events) == 1
+    assert fallback_events[0].payload["mode"] == "session"
+    assert fallback_events[0].payload["target"]["run_id"] is None
