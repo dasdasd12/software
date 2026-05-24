@@ -429,6 +429,7 @@ class LocalCoreServiceMVP:
         queue: asyncio.Queue,
     ) -> None:
         await self._prune_expired_permissions_async()
+        self._sync_runtime_state()
         context_token = _permission_client_context.set(self._client_for_queue(queue))
         try:
             event = await self.runtime.command_router.dispatch_async(command)
@@ -440,6 +441,14 @@ class LocalCoreServiceMVP:
             return
         finally:
             _permission_client_context.reset(context_token)
+
+        if event.type == "command.target.unresolved":
+            await self._send_error(
+                queue,
+                str(event.payload.get("code", "UNRESOLVED_TARGET")),
+                str(event.payload.get("message", "unresolved command target")),
+            )
+            return
 
         self._sync_runtime_state()
         await queue.put(self.unifier.encode_device_message(dict(event.payload)))

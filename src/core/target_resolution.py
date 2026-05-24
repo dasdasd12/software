@@ -112,15 +112,17 @@ class TargetResolver:
         runs_by_id = self._records_by_id(runs, "run_id")
 
         run_id = self._focus_value(focus, "run_id")
-        if run_id and run_id in runs_by_id:
-            return TargetResolution.resolved_target(selector, self._run_target(runs_by_id[run_id]))
+        run = runs_by_id.get(run_id or "")
+        if run and self._run_matches_focus(run, focus):
+            return TargetResolution.resolved_target(selector, self._run_target(run))
 
         session_id = self._focus_value(focus, "session_id")
         session = sessions_by_id.get(session_id or "")
-        if session:
+        if session and self._session_matches_focus(session, focus):
             active_run_id = session.get("active_run_id") or session.get("run_id")
-            if active_run_id and active_run_id in runs_by_id:
-                return TargetResolution.resolved_target(selector, self._run_target(runs_by_id[active_run_id]))
+            active_run = runs_by_id.get(active_run_id or "")
+            if active_run and self._run_matches_focus(active_run, focus):
+                return TargetResolution.resolved_target(selector, self._run_target(active_run))
 
         return TargetResolution.unresolved(selector, "focused run does not exist")
 
@@ -135,17 +137,19 @@ class TargetResolver:
         runs_by_id = self._records_by_id(runs, "run_id")
 
         session_id = self._focus_value(focus, "session_id")
-        if session_id and session_id in sessions_by_id:
-            return TargetResolution.resolved_target(selector, self._session_target(sessions_by_id[session_id]))
+        session = sessions_by_id.get(session_id or "")
+        if session and self._session_matches_focus(session, focus):
+            return TargetResolution.resolved_target(selector, self._session_target(session))
 
         run_id = self._focus_value(focus, "run_id")
         run = runs_by_id.get(run_id or "")
-        if run:
+        if run and self._run_matches_focus(run, focus):
             run_session_id = run.get("session_id")
-            if run_session_id and run_session_id in sessions_by_id:
+            session = sessions_by_id.get(run_session_id or "")
+            if session and self._session_matches_focus(session, focus):
                 return TargetResolution.resolved_target(
                     selector,
-                    self._session_target(sessions_by_id[run_session_id]),
+                    self._session_target(session),
                 )
 
         return TargetResolution.unresolved(selector, "focused session does not exist")
@@ -225,6 +229,19 @@ class TargetResolver:
         if not permission_value:
             return True
         return permission_value == self._focus_value(focus, parent_field)
+
+    def _run_matches_focus(self, run: Mapping[str, Any], focus: Any) -> bool:
+        for field in ("session_id", "instance_id"):
+            focus_value = self._focus_value(focus, field)
+            if focus_value and run.get(field) != focus_value:
+                return False
+        return True
+
+    def _session_matches_focus(self, session: Mapping[str, Any], focus: Any) -> bool:
+        focus_instance_id = self._focus_value(focus, "instance_id")
+        if focus_instance_id and session.get("instance_id") != focus_instance_id:
+            return False
+        return True
 
     @staticmethod
     def _is_global_permission(permission: Mapping[str, Any]) -> bool:

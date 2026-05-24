@@ -14,6 +14,7 @@ sys.path.insert(0, str(BRIDGE_DIR))
 
 from core import CommandEnvelope, CommandSource  # noqa: E402
 from agents.runtime import AgentLifecycleError  # noqa: E402
+from keyboard import ScreenFocus  # noqa: E402
 from server import BridgeServer  # noqa: E402
 from session_manager import AgentState, AgentType  # noqa: E402
 
@@ -128,6 +129,19 @@ def structured_permission_message(permission_id, approved, *, session_id=None, c
             "type": "agent.permission.respond",
             "source": {"kind": "desktop-ui", "client_id": "desktop"},
             "target": target,
+            "payload": {"approved": approved},
+        },
+    }
+
+
+def structured_focused_permission_message(approved, *, command_id="cmd_focused_permission"):
+    return {
+        "type": "command",
+        "command": {
+            "command_id": command_id,
+            "type": "agent.permission.respond",
+            "source": {"kind": "keyboard-device", "client_id": "keyboard-1"},
+            "target": "focused_permission",
             "payload": {"approved": approved},
         },
     }
@@ -324,6 +338,67 @@ def test_handler_path_uses_current_queue_identity_for_structured_permission_appr
     assert_permission_ack_shape(ack, "req_current_queue", session.session_id, True)
     assert "req_current_queue" not in server.pending_permissions
     assert proxy.responses == [(session.session_id, "req_current_queue", True)]
+
+
+def test_focused_permission_structured_command_sees_pending_permission_on_first_dispatch():
+    server = make_server()
+    proxy = FakeProxy()
+    server.agents[AgentType.CODEX] = proxy
+    session = server.session_mgr.create(AgentType.CODEX)
+    track_permission(server, session, "req_focused_first", risk_level="low")
+    queue = CaptureQueue()
+    server.register_client_identity(
+        queue,
+        "device-transport",
+        "keyboard-1",
+        {"permission:respond:low_risk"},
+    )
+    server.runtime.keyboard_runtime.focus_manager.set_focus(ScreenFocus(
+        device_id="keyboard-1",
+        mode="session",
+        session_id=session.session_id,
+    ))
+
+    asyncio.run(server._cmd_structured_command(
+        structured_focused_permission_message(
+            True,
+            command_id="cmd_focused_first",
+        ),
+        queue,
+    ))
+
+    ack = read_payload(queue)
+    assert_permission_ack_shape(ack, "req_focused_first", session.session_id, True)
+    assert "req_focused_first" not in server.pending_permissions
+    assert proxy.responses == [(session.session_id, "req_focused_first", True)]
+
+
+def test_unresolved_focused_permission_structured_command_returns_error_envelope():
+    server = make_server()
+    queue = CaptureQueue()
+    server.register_client_identity(
+        queue,
+        "device-transport",
+        "keyboard-1",
+        {"permission:respond:low_risk"},
+    )
+    server.runtime.keyboard_runtime.focus_manager.set_focus(ScreenFocus(
+        device_id="keyboard-1",
+        mode="session",
+        session_id="sess_missing",
+    ))
+
+    asyncio.run(server._cmd_structured_command(
+        structured_focused_permission_message(
+            True,
+            command_id="cmd_focused_missing",
+        ),
+        queue,
+    ))
+
+    error = read_payload(queue)
+    assert error["type"] == "error"
+    assert error["code"] == "UNRESOLVED_TARGET"
 
 
 def test_device_structured_permission_cannot_approve_high_risk_permission():

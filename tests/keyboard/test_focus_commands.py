@@ -357,6 +357,73 @@ def test_focused_run_requires_explicit_active_run_for_session_focus():
     assert active.target["run_id"] == "run_02"
 
 
+def test_focused_run_rejects_run_parent_mismatch():
+    resolver = TargetResolver()
+
+    result = resolver.resolve(
+        "focused_run",
+        focus=ScreenFocus(
+            device_id="kbd_01",
+            mode="run",
+            instance_id="codex-software",
+            session_id="sess_01",
+            run_id="run_01",
+        ),
+        sessions={"sess_01": {"session_id": "sess_01", "instance_id": "codex-software"}},
+        runs={
+            "run_01": {
+                "run_id": "run_01",
+                "instance_id": "claude-hardware",
+                "session_id": "sess_other",
+            }
+        },
+    )
+
+    assert not result.resolved
+    assert result.code == "UNRESOLVED_TARGET"
+
+
+def test_focused_session_rejects_instance_mismatch():
+    resolver = TargetResolver()
+
+    result = resolver.resolve(
+        "focused_session",
+        focus=ScreenFocus(
+            device_id="kbd_01",
+            mode="session",
+            instance_id="codex-software",
+            session_id="sess_01",
+        ),
+        sessions={
+            "sess_01": {
+                "session_id": "sess_01",
+                "instance_id": "claude-hardware",
+            }
+        },
+    )
+
+    assert not result.resolved
+    assert result.code == "UNRESOLVED_TARGET"
+
+
+def test_focused_run_rejects_active_run_from_another_session():
+    resolver = TargetResolver()
+
+    result = resolver.resolve(
+        "focused_run",
+        focus=ScreenFocus(
+            device_id="kbd_01",
+            mode="session",
+            session_id="sess_01",
+        ),
+        sessions={"sess_01": {"session_id": "sess_01", "active_run_id": "run_other"}},
+        runs={"run_other": {"run_id": "run_other", "session_id": "sess_other"}},
+    )
+
+    assert not result.resolved
+    assert result.code == "UNRESOLVED_TARGET"
+
+
 def test_empty_snapshot_contains_focus_map():
     runtime = build_runtime()
 
