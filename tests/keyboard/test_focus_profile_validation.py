@@ -151,15 +151,19 @@ def test_focused_permission_resolution_rejects_permissions_outside_focus_ancestr
 def test_focused_permission_resolution_global_fallback_without_focus_scope():
     queue = NotificationQueue()
     queue.enqueue_permission(PermissionRequest(
-        permission_id="perm_low",
+        permission_id="perm_scoped_low",
         priority=1,
         instance_id="codex-software",
     ))
     queue.enqueue_permission(PermissionRequest(
-        permission_id="perm_high",
+        permission_id="perm_scoped_high",
         priority=50,
         instance_id="claude-hardware",
         session_id="sess_other",
+    ))
+    queue.enqueue_permission(PermissionRequest(
+        permission_id="perm_global",
+        priority=10,
     ))
 
     permission = queue.resolve_focused_permission(ScreenFocus(
@@ -168,7 +172,7 @@ def test_focused_permission_resolution_global_fallback_without_focus_scope():
     ))
 
     assert permission is not None
-    assert permission.permission_id == "perm_high"
+    assert permission.permission_id == "perm_global"
 
 
 def test_permission_request_creates_pending_notification():

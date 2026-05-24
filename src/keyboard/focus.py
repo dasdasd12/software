@@ -191,7 +191,10 @@ class NotificationQueue:
         if has_focus_scope:
             return None
 
-        return pending[0]
+        for permission in pending:
+            if self._is_global_permission(permission):
+                return permission
+        return None
 
     @staticmethod
     def _focus_value(focus: ScreenFocus, field: str) -> Optional[str]:
@@ -232,3 +235,7 @@ class NotificationQueue:
         if not permission_value:
             return True
         return permission_value == self._focus_value(focus, parent_field)
+
+    @staticmethod
+    def _is_global_permission(permission: PermissionRequest) -> bool:
+        return not permission.instance_id and not permission.session_id and not permission.run_id

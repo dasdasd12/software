@@ -82,10 +82,12 @@ class TargetResolver:
             reverse=True,
         )
 
+        has_focus_scope = False
         for field in ("run_id", "session_id", "instance_id"):
             value = self._focus_value(focus, field)
             if not value:
                 continue
+            has_focus_scope = True
             match = self._first(
                 pending,
                 lambda item, field=field: self._permission_matches_focus_scope(
@@ -99,6 +101,8 @@ class TargetResolver:
 
         if self._has_permission_focus_scope_conflict(pending, focus):
             return TargetResolution.unresolved(selector, "focused permission conflicts with parent focus scope")
+        if has_focus_scope:
+            return TargetResolution.unresolved(selector, "no pending permission matches the focused target")
 
         global_match = self._first(pending, self._is_global_permission)
         if global_match:

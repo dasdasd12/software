@@ -175,7 +175,7 @@ def test_focused_permission_resolves_by_run_session_instance_then_priority():
     assert global_result.target["permission_id"] == "perm_global"
 
 
-def test_focused_permission_global_fallback_never_selects_other_scoped_permission():
+def test_focused_permission_with_focus_scope_does_not_fallback_to_global_permission():
     resolver = TargetResolver()
     permissions = [
         {
@@ -198,8 +198,8 @@ def test_focused_permission_global_fallback_never_selects_other_scoped_permissio
         permissions=permissions,
     )
 
-    assert result.resolved
-    assert result.target["permission_id"] == "perm_global"
+    assert not result.resolved
+    assert result.code == "UNRESOLVED_TARGET"
 
 
 def test_focused_permission_unresolved_when_only_other_scoped_permissions_exist():
@@ -716,7 +716,7 @@ def test_unsafe_focus_fallback_to_mismatched_session_does_not_publish_or_mutate_
     assert fallback_events == []
 
 
-def test_focused_permission_global_resolution_does_not_commit_unsafe_focus_fallback():
+def test_focused_permission_global_only_does_not_resolve_with_focus_scope():
     runtime = build_runtime()
     runtime.state_store.sessions = {
         "sess_01": {"session_id": "sess_01", "instance_id": "claude-hardware"},
@@ -752,9 +752,8 @@ def test_focused_permission_global_resolution_does_not_commit_unsafe_focus_fallb
         command_id="cmd_global_permission_unsafe_fallback",
     ))
 
-    assert event.type in {"downstream.called", "command.target.unresolved"}
-    if calls:
-        assert calls[0].target == {"permission_id": "perm_global"}
+    assert event.type == "command.target.unresolved"
+    assert calls == []
     assert runtime.snapshot().to_dict()["focus"]["kbd_01"] == original_focus
 
     fallback_events = [
