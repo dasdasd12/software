@@ -16,6 +16,7 @@ import logging
 import signal
 import sys
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -51,6 +52,12 @@ from security import (
     SecurityConfig,
     build_client_identity,
     default_capabilities_for,
+)
+
+
+_permission_client_context: ContextVar[Optional[ClientIdentity]] = ContextVar(
+    "permission_client_context",
+    default=None,
 )
 
 
@@ -422,6 +429,7 @@ class LocalCoreServiceMVP:
         queue: asyncio.Queue,
     ) -> None:
         await self._prune_expired_permissions_async()
+        context_token = _permission_client_context.set(self._client_for_queue(queue))
         try:
             event = await self.runtime.command_router.dispatch_async(command)
         except KeyError as exc:
@@ -430,6 +438,8 @@ class LocalCoreServiceMVP:
         except AgentLifecycleError as exc:
             await self._send_error(queue, exc.code, exc.message)
             return
+        finally:
+            _permission_client_context.reset(context_token)
 
         self._sync_runtime_state()
         await queue.put(self.unifier.encode_device_message(dict(event.payload)))
@@ -463,7 +473,12 @@ class LocalCoreServiceMVP:
         if not pending:
             raise AgentLifecycleError("REQUEST_NOT_FOUND", f"Permission request {request_id} not found")
 
-        client = self._client_for_command_source(command.source)
+        client = _permission_client_context.get()
+        if client is None:
+            raise AgentLifecycleError(
+                "AUTH_REQUIRED",
+                "permission command requires a bound client identity",
+            )
         allowed, code, reason = self._can_submit_permission_response_for_client(client, pending, approved)
         if not allowed:
             raise AgentLifecycleError(code, reason)
@@ -759,26 +774,6 @@ class LocalCoreServiceMVP:
             kind=ClientKind.DESKTOP_UI,
             client_id="legacy-local-api",
             capabilities=default_capabilities_for(ClientKind.DESKTOP_UI),
-        )
-
-    def _client_for_command_source(self, source: CommandSource) -> ClientIdentity:
-        for identity in self.client_identities.values():
-            if identity.kind.value == source.kind and identity.client_id == source.client_id:
-                return identity
-
-        try:
-            kind = ClientKind(source.kind)
-        except ValueError:
-            return ClientIdentity(
-                kind=ClientKind.DESKTOP_UI,
-                client_id=source.client_id or "legacy-local-api",
-                capabilities=default_capabilities_for(ClientKind.DESKTOP_UI),
-            )
-
-        return ClientIdentity(
-            kind=kind,
-            client_id=source.client_id or kind.value,
-            capabilities=default_capabilities_for(kind),
         )
 
     def _can_submit_permission_response(

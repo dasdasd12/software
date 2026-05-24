@@ -3,10 +3,17 @@ import json
 from pathlib import Path
 import sys
 
+import pytest
 
-BRIDGE_DIR = Path(__file__).resolve().parents[2] / "src" / "bridge"
+
+ROOT_DIR = Path(__file__).resolve().parents[2]
+SRC_DIR = ROOT_DIR / "src"
+BRIDGE_DIR = SRC_DIR / "bridge"
+sys.path.insert(0, str(SRC_DIR))
 sys.path.insert(0, str(BRIDGE_DIR))
 
+from core import CommandEnvelope, CommandSource  # noqa: E402
+from agents.runtime import AgentLifecycleError  # noqa: E402
 from server import BridgeServer  # noqa: E402
 from session_manager import AgentState, AgentType  # noqa: E402
 
@@ -226,6 +233,97 @@ def test_device_structured_permission_can_approve_low_risk_with_low_risk_capabil
     assert_permission_ack_shape(ack, "req_low", session.session_id, True)
     assert "req_low" not in server.pending_permissions
     assert proxy.responses == [(session.session_id, "req_low", True)]
+
+
+def test_same_client_id_unprivileged_queue_cannot_borrow_permission_capability():
+    server = make_server()
+    proxy = FakeProxy()
+    server.agents[AgentType.CODEX] = proxy
+    session = server.session_mgr.create(AgentType.CODEX)
+    track_permission(server, session, "req_same_client", risk_level="low")
+    privileged_queue = CaptureQueue()
+    unprivileged_queue = CaptureQueue()
+    server.register_client_identity(
+        privileged_queue,
+        "device-transport",
+        "keyboard-1",
+        {"permission:respond:low_risk"},
+    )
+    server.register_client_identity(
+        unprivileged_queue,
+        "device-transport",
+        "keyboard-1",
+        set(),
+    )
+
+    asyncio.run(server._cmd_structured_command(
+        structured_permission_message(
+            "req_same_client",
+            True,
+            command_id="cmd_same_client_unprivileged",
+        ),
+        unprivileged_queue,
+    ))
+
+    error = read_payload(unprivileged_queue)
+    assert error["type"] == "error"
+    assert error["code"] == "CAPABILITY_DENIED"
+    assert "req_same_client" in server.pending_permissions
+    assert proxy.responses == []
+
+
+def test_direct_structured_permission_dispatch_with_unregistered_source_fails_closed():
+    server = make_server()
+    proxy = FakeProxy()
+    server.agents[AgentType.CODEX] = proxy
+    session = server.session_mgr.create(AgentType.CODEX)
+    track_permission(server, session, "req_direct", risk_level="high")
+    command = CommandEnvelope(
+        type="agent.permission.respond",
+        source=CommandSource(kind="unknown-client", client_id="spoofed"),
+        target={
+            "permission_id": "req_direct",
+            "session_id": session.session_id,
+        },
+        payload={"approved": True},
+        command_id="cmd_direct_unregistered",
+    )
+
+    with pytest.raises(AgentLifecycleError) as exc_info:
+        asyncio.run(server.runtime.command_router.dispatch_async(command))
+
+    assert exc_info.value.code in {"AUTH_REQUIRED", "CAPABILITY_DENIED"}
+    assert "req_direct" in server.pending_permissions
+    assert proxy.responses == []
+
+
+def test_handler_path_uses_current_queue_identity_for_structured_permission_approval():
+    server = make_server()
+    proxy = FakeProxy()
+    server.agents[AgentType.CODEX] = proxy
+    session = server.session_mgr.create(AgentType.CODEX)
+    track_permission(server, session, "req_current_queue", risk_level="low")
+    queue = CaptureQueue()
+    server.register_client_identity(
+        queue,
+        "device-transport",
+        "keyboard-1",
+        {"permission:respond:low_risk"},
+    )
+
+    asyncio.run(server._cmd_structured_command(
+        structured_permission_message(
+            "req_current_queue",
+            True,
+            command_id="cmd_current_queue",
+        ),
+        queue,
+    ))
+
+    ack = read_payload(queue)
+    assert_permission_ack_shape(ack, "req_current_queue", session.session_id, True)
+    assert "req_current_queue" not in server.pending_permissions
+    assert proxy.responses == [(session.session_id, "req_current_queue", True)]
 
 
 def test_device_structured_permission_cannot_approve_high_risk_permission():
