@@ -4,6 +4,9 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional
 
+from .layouts import DEFAULT_PHYSICAL_LAYOUT_ID, get_layout_keys
+from .lighting import LightingConfig, lighting_config_from_dict, iter_lighting_key_references
+
 SUPPORTED_SCHEMA_VERSION = "1.0"
 SUPPORTED_ACTION_PREFIXES = (
     "hid.",
@@ -118,13 +121,14 @@ class Profile:
     layers: List[Dict[str, Any]] = field(default_factory=list)
     macros: List[Dict[str, Any]] = field(default_factory=list)
     magnetic_config: MagneticConfig = field(default_factory=MagneticConfig)
+    lighting_config: Optional[LightingConfig] = None
     screen_layout: Dict[str, Any] = field(default_factory=dict)
     agent_bindings: List[AgentBinding] = field(default_factory=list)
     profile_policy: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        data = {
             "schema_version": self.schema_version,
             "id": self.id,
             "name": self.name,
@@ -140,6 +144,9 @@ class Profile:
             "profile_policy": dict(self.profile_policy),
             "metadata": dict(self.metadata),
         }
+        if self.lighting_config is not None:
+            data["lighting_config"] = self.lighting_config.to_dict()
+        return data
 
 
 @dataclass
@@ -194,7 +201,13 @@ def validate_profile(
     if device_capabilities and profile.agent_bindings and not device_capabilities.supports_config_sync:
         raise ProfileValidationError("device capability does not support config sync")
 
-    known_keys = set(layout_keys or [])
+    known_keys = _known_layout_keys(profile, layout_keys)
+    for key_id in _iter_keymap_key_references(profile.keymap):
+        _validate_key_reference(key_id, known_keys)
+    for key_id in profile.magnetic_config.per_key.keys():
+        _validate_key_reference(key_id, known_keys)
+    _validate_lighting_config(profile.lighting_config, known_keys, device_capabilities)
+
     layer_ids = set()
     for layer in profile.layers:
         if not isinstance(layer, dict):
@@ -209,6 +222,8 @@ def validate_profile(
         activation_key = activation.get("key") if isinstance(activation, dict) else None
         if activation_key:
             _validate_key_reference(activation_key, known_keys)
+        for key_id in _iter_layer_key_references(layer):
+            _validate_key_reference(key_id, known_keys)
 
     _validate_screen_layout(profile, device_capabilities)
     for binding in profile.agent_bindings:
@@ -234,6 +249,62 @@ def validate_profile(
 def _validate_key_reference(key_id: str, known_keys: set) -> None:
     if known_keys and key_id not in known_keys:
         raise ProfileValidationError(f"unknown key reference: {key_id}")
+
+
+def _known_layout_keys(profile: Profile, layout_keys: Optional[Iterable[str]]) -> set:
+    if layout_keys is not None:
+        return set(layout_keys)
+    layout_id = DEFAULT_PHYSICAL_LAYOUT_ID
+    if isinstance(profile.keymap, dict):
+        layout_id = profile.keymap.get("physical_layout_id", DEFAULT_PHYSICAL_LAYOUT_ID)
+    try:
+        return set(get_layout_keys(layout_id))
+    except KeyError as exc:
+        raise ProfileValidationError(str(exc)) from exc
+
+
+def _iter_keymap_key_references(keymap: Dict[str, Any]) -> Iterable[str]:
+    if not isinstance(keymap, dict):
+        raise ProfileValidationError("keymap must be an object")
+    for field in ("bindings", "keys"):
+        value = keymap.get(field)
+        if value is not None and not isinstance(value, dict):
+            raise ProfileValidationError(f"keymap.{field} must be an object")
+        if isinstance(value, dict):
+            yield from value.keys()
+    reserved = {"physical_layout_id", "bindings", "keys"}
+    for key_id in keymap.keys():
+        if key_id not in reserved:
+            yield key_id
+
+
+def _iter_layer_key_references(layer: Dict[str, Any]) -> Iterable[str]:
+    for field in ("keymap", "bindings", "keys"):
+        value = layer.get(field)
+        if value is not None and not isinstance(value, dict):
+            raise ProfileValidationError(f"layer {field} must be an object")
+        if isinstance(value, dict):
+            yield from value.keys()
+
+
+def _validate_lighting_config(
+    lighting_config: Optional[LightingConfig],
+    known_keys: set,
+    device_capabilities: Optional[Any],
+) -> None:
+    if lighting_config is None:
+        return
+    if not 0 <= int(lighting_config.brightness) <= 100:
+        raise ProfileValidationError("lighting brightness must be between 0 and 100")
+    for layer in lighting_config.layers:
+        if not layer.id:
+            raise ProfileValidationError("lighting layer id is required")
+    for key_id in iter_lighting_key_references(lighting_config):
+        _validate_key_reference(key_id, known_keys)
+    if device_capabilities:
+        features = set(device_capabilities.supported_profile_features or set())
+        if "lighting" not in features:
+            raise ProfileValidationError("device capability missing profile feature: lighting")
 
 
 def _validate_action_capability(action_type: str, device_capabilities: Optional[Any]) -> None:
@@ -273,6 +344,7 @@ def profile_from_dict(data: Dict[str, Any]) -> Profile:
         raise ProfileValidationError(f"unsupported schema_version: {schema_version}")
 
     magnetic = data.get("magnetic_config") or {}
+    lighting = lighting_config_from_dict(data.get("lighting_config")) if "lighting_config" in data else None
     bindings = []
     for item in data.get("agent_bindings", []):
         trigger_data = item.get("trigger") or {}
@@ -310,6 +382,7 @@ def profile_from_dict(data: Dict[str, Any]) -> Profile:
             default=dict(magnetic.get("default") or {}),
             per_key={key: dict(value) for key, value in (magnetic.get("per_key") or {}).items()},
         ),
+        lighting_config=lighting,
         screen_layout=dict(data.get("screen_layout") or {}),
         agent_bindings=bindings,
         profile_policy=dict(data.get("profile_policy") or {}),
