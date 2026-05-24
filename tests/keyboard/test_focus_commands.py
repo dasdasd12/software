@@ -359,6 +359,72 @@ def test_focused_permission_resolves_valid_session_scope_with_matching_parent():
     assert result.target["permission_id"] == "perm_session"
 
 
+def test_active_agent_alias_resolves_to_focused_agent_target():
+    resolver = TargetResolver()
+
+    result = resolver.resolve(
+        "active_agent",
+        focus=ScreenFocus(
+            device_id="kbd_01",
+            mode="instance",
+            instance_id="codex-software",
+        ),
+        instances={
+            "codex-software": {
+                "instance_id": "codex-software",
+                "provider_id": "codex",
+                "agent": "codex",
+            }
+        },
+    )
+
+    assert result.resolved
+    assert result.selector == "active_agent"
+    assert result.target == {
+        "instance_id": "codex-software",
+        "provider_id": "codex",
+        "agent": "codex",
+    }
+
+
+def test_active_agent_symbolic_command_is_resolved_before_downstream_handler():
+    runtime = build_runtime()
+    runtime.state_store.agents = {
+        "codex-software": {
+            "instance_id": "codex-software",
+            "provider_id": "codex",
+            "agent": "codex",
+        }
+    }
+    calls = []
+
+    def downstream(command: CommandEnvelope) -> EventEnvelope:
+        calls.append(command)
+        return EventEnvelope(seq=0, type="downstream.called", payload={})
+
+    runtime.keyboard_runtime.register_targeted_handlers(runtime.command_router, {
+        "agent.session.launch_or_resume": downstream,
+    })
+    runtime.command_router.dispatch(_command(
+        "agent.focus.set",
+        target={"device_id": "kbd_01"},
+        payload={"mode": "instance", "instance_id": "codex-software"},
+    ))
+
+    event = runtime.command_router.dispatch(_command(
+        "agent.session.launch_or_resume",
+        target="active_agent",
+        command_id="cmd_active_agent",
+    ))
+
+    assert event.type == "downstream.called"
+    assert calls[0].target == {
+        "instance_id": "codex-software",
+        "provider_id": "codex",
+        "agent": "codex",
+    }
+
+
 def test_focused_run_requires_explicit_active_run_for_session_focus():
     resolver = TargetResolver()
     focus = ScreenFocus(device_id="kbd_01", mode="session", session_id="sess_01")

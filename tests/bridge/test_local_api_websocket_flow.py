@@ -212,6 +212,37 @@ def test_structured_command_publishes_event_message_to_connected_clients():
     asyncio.run(with_local_api(run_client))
 
 
+def test_non_permission_structured_command_unresolved_target_returns_error_not_event():
+    async def run_client(service, uri):
+        async with websockets.connect(uri) as ws:
+            await ws.send(json.dumps({
+                "type": "command",
+                "command": {
+                    "command_id": "cmd_unresolved_interrupt",
+                    "type": "agent.run.interrupt",
+                    "source": {
+                        "kind": "keyboard-device",
+                        "client_id": "kbd_01",
+                        "device_id": "kbd_01",
+                    },
+                    "target": "focused_run",
+                    "payload": {},
+                },
+            }))
+            payload = await recv_json(ws)
+
+            assert payload["type"] == "error"
+            assert payload["code"] == "UNRESOLVED_TARGET"
+            assert "focused run" in payload["message"]
+            try:
+                extra = await recv_json(ws, timeout=0.1)
+            except asyncio.TimeoutError:
+                extra = None
+            assert extra is None
+
+    asyncio.run(with_local_api(run_client))
+
+
 def test_agent_launch_uses_fake_proxy_and_broadcasts_events():
     async def run_client(service, uri):
         async with websockets.connect(uri) as ws:

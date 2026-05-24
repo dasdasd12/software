@@ -5,6 +5,7 @@ from typing import Any, Dict, Iterable, Mapping, Optional
 
 
 SYMBOLIC_TARGETS = {
+    "active_agent",
     "focused_agent",
     "focused_session",
     "focused_run",
@@ -60,7 +61,7 @@ class TargetResolver:
             return self._resolve_focused_run(selector, focus, sessions or {}, runs or {})
         if selector == "focused_session":
             return self._resolve_focused_session(selector, focus, sessions or {}, runs or {})
-        if selector == "focused_agent":
+        if selector in {"active_agent", "focused_agent"}:
             return self._resolve_focused_agent(selector, focus, instances or {})
         return TargetResolution.unresolved(selector, f"unsupported target selector: {selector}")
 

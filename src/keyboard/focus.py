@@ -176,15 +176,59 @@ class NotificationQueue:
 
     def resolve_focused_permission(self, focus: ScreenFocus) -> Optional[PermissionRequest]:
         pending = self.pending_permissions()
-        for permission in pending:
-            if focus.run_id and permission.run_id == focus.run_id:
-                return permission
-        for permission in pending:
-            if focus.session_id and permission.session_id == focus.session_id:
-                return permission
-        for permission in pending:
-            if focus.instance_id and permission.instance_id == focus.instance_id:
-                return permission
         if not pending:
             return None
-        return sorted(pending, key=lambda item: item.priority, reverse=True)[0]
+        pending = sorted(pending, key=lambda item: item.priority, reverse=True)
+
+        has_focus_scope = False
+        for field in ("run_id", "session_id", "instance_id"):
+            if not self._focus_value(focus, field):
+                continue
+            has_focus_scope = True
+            for permission in pending:
+                if self._permission_matches_focus_scope(permission, focus, field):
+                    return permission
+        if has_focus_scope:
+            return None
+
+        return pending[0]
+
+    @staticmethod
+    def _focus_value(focus: ScreenFocus, field: str) -> Optional[str]:
+        value = getattr(focus, field, None)
+        if isinstance(value, str) and value:
+            return value
+        return None
+
+    def _permission_matches_focus_scope(
+        self,
+        permission: PermissionRequest,
+        focus: ScreenFocus,
+        focus_field: str,
+    ) -> bool:
+        if getattr(permission, focus_field) != self._focus_value(focus, focus_field):
+            return False
+        if focus_field == "run_id":
+            return (
+                self._permission_parent_matches_focus(permission, focus, "session_id")
+                and self._permission_parent_matches_focus(permission, focus, "instance_id")
+            )
+        if focus_field == "session_id":
+            return (
+                not permission.run_id
+                and self._permission_parent_matches_focus(permission, focus, "instance_id")
+            )
+        if focus_field == "instance_id":
+            return not permission.session_id and not permission.run_id
+        return True
+
+    def _permission_parent_matches_focus(
+        self,
+        permission: PermissionRequest,
+        focus: ScreenFocus,
+        parent_field: str,
+    ) -> bool:
+        permission_value = getattr(permission, parent_field)
+        if not permission_value:
+            return True
+        return permission_value == self._focus_value(focus, parent_field)

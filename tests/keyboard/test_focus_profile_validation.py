@@ -107,6 +107,70 @@ def test_focused_permission_resolution_prefers_run_then_session_then_instance_th
     )).permission_id == "perm_global"
 
 
+def test_focused_permission_resolution_rejects_permissions_outside_focus_ancestry():
+    queue = NotificationQueue()
+    queue.enqueue_permission(PermissionRequest(
+        permission_id="perm_other_instance",
+        priority=300,
+        instance_id="claude-hardware",
+    ))
+    queue.enqueue_permission(PermissionRequest(
+        permission_id="perm_other_session",
+        priority=200,
+        instance_id="codex-software",
+        session_id="sess_other",
+    ))
+    queue.enqueue_permission(PermissionRequest(
+        permission_id="perm_other_run",
+        priority=100,
+        instance_id="codex-software",
+        session_id="sess_01",
+        run_id="run_other",
+    ))
+
+    assert queue.resolve_focused_permission(ScreenFocus(
+        device_id="kbd_01",
+        mode="instance",
+        instance_id="codex-software",
+    )) is None
+    assert queue.resolve_focused_permission(ScreenFocus(
+        device_id="kbd_01",
+        mode="session",
+        instance_id="codex-software",
+        session_id="sess_01",
+    )) is None
+    assert queue.resolve_focused_permission(ScreenFocus(
+        device_id="kbd_01",
+        mode="run",
+        instance_id="codex-software",
+        session_id="sess_01",
+        run_id="run_01",
+    )) is None
+
+
+def test_focused_permission_resolution_global_fallback_without_focus_scope():
+    queue = NotificationQueue()
+    queue.enqueue_permission(PermissionRequest(
+        permission_id="perm_low",
+        priority=1,
+        instance_id="codex-software",
+    ))
+    queue.enqueue_permission(PermissionRequest(
+        permission_id="perm_high",
+        priority=50,
+        instance_id="claude-hardware",
+        session_id="sess_other",
+    ))
+
+    permission = queue.resolve_focused_permission(ScreenFocus(
+        device_id="kbd_01",
+        mode="global_dashboard",
+    ))
+
+    assert permission is not None
+    assert permission.permission_id == "perm_high"
+
+
 def test_permission_request_creates_pending_notification():
     queue = NotificationQueue()
 
@@ -192,3 +256,19 @@ def test_profile_validation_checks_layout_actions_safety_and_device_capabilities
     )
     with pytest.raises(ProfileValidationError, match="high risk"):
         validate_profile(unsafe, device_capabilities=capabilities, layout_keys={"K_ENTER"})
+
+
+def test_profile_validation_accepts_active_agent_alias():
+    profile = Profile(
+        id="active_agent_profile",
+        name="Active Agent",
+        target_device_family="ai_keyboard_ch32h417",
+        layers=[{"id": "layer_fn"}],
+        agent_bindings=[AgentBinding(
+            id="interrupt_active",
+            trigger=BindingTrigger(source="key", key="K_ENTER", event="press", layer="layer_fn"),
+            action=KeyboardAction(type="agent.run.interrupt", target="active_agent"),
+        )],
+    )
+
+    validate_profile(profile, layout_keys={"K_ENTER"})

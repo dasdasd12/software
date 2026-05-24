@@ -365,6 +365,10 @@ class LocalCoreServiceMVP:
             await self._send_error(queue, exc.code, exc.message)
             return
 
+        if event.type == "command.target.unresolved":
+            await self._send_unresolved_target_error(queue, event)
+            return
+
         if command.type == "system.snapshot.request":
             self._sync_runtime_state()
             payload = {
@@ -443,11 +447,7 @@ class LocalCoreServiceMVP:
             _permission_client_context.reset(context_token)
 
         if event.type == "command.target.unresolved":
-            await self._send_error(
-                queue,
-                str(event.payload.get("code", "UNRESOLVED_TARGET")),
-                str(event.payload.get("message", "unresolved command target")),
-            )
+            await self._send_unresolved_target_error(queue, event)
             return
 
         self._sync_runtime_state()
@@ -969,6 +969,13 @@ class LocalCoreServiceMVP:
             "timestamp": int(time.time()),
         }
         await queue.put(json.dumps(payload, ensure_ascii=False))
+
+    async def _send_unresolved_target_error(self, queue: asyncio.Queue, event: Any) -> None:
+        await self._send_error(
+            queue,
+            str(event.payload.get("code", "UNRESOLVED_TARGET")),
+            str(event.payload.get("message", "unresolved command target")),
+        )
 
     # ------------------------------------------------------------------ #
     #  Server lifecycle

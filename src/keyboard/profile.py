@@ -28,6 +28,7 @@ SUPPORTED_TRIGGER_EVENTS = {
     "rotate_right",
 }
 SUPPORTED_AGENT_TARGETS = {
+    "active_agent",
     "focused_agent",
     "focused_session",
     "focused_run",
