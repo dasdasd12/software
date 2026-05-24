@@ -335,7 +335,7 @@ class LocalCoreServiceMVP:
 
         self._sync_runtime_state()
         try:
-            event = self.runtime.command_router.dispatch(command)
+            event = await self.runtime.command_router.dispatch_async(command)
         except KeyError as exc:
             await self._send_error(queue, "UNKNOWN_COMMAND", str(exc))
             return
