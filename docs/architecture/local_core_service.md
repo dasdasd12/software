@@ -20,6 +20,29 @@ Product:
 The current Python bridge should evolve into this service. It is not a throwaway
 script; it is the MVP form of the local runtime.
 
+## Current V1 Status
+
+The current backend has moved beyond the original bridge-only MVP:
+
+- WebSocket Local API is the development/test interface.
+- `hello` establishes client identity, launch-token authentication, and
+  capabilities.
+- Structured `command` messages use `CommandEnvelope`, `CommandRouter`,
+  `StateStore`, and `EventBus`.
+- `system.snapshot.request` returns a current snapshot through the Local API.
+- Legacy messages remain supported for automation compatibility:
+  `agent_launch`, `permission_response`, `interrupt`, and `list_sessions`.
+- SQLite is the primary app store for product state and permission history.
+- The device side has simulator transport, capability negotiation, slot mapping,
+  projected snapshots, focus state, notification queue, and profile validation.
+- Codex native approval forwarding is implemented through `codex app-server
+  --listen stdio://`.
+- Claude Code native approval forwarding is implemented through the Python Agent
+  SDK permission callback path.
+
+See `implementation_status_v1.md` for the current implementation checklist and
+known gaps.
+
 ## Responsibilities
 
 The Local Core Service owns:
@@ -187,15 +210,22 @@ composition root.
 The existing bridge can be migrated in phases:
 
 1. Rename the concept from "device WebSocket bridge" to "Local Core Service MVP".
-2. Bind development APIs to `127.0.0.1` by default.
-3. Separate UI clients from simulator/device clients.
-4. Introduce snapshot and event envelopes.
-5. Split `AgentProxy` into provider adapters.
+   Done for the local API and documentation language.
+2. Bind development APIs to `127.0.0.1` by default. Done.
+3. Separate UI clients from simulator/device clients. Done at the Local API
+   identity/capability layer; product desktop shell is still deferred.
+4. Introduce snapshot and event envelopes. Done for Local API structured paths.
+5. Split `AgentProxy` into provider adapters. Partially done: Claude SDK and
+   Codex app-server approval adapters exist; broader provider/instance manager
+   extraction is still pending.
 6. Replace the old `agent + session` model with provider, instance, session,
-   and run registries.
+   and run registries. Partially done in repositories and architecture model;
+   the compatibility WebSocket API still exposes `agent + session_id`.
 7. Add device transport abstraction and keep WebSocket only as a simulator or
-   UI/local API transport.
-8. Move persistence from session JSON toward SQLite.
+   UI/local API transport. Done for simulator/backend abstraction; physical USB,
+   CDC, BLE, and 2.4G transports remain deferred.
+8. Move persistence from session JSON toward SQLite. Done for app store and
+   permission history; legacy JSON remains import/export/scratch only.
 
 Large file moves are not required at the beginning. The important part is to
 move behavior toward the module responsibilities above.

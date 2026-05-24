@@ -4,6 +4,15 @@ The Local Core Service should use SQLite as its primary persistent store. JSON
 is useful for import/export and early prototypes, but the product model has too
 many relationships for long-term JSON-only storage.
 
+Current V1 status:
+
+- SQLite app store and migrations are implemented.
+- Repositories cover profiles, known devices, agent instance presets, sessions,
+  runs, permission history, approval policies, UI preferences, and workspace
+  bindings.
+- JSON import/export remains available for interchange and diagnostics.
+- Legacy session JSON is not the product state authority.
+
 ## Storage Locations
 
 Recommended Windows locations:
@@ -142,9 +151,34 @@ Persist permission metadata:
 - source client
 - timestamp
 - summary
+- forwarded status
+- adapter/native request metadata
+- forwarding evidence
 
 Full details may be sensitive and should follow the user's data retention
 setting.
+
+Current V1 permission history payload records:
+
+```text
+permission_id
+session_id
+run_id
+action_type
+risk_level
+decision
+source_client
+timestamp
+summary
+forwarded
+evidence
+native
+```
+
+`evidence` is provider-specific but must be structured JSON. For Codex
+app-server it includes fields such as native channel, JSON-RPC id, thread id,
+turn id, item id, command, cwd, decision, and response write status. For Claude
+SDK it includes callback delivery/return evidence.
 
 ## Migration
 
@@ -198,6 +232,7 @@ Tests should cover:
 - profile create/update/delete
 - export and re-import round trip
 - permission metadata persistence
+- native approval forwarding evidence persistence
 - transcript retention modes
 - schema version rejection
 - backup before risky migrations

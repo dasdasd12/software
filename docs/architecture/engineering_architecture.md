@@ -45,7 +45,7 @@ Software does not own:
 
 ```text
 Codex / Claude Code
-  stdout, JSONL, app-server, or SDK-specific APIs
+  app-server, SDK-specific APIs, stdout, or JSONL fallback
         |
         v
 Agent adapters
@@ -75,9 +75,19 @@ src/bridge/
   session_manager.py   session and permission state
   server.py            local UI WebSocket/HTTP entry point
 
+src/agents/
+  codex_app_server.py  Codex app-server JSON-RPC stdio client
+  adapters.py          Claude SDK and Codex app-server permission adapters
+
+src/devices/
+  manager.py           simulated/device transport manager
+  protocol_codec.py    device message codec
+  projection.py        core state to device snapshot projection
+  slot_mapper.py       compact slot mapping
+  transports/          simulator and future physical transports
+
 src/device/
   device_protocol.*    shared message model and frame handling
-  transports/          USB HID, CDC, BLE, simulator adapters
   agent_manager.*      firmware-facing model, if compiled for device tests
 ```
 
@@ -126,6 +136,14 @@ The bridge must shield firmware from agent-specific churn. If Codex or Claude
 Code changes its CLI, JSONL, or SDK behavior, only the software adapter layer
 should change.
 
+Current V1 adapter status:
+
+- Codex command approval uses app-server JSON-RPC over stdio.
+- Codex `exec --json` remains a non-forwarding fallback.
+- Claude command/tool approval uses the Python Agent SDK permission callback.
+- Legacy stream-json parsing remains for compatibility but is not the dynamic
+  approval path.
+
 ## Local UI API
 
 WebSocket/HTTP JSON is still the right shape for local UI clients because it is
@@ -172,3 +190,9 @@ Software PRs should report:
 - transport path tested
 - whether hardware protocol changed
 - compatibility notes for existing firmware or simulators
+
+Backend-only changes should additionally report:
+
+- Local API compatibility impact
+- provider-native approval evidence, if permission handling changed
+- process cleanup behavior for app-server or SDK-backed agents

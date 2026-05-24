@@ -30,6 +30,38 @@ Product shape:
 The architecture must support both shapes without tying core behavior to a
 browser-only implementation.
 
+## Current V1 Backend Status
+
+The backend currently implements the Local Core Service path without a formal
+frontend or desktop shell. The supported development/test surface is the Local
+API WebSocket plus smoke scripts.
+
+Implemented backend capabilities:
+
+- Local API client handshake, launch token, origin validation, client identity,
+  and capability gates.
+- Structured command/event/snapshot path using core envelopes, router, state
+  store, and event bus.
+- Legacy Local API compatibility for `agent_launch`, `permission_response`,
+  `interrupt`, and `list_sessions`.
+- SQLite app store with repositories and migrations for product/audit metadata.
+- Device simulator backend with capability negotiation, slot mapping, projected
+  snapshots, focus state, notification queue, and profile validation.
+- Claude Code native approval forwarding through the Python Agent SDK.
+- Codex native approval forwarding through `codex app-server --listen stdio://`
+  JSON-RPC.
+- Real Codex approval and denial smoke tests with `permission_ack.forwarded=true`
+  evidence.
+
+Deferred from V1:
+
+- formal frontend and desktop shell
+- physical USB HID, CDC, BLE, and 2.4G device transports
+- packaged service lifecycle and installer
+- POSIX process-tree hardening for Codex app-server cleanup
+
+See `implementation_status_v1.md` for operational acceptance details.
+
 ## Scope
 
 The software repository contains both keyboard configuration and agent control.
@@ -149,8 +181,8 @@ src/agents/
   session registry
   run registry
   permission queue
-  Codex adapter
-  Claude Code adapter
+  Codex app-server adapter
+  Claude Code SDK adapter
 
 src/local_api/
   WebSocket API
@@ -165,6 +197,15 @@ src/diagnostics/
 
 The current implementation does not need to match this structure immediately,
 but new code should move toward these responsibilities.
+
+Current implementation note:
+
+- `src/agents/codex_app_server.py` owns the Codex JSON-RPC stdio client.
+- `src/agents/adapters.py` owns native permission adapters for Codex app-server
+  and Claude SDK.
+- `src/bridge/agent_proxy.py` still orchestrates process lifecycle and legacy
+  stream paths. It should be split further when provider/instance management is
+  promoted out of the bridge compatibility layer.
 
 ## Keyboard Configuration and Agent Control
 
@@ -281,6 +322,16 @@ Every permission request must include enough metadata for the policy engine:
 High-risk operations must remain distinguishable from low-risk commands so the
 UI and keyboard can apply different confirmation rules.
 
+Current V1 approval forwarding rule:
+
+```text
+permission_ack.forwarded=true
+  only after the provider-native permission response has been delivered
+```
+
+Codex app-server evidence includes JSON-RPC id and response write status.
+Claude SDK evidence includes callback delivery and return status.
+
 ## Snapshot and Event Model
 
 The system should support both snapshots and live events.
@@ -316,6 +367,7 @@ Persisted state should include:
 - workspace bindings
 - approval policies
 - UI preferences
+- permission history with native forwarding evidence
 
 Full agent output logs should be optional and user-controlled.
 

@@ -111,6 +111,17 @@ Connect/reconnect flow:
 Keyboard devices may receive compact snapshot frames projected from the same
 core state rather than the full UI snapshot.
 
+Current V1 Local API behavior:
+
+- `hello` registers client kind, client id, launch token, and capabilities.
+- `command` carries a `CommandEnvelope`.
+- `snapshot` returns the current service snapshot.
+- `event` wraps `EventEnvelope` updates for structured subscribers.
+- Legacy messages remain accepted and are internally routed where practical:
+  `agent_launch`, `permission_response`, `interrupt`, and `list_sessions`.
+- Reconnect-capable clients should request `system.snapshot.request` and then
+  consume incremental events.
+
 ## Command Sources
 
 ```text
@@ -194,6 +205,18 @@ notification.dismiss
 system.snapshot.request
 ```
 
+Current V1 compatibility mapping:
+
+```text
+agent_launch         -> agent.session.launch_or_resume
+permission_response  -> agent.permission.respond
+interrupt            -> agent.run.interrupt
+list_sessions        -> session list query path
+```
+
+The compatibility messages are retained for smoke tests and existing
+automation. New local UI work should prefer structured `command` envelopes.
+
 ## Event Type Namespaces
 
 Recommended namespaces:
@@ -239,6 +262,11 @@ Every command should be validated in this order:
 
 Rejected commands should emit or return structured errors. They should not
 partially mutate state.
+
+For provider permissions that require native forwarding, a locally accepted
+permission decision is not considered complete until the provider adapter has
+successfully delivered the native response. If native forwarding fails, the
+permission remains pending and the Local API returns `PERMISSION_FORWARD_FAILED`.
 
 ## Idempotency
 

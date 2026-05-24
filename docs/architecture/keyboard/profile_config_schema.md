@@ -202,7 +202,7 @@ Workspace bindings let profiles and agent presets follow the active project.
 ```json
 {
   "workspace_id": "software",
-  "path": "D:\\UserData\\My Documents\\AI Keyboard\\software",
+  "path": "${PROJECT_ROOT}/software",
   "default_profile_id": "profile_coding_default",
   "default_agent_instance_id": "codex-software",
   "focus_policy": "last_active_in_workspace"
@@ -210,7 +210,8 @@ Workspace bindings let profiles and agent presets follow the active project.
 ```
 
 Profiles should refer to workspace and instance selectors rather than hard-code
-runtime session IDs.
+machine-specific absolute paths or runtime session IDs. The Local Core Service
+resolves workspace selectors to concrete local paths.
 
 ## Offline Behavior
 

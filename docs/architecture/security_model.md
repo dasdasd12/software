@@ -18,6 +18,19 @@ Development may use browser UI over localhost. Product builds should prefer a
 desktop shell with a private local channel or launch-token protected localhost
 API.
 
+Current V1 status:
+
+- Local API binds to loopback by default.
+- `hello` carries launch token, client kind, client id, and capabilities.
+- WebSocket Origin validation is implemented for browser clients.
+- Permission responses pass through client capability checks and approval
+  policy.
+- Test clients do not receive real permission approval capability by default.
+- Keyboard/device clients can directly approve only policy-allowed low-risk
+  requests; high-risk requests require desktop confirmation.
+- Real Codex and Claude permission responses must be delivered through their
+  native provider channels before `forwarded=true` is returned.
+
 ## Network Binding
 
 Default:
@@ -166,6 +179,10 @@ Persist metadata for security-sensitive actions:
 - settings that weaken security
 
 Audit logs should avoid storing full secrets or full command outputs by default.
+
+Current permission history stores forwarding evidence and native request
+metadata. Evidence may include command summaries and cwd. Retention and redaction
+settings should be tightened before product packaging.
 
 ## Security Tests
 

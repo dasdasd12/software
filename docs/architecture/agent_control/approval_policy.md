@@ -226,19 +226,46 @@ automation-client:
 
 ## Native Agent Permission Channel
 
-Default implementation path:
+Default implementation path for real provider approval:
 
 ```text
-MVP:
-  bridge may simulate or record permission response at the core boundary
-
-Product:
-  approval or denial must be forwarded to the native Codex/Claude Code
-  permission channel when that channel exists
+Core permission decision
+  -> provider adapter
+  -> native provider permission channel
+  -> permission_ack with forwarding evidence
 ```
 
 The UI and keyboard should not depend on provider-specific permission formats.
 Agent adapters translate core decisions into provider-native responses.
+
+Current V1 provider paths:
+
+```text
+Codex:
+  codex app-server --listen stdio://
+  item/commandExecution/requestApproval -> accept | decline
+  item/fileChange/requestApproval       -> accept | decline
+  item/permissions/requestApproval      -> accept | decline
+  execCommandApproval                   -> approved | denied
+  applyPatchApproval                    -> approved | denied
+
+Claude Code:
+  Python Agent SDK can_use_tool callback -> PermissionResultAllow/Deny
+```
+
+`permission_ack.forwarded=true` may only be returned after the adapter has
+confirmed that the native response path completed. For Codex app-server this
+means the JSON-RPC response was written to stdin. For Claude SDK this means the
+permission callback received and returned the decision.
+
+If forwarding fails for a provider that requires native forwarding, the Local
+API returns `PERMISSION_FORWARD_FAILED` and keeps the request pending. Fake or
+unsupported adapters may return `forwarded=false` only in explicit test/fallback
+paths.
+
+Expired Codex app-server requests are declined through the native JSON-RPC
+channel so the provider does not remain blocked on an approval request that the
+Local Core Service has already pruned.
 
 ## Audit Trail
 
@@ -252,6 +279,9 @@ Permission history should persist metadata:
 - source client
 - timestamp
 - summary
+- forwarded status
+- native request metadata
+- forwarding evidence
 
 Full command details may be sensitive and should follow data retention settings.
 

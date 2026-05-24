@@ -56,6 +56,14 @@ DongleVendorTransport
 Development may keep the current WebSocket simulator, but it should be treated
 as `SimulatedTransport`, not as the product device transport.
 
+Current V1 status:
+
+- `SimulatedTransport` and backend transport abstractions are implemented.
+- Capability negotiation is implemented for the simulator path.
+- Slot mapping and generation mismatch handling are implemented.
+- Device snapshots are projected from Local Core state.
+- Physical CDC, USB Vendor HID, BLE GATT, and dongle transports remain deferred.
+
 ## Protocol Layers
 
 ```text
@@ -245,3 +253,6 @@ Tests should cover:
 - device snapshot projection
 - payload size boundary
 - transport disconnect event
+
+Current tests cover simulator negotiation, slot generation mismatch, device
+snapshot projection, and profile validation against device capabilities.

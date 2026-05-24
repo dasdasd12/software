@@ -75,8 +75,24 @@ codex
 claude_code
 ```
 
-The adapter layer may later support CLI, SDK, app-server, or remote-control
-modes behind the same provider model.
+The adapter layer supports multiple modes behind the same provider model.
+Current V1 defaults:
+
+```text
+codex:
+  mode: app_server
+  launch: codex app-server --listen stdio://
+  native permission forwarding: JSON-RPC response to app-server stdin
+  fallback: exec_json, read-only for approval forwarding
+
+claude_code:
+  mode: agent_sdk
+  native permission forwarding: Python Agent SDK can_use_tool callback
+  fallback: headless stream-json, non-native for dynamic approval forwarding
+```
+
+Provider identity should remain stable even if a particular instance switches
+between app-server, SDK, CLI, or future remote-control modes.
 
 ## AgentInstance
 
@@ -88,7 +104,7 @@ An instance represents one configured runtime role.
   "provider_id": "codex",
   "label": "Codex Software",
   "role": "software_developer",
-  "workspace": "D:\\UserData\\My Documents\\AI Keyboard\\software",
+  "workspace": "${PROJECT_ROOT}/software",
   "executable": "codex",
   "args": [],
   "status": "idle",
@@ -137,7 +153,7 @@ A session represents one conversation, thread, or ongoing work context.
   "provider_id": "codex",
   "instance_id": "codex-software",
   "title": "Implement device transport abstraction",
-  "workspace": "D:\\UserData\\My Documents\\AI Keyboard\\software",
+  "workspace": "${PROJECT_ROOT}/software",
   "state": "active",
   "active_run_id": "run_03",
   "policy_id": null,
@@ -283,3 +299,31 @@ claude-default
 ```
 
 Later, workspace-aware presets can replace these defaults.
+
+## Compatibility Layer
+
+The Local API still accepts legacy WebSocket messages that identify an agent by
+`agent` and `session_id`. The service maps those messages into the provider
+model internally where possible.
+
+Current compatibility examples:
+
+```text
+agent_launch(agent="codex", session_id="new")
+permission_response(agent inferred from pending request)
+interrupt(session_id="sess_...")
+list_sessions(agent="codex" | "claude" | "all")
+```
+
+Codex app-server also exposes provider-native identifiers:
+
+```text
+thread_id -> provider thread/session identifier
+turn_id   -> provider turn/run identifier
+item_id   -> provider item/tool-call identifier
+jsonrpc_id -> native approval request id
+```
+
+The current Local API permission request ID is the native JSON-RPC id coerced to
+a string for Codex app-server requests. This keeps the response route
+deterministic because the JSON-RPC response must target that exact id.
