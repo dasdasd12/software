@@ -203,6 +203,7 @@ def test_agent_actions_in_keymap_and_layers_are_service_required():
                         "type": "agent.permission.respond",
                         "target": "focused_permission",
                         "decision": "approve",
+                        "risk_ack": "low",
                     }
                 },
             }
@@ -228,6 +229,8 @@ def test_agent_actions_in_keymap_and_layers_are_service_required():
             "key_id": "K_ENTER",
             "action_type": "agent.permission.respond",
             "target": "focused_permission",
+            "decision": "approve",
+            "risk_ack": "low",
         },
     ]
 
@@ -258,6 +261,21 @@ def test_lighting_json_rejects_non_boolean_enabled_value():
     payload["lighting_config"]["enabled"] = "false"
 
     with pytest.raises(ProfileValidationError, match="enabled"):
+        import_profile_json(json.dumps(payload))
+
+
+@pytest.mark.parametrize(
+    "lighting_config",
+    [
+        {"per_key": {"K_A": 1}},
+        {"layers": [{"id": "base", "per_key": {"K_A": 1}}]},
+    ],
+)
+def test_lighting_json_rejects_bad_per_key_override_shapes(lighting_config):
+    payload = _profile().to_dict()
+    payload["lighting_config"] = lighting_config
+
+    with pytest.raises(ProfileValidationError, match="per_key"):
         import_profile_json(json.dumps(payload))
 
 

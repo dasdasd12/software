@@ -98,6 +98,7 @@ def _service_required_action(
         "action_type": action.type,
         "target": action.target,
     }
+    data.update(dict(action.payload))
     if layer_id is not None:
         data["layer_id"] = layer_id
     if key_id is not None:

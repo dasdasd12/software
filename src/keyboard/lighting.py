@@ -46,15 +46,13 @@ class LightingConfig:
 def lighting_layer_from_dict(data: Dict[str, Any]) -> LightingLayer:
     if not isinstance(data, dict):
         raise LightingConfigParseError("lighting_config.layers items must be objects")
-    per_key = data.get("per_key") or {}
-    if not isinstance(per_key, dict):
-        raise LightingConfigParseError("lighting_config.layers.per_key must be an object")
+    per_key = _parse_per_key(data.get("per_key") or {}, "lighting_config.layers.per_key")
     return LightingLayer(
         id=data.get("id", ""),
         effect=data.get("effect", "static"),
         color=data.get("color"),
         speed=data.get("speed"),
-        per_key={key: dict(value) for key, value in per_key.items()},
+        per_key=per_key,
     )
 
 
@@ -66,6 +64,8 @@ def lighting_config_from_dict(data: Optional[Dict[str, Any]]) -> Optional[Lighti
     enabled = data.get("enabled", True)
     if not isinstance(enabled, bool):
         raise LightingConfigParseError("lighting_config.enabled must be a boolean")
+    if "per_key" in data:
+        _parse_per_key(data.get("per_key") or {}, "lighting_config.per_key")
     layers = data.get("layers", [])
     if not isinstance(layers, list):
         raise LightingConfigParseError("lighting_config.layers must be a list")
@@ -78,6 +78,17 @@ def lighting_config_from_dict(data: Optional[Dict[str, Any]]) -> Optional[Lighti
         brightness=brightness,
         layers=[lighting_layer_from_dict(item) for item in layers],
     )
+
+
+def _parse_per_key(data: Dict[str, Any], field_name: str) -> Dict[str, Dict[str, Any]]:
+    if not isinstance(data, dict):
+        raise LightingConfigParseError(f"{field_name} must be an object")
+    parsed = {}
+    for key, value in data.items():
+        if not isinstance(value, dict):
+            raise LightingConfigParseError(f"{field_name} values must be objects")
+        parsed[key] = dict(value)
+    return parsed
 
 
 def iter_lighting_key_references(config: Optional[LightingConfig]) -> Iterable[str]:

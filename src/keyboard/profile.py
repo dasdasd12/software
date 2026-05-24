@@ -8,15 +8,6 @@ from .layouts import DEFAULT_PHYSICAL_LAYOUT_ID, get_layout_keys
 from .lighting import LightingConfig, lighting_config_from_dict, iter_lighting_key_references
 
 SUPPORTED_SCHEMA_VERSION = "1.0"
-SUPPORTED_ACTION_PREFIXES = (
-    "hid.",
-    "layer.",
-    "macro.",
-    "profile.",
-    "screen.",
-    "agent.",
-    "device.",
-)
 OFFLINE_ACTION_PREFIXES = (
     "hid.",
     "layer.",
