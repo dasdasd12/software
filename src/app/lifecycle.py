@@ -8,10 +8,11 @@ from dataclasses import dataclass
 from typing import Optional
 
 from agents import AgentRegistry
-from agents.commands import AgentCommandService, register_agent_lifecycle_handlers
+from agents.commands import AgentCommandService
 from core import CommandEnvelope, CommandRouter, EventBus, EventEnvelope, Snapshot, StateStore
 from devices import DeviceManager
 from diagnostics import HealthReporter
+from keyboard.runtime import KeyboardRuntime
 
 
 @dataclass
@@ -22,6 +23,7 @@ class LocalCoreRuntime:
     agent_registry: AgentRegistry
     device_manager: DeviceManager
     health_reporter: HealthReporter
+    keyboard_runtime: KeyboardRuntime
     agent_commands: Optional[AgentCommandService] = None
 
     def snapshot(self) -> Snapshot:
@@ -29,14 +31,24 @@ class LocalCoreRuntime:
 
     def configure_agent_commands(self, service: AgentCommandService) -> None:
         self.agent_commands = service
-        register_agent_lifecycle_handlers(self.command_router, service)
+        self.keyboard_runtime.register_targeted_handlers(
+            self.command_router,
+            {
+                "agent.session.launch_or_resume": service.launch_or_resume,
+                "agent.run.interrupt": service.interrupt,
+                "agent.session.close": service.close_session,
+                "agent.permission.respond": service.respond_permission,
+            },
+        )
 
 
 def build_runtime() -> LocalCoreRuntime:
     event_bus = EventBus()
     state_store = StateStore()
     command_router = CommandRouter(event_bus, state_store=state_store)
+    keyboard_runtime = KeyboardRuntime(state_store=state_store)
     _register_system_handlers(command_router)
+    keyboard_runtime.register_focus_handlers(command_router)
     return LocalCoreRuntime(
         event_bus=event_bus,
         state_store=state_store,
@@ -44,6 +56,7 @@ def build_runtime() -> LocalCoreRuntime:
         agent_registry=AgentRegistry(),
         device_manager=DeviceManager(),
         health_reporter=HealthReporter(),
+        keyboard_runtime=keyboard_runtime,
     )
 
 

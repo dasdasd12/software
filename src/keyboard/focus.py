@@ -2,7 +2,7 @@
 
 import time
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 
 @dataclass(frozen=True)
@@ -42,6 +42,30 @@ class FocusManager:
     def get_focus(self, device_id: str) -> ScreenFocus:
         return self._focus_by_device.get(device_id) or ScreenFocus(device_id=device_id)
 
+    def all_focus(self) -> Dict[str, ScreenFocus]:
+        return dict(self._focus_by_device)
+
+    def next_session(self, device_id: str, sessions: Iterable[Any]) -> Optional[ScreenFocus]:
+        ordered_sessions = [self._session_record(item) for item in sessions]
+        ordered_sessions = [item for item in ordered_sessions if item.get("session_id")]
+        if not ordered_sessions:
+            return None
+
+        session_ids = [str(item["session_id"]) for item in ordered_sessions]
+        current_id = self.get_focus(device_id).session_id
+        try:
+            current_index = session_ids.index(current_id) if current_id else -1
+        except ValueError:
+            current_index = -1
+
+        next_session = ordered_sessions[(current_index + 1) % len(ordered_sessions)]
+        return self.set_focus(ScreenFocus(
+            device_id=device_id,
+            mode="session",
+            instance_id=self._str_or_none(next_session.get("instance_id")),
+            session_id=str(next_session["session_id"]),
+        ))
+
     def resolve_focus(
         self,
         device_id: str,
@@ -72,6 +96,22 @@ class FocusManager:
                 selected_notification_id=focus.selected_notification_id,
             ))
         return self.set_focus(ScreenFocus(device_id=device_id, mode="global_dashboard"))
+
+    @staticmethod
+    def _session_record(value: Any) -> Dict[str, Any]:
+        if isinstance(value, Mapping):
+            return dict(value)
+        to_dict = getattr(value, "to_dict", None)
+        if callable(to_dict):
+            return dict(to_dict())
+        return {
+            "session_id": getattr(value, "session_id", None),
+            "instance_id": getattr(value, "instance_id", None),
+        }
+
+    @staticmethod
+    def _str_or_none(value: Any) -> Optional[str]:
+        return value if isinstance(value, str) and value else None
 
 
 @dataclass(frozen=True)

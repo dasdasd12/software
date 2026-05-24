@@ -21,6 +21,7 @@ from .profile import (
     validate_profile,
 )
 from .profile_service import ProfileService
+from .runtime import KeyboardRuntime
 
 __all__ = [
     "AgentBinding",
@@ -29,6 +30,7 @@ __all__ = [
     "DEFAULT_PHYSICAL_LAYOUT_ID",
     "FocusManager",
     "KeyboardAction",
+    "KeyboardRuntime",
     "LightingConfig",
     "LightingLayer",
     "MagneticConfig",

@@ -5,6 +5,21 @@ from typing import Any, Dict
 from .envelopes import EventEnvelope, Snapshot
 
 
+class RuntimeSnapshot(Snapshot):
+    def __init__(self, *args: Any, focus: Dict[str, Any] = None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        object.__setattr__(self, "focus", dict(focus or {}))
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = super().to_dict()
+        if self.focus:
+            data["focus"] = {
+                device_id: dict(focus)
+                for device_id, focus in self.focus.items()
+            }
+        return data
+
+
 class StateStore:
     """Authoritative in-memory state container for early domain scaffolding."""
 
@@ -16,6 +31,7 @@ class StateStore:
         self.profiles: Dict[str, Any] = {}
         self.notifications: Dict[str, Any] = {}
         self.permissions: Dict[str, Any] = {}
+        self.focus: Dict[str, Any] = {}
 
     def apply_event(self, event: EventEnvelope) -> None:
         """Apply event payloads that have a direct snapshot projection."""
@@ -46,9 +62,17 @@ class StateStore:
             request_id = event.payload.get("request_id")
             if request_id:
                 self.permissions.pop(str(request_id), None)
+        elif event.type == "agent.focus.changed":
+            focus = dict(event.payload)
+            device_id = focus.get("device_id")
+            if not device_id and event.target:
+                device_id = event.target.get("device_id")
+            if device_id:
+                focus["device_id"] = str(device_id)
+                self.focus[str(device_id)] = focus
 
     def snapshot(self, last_event_seq: int) -> Snapshot:
-        return Snapshot(
+        return RuntimeSnapshot(
             last_event_seq=last_event_seq,
             agents=dict(self.agents),
             sessions=dict(self.sessions),
@@ -57,4 +81,5 @@ class StateStore:
             profiles=dict(self.profiles),
             notifications=list(self.notifications.values()),
             permissions=list(self.permissions.values()),
+            focus=dict(self.focus),
         )
