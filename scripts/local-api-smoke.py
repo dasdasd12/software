@@ -23,7 +23,11 @@ import websockets
 
 TERMINAL_TYPES = {"task_completed", "task_failed", "error"}
 DEFAULT_CONTEXT = "say hello"
-DEFAULT_APPROVAL_CONTEXT = "Use WebFetch to fetch https://example.com and report the title."
+DEFAULT_CLAUDE_APPROVAL_CONTEXT = "Use WebFetch to fetch https://example.com and report the title."
+DEFAULT_CODEX_APPROVAL_CONTEXT = (
+    "Run this exact harmless command and report its output: "
+    "python -c \"print('codex approval smoke')\""
+)
 
 
 def now_ts() -> int:
@@ -94,6 +98,8 @@ class LocalApiSmokeClient:
             payload = await self.recv_json(ws)
             if payload.get("type") == "error":
                 raise RuntimeError(f"Local API error while waiting for {expected_type}: {payload}")
+            if payload.get("session_id") == session_id and payload.get("type") in {"task_failed", "error"}:
+                raise RuntimeError(f"Session failed while waiting for {expected_type}: {payload}")
             if payload.get("type") == expected_type and payload.get("session_id") == session_id:
                 return payload
 
@@ -183,8 +189,16 @@ class LocalApiSmokeClient:
             evidence = ack.get("evidence") or {}
             if not evidence:
                 raise RuntimeError(f"Permission ack did not include forwarding evidence: {ack}")
-            if evidence.get("adapter") != "claude_agent_sdk" or not evidence.get("callback_returned"):
-                raise RuntimeError(f"Permission ack did not include SDK callback evidence: {ack}")
+            if agent == "claude":
+                if evidence.get("adapter") != "claude_agent_sdk" or not evidence.get("callback_returned"):
+                    raise RuntimeError(f"Permission ack did not include SDK callback evidence: {ack}")
+            elif agent == "codex":
+                if (
+                    evidence.get("adapter") != "codex_app_server"
+                    or not evidence.get("response_written")
+                    or not evidence.get("decision_delivered")
+                ):
+                    raise RuntimeError(f"Permission ack did not include Codex app-server evidence: {ack}")
 
             while True:
                 payload = await self.recv_json(ws)
@@ -237,7 +251,11 @@ async def amain() -> None:
     )
     context = args.context
     if args.scenario == "approval-real" and context == DEFAULT_CONTEXT:
-        context = DEFAULT_APPROVAL_CONTEXT
+        context = (
+            DEFAULT_CODEX_APPROVAL_CONTEXT
+            if args.agent == "codex"
+            else DEFAULT_CLAUDE_APPROVAL_CONTEXT
+        )
 
     if args.scenario == "basic":
         await client.run_basic()

@@ -41,6 +41,59 @@ class FailedClaudeProxy:
         }
 
 
+class FailedCodexAppServerProxy:
+    async def handle_permission_response(self, session_id, request_id, approved):
+        return {
+            "accepted": True,
+            "forwarded": False,
+            "evidence": {
+                "adapter": "codex_app_server",
+                "reason": "native_request_not_registered",
+            },
+        }
+
+
+class SuccessfulCodexAppServerProxy:
+    async def handle_permission_response(self, session_id, request_id, approved):
+        return {
+            "accepted": True,
+            "forwarded": True,
+            "evidence": {
+                "adapter": "codex_app_server",
+                "native_channel": "item/commandExecution/requestApproval",
+                "jsonrpc_id": 0,
+                "thread_id": "thread_1",
+                "turn_id": "turn_1",
+                "item_id": "item_1",
+                "command": "python -c \"print('codex approval smoke')\"",
+                "cwd": "C:/repo",
+                "decision": "accept" if approved else "decline",
+                "decision_delivered": True,
+                "response_written": True,
+            },
+        }
+
+
+class ExpiringCodexAppServerProxy(SuccessfulCodexAppServerProxy):
+    def __init__(self):
+        self.expired = []
+
+    async def expire_permission_request(self, session_id, request_id):
+        self.expired.append((session_id, request_id))
+        return await self.handle_permission_response(session_id, request_id, False)
+
+
+class CompletingProxy(FakeProxy):
+    def __init__(self, server):
+        super().__init__()
+        self.server = server
+
+    async def handle_permission_response(self, session_id, request_id, approved):
+        result = await super().handle_permission_response(session_id, request_id, approved)
+        self.server.session_mgr.update_state(session_id, AgentState.COMPLETED)
+        return result
+
+
 class CaptureQueue:
     def __init__(self):
         self.items = []
@@ -198,6 +251,32 @@ def test_claude_forward_failure_keeps_pending_request():
     assert "req_forward_fail" in server.pending_permissions
 
 
+def test_codex_app_server_forward_failure_keeps_pending_request():
+    server = make_server()
+    server.agents[AgentType.CODEX] = FailedCodexAppServerProxy()
+    session = server.session_mgr.create(AgentType.CODEX)
+    server._on_agent_event(server.unifier.encode_device_message({
+        "type": "permission_request",
+        "request_id": "req_codex_forward_fail",
+        "session_id": session.session_id,
+        "agent": "codex",
+        "timeout_sec": 30,
+    }))
+    queue = CaptureQueue()
+
+    asyncio.run(server._cmd_permission_response({
+        "type": "permission_response",
+        "request_id": "req_codex_forward_fail",
+        "session_id": session.session_id,
+        "approved": True,
+    }, queue))
+
+    error = json.loads(queue.get_nowait())
+    assert error["type"] == "error"
+    assert error["code"] == "PERMISSION_FORWARD_FAILED"
+    assert "req_codex_forward_fail" in server.pending_permissions
+
+
 def test_expired_permission_request_is_pruned():
     server = make_server()
     session = server.session_mgr.create(AgentType.CLAUDE)
@@ -243,6 +322,97 @@ def test_permission_response_persists_session_and_history_to_sqlite(tmpdir):
     assert history[0]["permission_id"] == "req_sqlite"
     assert history[0]["decision"] == "deny"
     assert history[0]["forwarded"] is False
+    server.app_store.close()
+
+
+def test_permission_response_does_not_regress_terminal_session_state():
+    server = make_server()
+    session = server.session_mgr.create(AgentType.CODEX)
+    server.agents[AgentType.CODEX] = CompletingProxy(server)
+    server._on_agent_event(server.unifier.encode_device_message({
+        "type": "permission_request",
+        "request_id": "req_race",
+        "session_id": session.session_id,
+        "agent": "codex",
+        "risk_level": "low",
+        "timeout_sec": 30,
+    }))
+    queue = CaptureQueue()
+
+    asyncio.run(server._cmd_permission_response({
+        "type": "permission_response",
+        "request_id": "req_race",
+        "session_id": session.session_id,
+        "approved": True,
+    }, queue))
+
+    assert server.session_mgr.get(session.session_id).state == AgentState.COMPLETED
+
+
+def test_expired_codex_app_server_permission_is_declined_natively():
+    server = make_server()
+    proxy = ExpiringCodexAppServerProxy()
+    server.agents[AgentType.CODEX] = proxy
+    session = server.session_mgr.create(AgentType.CODEX)
+    server._on_agent_event(server.unifier.encode_device_message({
+        "type": "permission_request",
+        "request_id": "req_expire_native",
+        "session_id": session.session_id,
+        "agent": "codex",
+        "risk_level": "high",
+        "timeout_sec": -1,
+        "native": {"adapter": "codex_app_server"},
+    }))
+
+    asyncio.run(server._prune_expired_permissions_async())
+
+    assert "req_expire_native" not in server.pending_permissions
+    assert proxy.expired == [(session.session_id, "req_expire_native")]
+
+
+def test_codex_app_server_permission_history_persists_native_evidence(tmpdir):
+    db_path = Path(str(tmpdir)) / "app.db"
+    server = make_server_with_persistence(db_path)
+    server.agents[AgentType.CODEX] = SuccessfulCodexAppServerProxy()
+    session = server.session_mgr.create(AgentType.CODEX)
+    native = {
+        "adapter": "codex_app_server",
+        "channel": "item/commandExecution/requestApproval",
+        "jsonrpc_id": 0,
+        "thread_id": "thread_1",
+        "turn_id": "turn_1",
+        "item_id": "item_1",
+        "command": "python -c \"print('codex approval smoke')\"",
+        "cwd": "C:/repo",
+    }
+    server._on_agent_event(server.unifier.encode_device_message({
+        "type": "permission_request",
+        "request_id": "0",
+        "session_id": session.session_id,
+        "agent": "codex",
+        "risk_level": "high",
+        "tool": "shell",
+        "description": native["command"],
+        "native": native,
+        "timeout_sec": 30,
+    }))
+    queue = CaptureQueue()
+
+    asyncio.run(server._cmd_permission_response({
+        "type": "permission_response",
+        "request_id": "0",
+        "session_id": session.session_id,
+        "approved": True,
+    }, queue))
+
+    history = server.app_store.permission_history.list(session_id=session.session_id)
+    assert history[0]["permission_id"] == "0"
+    assert history[0]["decision"] == "approve"
+    assert history[0]["forwarded"] is True
+    assert history[0]["evidence"]["adapter"] == "codex_app_server"
+    assert history[0]["evidence"]["jsonrpc_id"] == 0
+    assert history[0]["evidence"]["response_written"] is True
+    assert history[0]["native"] == native
     server.app_store.close()
 
 

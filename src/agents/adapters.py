@@ -12,7 +12,7 @@ PermissionDecisionEncoder = Callable[
     [str, str, bool, Optional[Dict[str, Any]]],
     Dict[str, Any],
 ]
-NativePermissionWriter = Callable[[Dict[str, Any]], Any]
+NativePermissionWriter = Callable[..., Any]
 
 
 class UnsupportedPermissionAdapter:
@@ -37,6 +37,269 @@ class UnsupportedPermissionAdapter:
                 "approved": approved,
             },
         }
+
+
+@dataclass
+class _PendingCodexPermission:
+    session_id: str
+    request_id: str
+    native_id: Any
+    native_channel: str
+    thread_id: Optional[str]
+    turn_id: Optional[str]
+    item_id: Optional[str]
+    command: Optional[str]
+    cwd: Optional[str]
+    created_at: float
+
+
+class CodexAppServerPermissionAdapter:
+    """Unit adapter for Codex app-server JSON-RPC approval requests.
+
+    The Local API request id is the JSON-RPC id coerced to a string. Codex may
+    include an approvalId in params, but the app-server response must be sent to
+    the JSON-RPC id, so using it as the local key keeps routing deterministic.
+    """
+
+    name = "codex_app_server"
+
+    _DECISIONS = {
+        "item/commandExecution/requestApproval": (("accept", "decline"), "shell"),
+        "item/fileChange/requestApproval": (("accept", "decline"), "file_change"),
+        "item/permissions/requestApproval": (("accept", "decline"), "permission"),
+        "execCommandApproval": (("approved", "denied"), "shell"),
+        "applyPatchApproval": (("approved", "denied"), "file_change"),
+    }
+
+    def __init__(
+        self,
+        emit_permission_request: Callable[[Dict[str, Any]], Any],
+        native_writer: Optional[NativePermissionWriter] = None,
+    ) -> None:
+        self._emit_permission_request = emit_permission_request
+        self._native_writer = native_writer
+        self._pending: Dict[Tuple[str, str], _PendingCodexPermission] = {}
+
+    def register_server_request(
+        self,
+        session_id: str,
+        native_request: Dict[str, Any],
+    ) -> bool:
+        event = self._register_pending_request(session_id, native_request)
+        if event is None:
+            return False
+        result = self._emit_permission_request(event)
+        if inspect.isawaitable(result):
+            raise RuntimeError(
+                "Async permission emitters must use handle_native_request()."
+            )
+        return True
+
+    async def handle_native_request(
+        self,
+        session_id: str,
+        native_request: Dict[str, Any],
+    ) -> bool:
+        event = self._register_pending_request(session_id, native_request)
+        if event is None:
+            return False
+        result = self._emit_permission_request(event)
+        if inspect.isawaitable(result):
+            await result
+        return True
+
+    def _register_pending_request(
+        self,
+        session_id: str,
+        native_request: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        method = native_request.get("method")
+        if method not in self._DECISIONS or "id" not in native_request:
+            return None
+
+        params = native_request.get("params") or {}
+        if not isinstance(params, dict):
+            params = {}
+        native_id = native_request["id"]
+        request_id = str(native_id)
+        command = self._string_field(params, "command", "cmd", "commandLine")
+        cwd = self._string_field(params, "cwd", "workdir", "currentWorkingDirectory")
+        pending = _PendingCodexPermission(
+            session_id=session_id,
+            request_id=request_id,
+            native_id=native_id,
+            native_channel=str(method),
+            thread_id=self._string_field(
+                params,
+                "thread_id",
+                "threadId",
+                "conversationId",
+            ),
+            turn_id=self._string_field(params, "turn_id", "turnId"),
+            item_id=self._string_field(params, "item_id", "itemId", "callId"),
+            command=command,
+            cwd=cwd,
+            created_at=time.time(),
+        )
+        self._pending[(session_id, request_id)] = pending
+
+        _decisions, tool = self._DECISIONS[str(method)]
+        event = {
+            "type": "permission_request",
+            "request_id": request_id,
+            "session_id": session_id,
+            "agent": "codex",
+            "tool": tool,
+            "description": self._description(tool, command, params),
+            "risk_level": "high",
+            "native": {
+                "adapter": self.name,
+                "channel": str(method),
+                "jsonrpc_id": native_id,
+                "approval_id": self._field(params, "approval_id", "approvalId"),
+                "thread_id": pending.thread_id,
+                "turn_id": pending.turn_id,
+                "item_id": pending.item_id,
+                "command": pending.command,
+                "cwd": pending.cwd,
+            },
+        }
+        return event
+
+    async def forward_permission_response(
+        self,
+        session_id: str,
+        request_id: str,
+        approved: bool,
+    ) -> Dict[str, Any]:
+        return await self._deliver_permission_decision(session_id, request_id, approved)
+
+    async def expire_permission_request(
+        self,
+        session_id: str,
+        request_id: str,
+    ) -> Dict[str, Any]:
+        return await self._deliver_permission_decision(
+            session_id,
+            request_id,
+            False,
+            expired=True,
+        )
+
+    async def _deliver_permission_decision(
+        self,
+        session_id: str,
+        request_id: str,
+        approved: bool,
+        expired: bool = False,
+    ) -> Dict[str, Any]:
+        key = (session_id, request_id)
+        pending = self._pending.get(key)
+        if pending is None:
+            return {
+                "accepted": True,
+                "forwarded": False,
+                "evidence": {
+                    "adapter": self.name,
+                    "reason": "native_request_not_registered",
+                    "session_id": session_id,
+                    "request_id": request_id,
+                    "approved": approved,
+                },
+            }
+
+        if self._native_writer is None:
+            if expired:
+                self._pending.pop(key, None)
+            return {
+                "accepted": True,
+                "forwarded": False,
+                "evidence": {
+                    "adapter": self.name,
+                    "reason": "native_permission_channel_unavailable",
+                    "session_id": session_id,
+                    "request_id": request_id,
+                    "approved": approved,
+                },
+            }
+
+        decision = self._decision(pending.native_channel, approved)
+        native_response = {"id": pending.native_id, "result": {"decision": decision}}
+        try:
+            result = self._call_native_writer(native_response, session_id)
+            if inspect.isawaitable(result):
+                await result
+        finally:
+            if expired:
+                self._pending.pop(key, None)
+        if not expired:
+            self._pending.pop(key, None)
+
+        return {
+            "accepted": True,
+            "forwarded": True,
+            "evidence": {
+                "adapter": self.name,
+                "native_channel": pending.native_channel,
+                "jsonrpc_id": pending.native_id,
+                "thread_id": pending.thread_id,
+                "turn_id": pending.turn_id,
+                "item_id": pending.item_id,
+                "command": pending.command,
+                "cwd": pending.cwd,
+                "decision": decision,
+                "decision_delivered": True,
+                "response_written": True,
+                "expired": expired,
+                "session_id": session_id,
+                "request_id": request_id,
+                "approved": bool(approved),
+                "age_ms": int((time.time() - pending.created_at) * 1000),
+            },
+        }
+
+    def _call_native_writer(self, native_response: Dict[str, Any], session_id: str) -> Any:
+        try:
+            signature = inspect.signature(self._native_writer)
+            signature.bind(native_response, session_id)
+        except (TypeError, ValueError):
+            return self._native_writer(native_response)
+        return self._native_writer(native_response, session_id)
+
+    @classmethod
+    def _decision(cls, native_channel: str, approved: bool) -> str:
+        allow, deny = cls._DECISIONS[native_channel][0]
+        return allow if approved else deny
+
+    @staticmethod
+    def _field(params: Dict[str, Any], *names: str) -> Any:
+        for name in names:
+            if name in params:
+                return params[name]
+        return None
+
+    @classmethod
+    def _string_field(cls, params: Dict[str, Any], *names: str) -> Optional[str]:
+        value = cls._field(params, *names)
+        if value is None:
+            return None
+        if isinstance(value, list):
+            return " ".join(str(part) for part in value)
+        return str(value)
+
+    @classmethod
+    def _description(
+        cls,
+        tool: str,
+        command: Optional[str],
+        params: Dict[str, Any],
+    ) -> str:
+        if command:
+            return command
+        path = cls._string_field(params, "path", "file", "filePath")
+        if tool == "file_change" and path:
+            return path
+        return "Codex requests permission."
 
 
 @dataclass

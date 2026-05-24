@@ -11,6 +11,7 @@ from .identity import (
 from .adapters import (
     ClaudeAgentSdkPermissionAdapter,
     ClaudeSdkPermissionBridge,
+    CodexAppServerPermissionAdapter,
     UnsupportedPermissionAdapter,
 )
 from .registry import AgentRegistry
@@ -24,6 +25,7 @@ __all__ = [
     "AgentSession",
     "ClaudeAgentSdkPermissionAdapter",
     "ClaudeSdkPermissionBridge",
+    "CodexAppServerPermissionAdapter",
     "RunState",
     "UnsupportedPermissionAdapter",
 ]

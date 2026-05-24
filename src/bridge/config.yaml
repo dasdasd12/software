@@ -41,9 +41,9 @@ agents:
     enabled: true
     # Path to Codex CLI (leave empty to use PATH)
     executable: ""
-    # Launch mode: "remote_control" or "exec_json"
-    mode: "exec_json"
-    # Additional CLI arguments. The service adds exec --json.
+    # Launch mode: "app_server" (native approval channel), "remote_control", or "exec_json"
+    mode: "app_server"
+    # Additional CLI arguments. app_server adds app-server --listen stdio://; exec_json adds exec --json.
     args: []
     # Environment variables
     env:

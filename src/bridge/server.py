@@ -18,7 +18,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import yaml
 
@@ -232,6 +232,7 @@ class LocalCoreServiceMVP:
         """Process a single message from a local API client."""
         msg_type = msg.get("type", "")
         self.logger.debug(f"Local API msg: {msg_type}")
+        await self._prune_expired_permissions_async()
 
         if msg_type == "hello":
             await self._cmd_hello(msg, client_queue, websocket)
@@ -407,7 +408,7 @@ class LocalCoreServiceMVP:
             return
 
         self.logger.info(f"Permission {request_id}: {'APPROVED' if approved else 'DENIED'}")
-        self._prune_expired_permissions()
+        await self._prune_expired_permissions_async()
 
         pending_key, pending = self._find_pending_permission(request_id, session_id)
         if not pending:
@@ -451,7 +452,8 @@ class LocalCoreServiceMVP:
 
         self.pending_permissions.pop(pending_key, None)
 
-        self.session_mgr.update_state(pending.session_id, AgentState.WORKING)
+        if not self._is_terminal_session(pending.session_id):
+            self.session_mgr.update_state(pending.session_id, AgentState.WORKING)
         self._append_permission_history(queue, pending, approved, result)
         self._persist_session(pending.session_id)
         ack = self.unifier.encode_device_message({
@@ -582,15 +584,63 @@ class LocalCoreServiceMVP:
         self.session_mgr.update_state(session_id, AgentState.WAITING_PERMISSION)
         self._persist_session(session_id)
 
-    def _prune_expired_permissions(self) -> None:
+    def _collect_expired_permissions(self) -> List[Tuple[str, PendingPermission]]:
         now = time.time()
         expired = [
-            request_id
+            (request_id, pending)
             for request_id, pending in self.pending_permissions.items()
             if now - pending.created_at > pending.timeout_sec
         ]
-        for request_id in expired:
+        for request_id, _pending in expired:
             del self.pending_permissions[request_id]
+        return expired
+
+    def _prune_expired_permissions(self) -> None:
+        expired = self._collect_expired_permissions()
+        for _request_id, pending in expired:
+            self._schedule_provider_permission_expiry(pending)
+
+    async def _prune_expired_permissions_async(self) -> None:
+        expired = self._collect_expired_permissions()
+        for _request_id, pending in expired:
+            await self._expire_provider_permission(pending)
+
+    def _schedule_provider_permission_expiry(self, pending: PendingPermission) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(self._expire_provider_permission(pending))
+        task.add_done_callback(self._log_permission_expiry_failure)
+
+    def _log_permission_expiry_failure(self, task: asyncio.Task) -> None:
+        try:
+            task.result()
+        except Exception as exc:
+            self.logger.warning(f"Expired permission native deny failed: {exc}")
+
+    async def _expire_provider_permission(self, pending: PendingPermission) -> None:
+        proxy = self.agents.get(pending.agent)
+        expire = getattr(proxy, "expire_permission_request", None)
+        if expire is None:
+            return
+        result = await expire(pending.session_id, pending.request_id)
+        if not result.get("forwarded", False) and self._requires_native_forwarding(pending.agent, result):
+            self.logger.warning(
+                "Expired permission %s was not forwarded to provider: %s",
+                pending.request_id,
+                result.get("evidence", {}).get("reason", "unknown"),
+            )
+
+    def _is_terminal_session(self, session_id: str) -> bool:
+        session = self.session_mgr.get(session_id)
+        return bool(session and session.state in {
+            AgentState.COMPLETED,
+            AgentState.FAILED,
+            AgentState.CANCELLED,
+            AgentState.ERROR,
+            AgentState.TIMEOUT,
+        })
 
     def _persist_event_state(self, json_line: str) -> None:
         if not self.app_store:
@@ -765,9 +815,11 @@ class LocalCoreServiceMVP:
 
     @staticmethod
     def _requires_native_forwarding(agent: AgentType, result: Dict[str, Any]) -> bool:
+        adapter = result.get("evidence", {}).get("adapter")
+        if agent == AgentType.CODEX:
+            return adapter == "codex_app_server"
         if agent != AgentType.CLAUDE:
             return False
-        adapter = result.get("evidence", {}).get("adapter")
         return adapter not in {"fake", "unsupported"}
 
     async def _require_capability(self, queue: asyncio.Queue, capability: str) -> bool:

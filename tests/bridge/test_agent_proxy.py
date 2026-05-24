@@ -11,10 +11,11 @@ SRC_DIR = Path(__file__).resolve().parents[2] / "src"
 sys.path.insert(0, str(BRIDGE_DIR))
 sys.path.insert(0, str(SRC_DIR))
 
+import agent_proxy as agent_proxy_module  # noqa: E402
 from agent_proxy import AgentProxy  # noqa: E402
-from agents import ClaudeAgentSdkPermissionAdapter, ClaudeSdkPermissionBridge  # noqa: E402
+from agents import ClaudeAgentSdkPermissionAdapter, ClaudeSdkPermissionBridge, CodexAppServerPermissionAdapter  # noqa: E402
 from protocol_unifier import ProtocolUnifier  # noqa: E402
-from session_manager import AgentType, SessionManager  # noqa: E402
+from session_manager import AgentState, AgentType, SessionManager  # noqa: E402
 
 
 def make_proxy(agent_type, args=None):
@@ -72,6 +73,144 @@ def test_launch_creates_process_with_stdin_pipe(monkeypatch):
     asyncio.run(proxy.launch(session.session_id, "hello"))
 
     assert calls[0][1]["stdin"] == asyncio.subprocess.PIPE
+
+
+def test_codex_app_server_command_uses_stdio_listener():
+    proxy = AgentProxy(
+        agent_type=AgentType.CODEX,
+        session_manager=SessionManager(),
+        unifier=ProtocolUnifier(),
+        executable="codex.exe",
+        mode="app_server",
+    )
+
+    cmd = proxy._build_codex_cmd("sess_1", "hello")
+
+    assert cmd == ["codex.exe", "app-server", "--listen", "stdio://"]
+
+
+def test_codex_app_server_uses_native_permission_adapter():
+    proxy = AgentProxy(
+        agent_type=AgentType.CODEX,
+        session_manager=SessionManager(),
+        unifier=ProtocolUnifier(),
+        executable="codex.exe",
+        mode="app_server",
+    )
+
+    assert isinstance(proxy._permission_adapter, CodexAppServerPermissionAdapter)
+
+
+def test_codex_app_server_status_object_maps_to_working():
+    proxy = AgentProxy(
+        agent_type=AgentType.CODEX,
+        session_manager=SessionManager(),
+        unifier=ProtocolUnifier(),
+        executable="codex.exe",
+        mode="app_server",
+    )
+
+    event = proxy._codex_app_server_notification_to_event(
+        "sess_1",
+        {
+            "method": "thread/status/changed",
+            "params": {
+                "threadId": "thread_1",
+                "status": {"type": "active", "activeFlags": []},
+            },
+        },
+    )
+
+    assert event["type"] == "task_update"
+    assert event["state"] == AgentState.WORKING.value
+
+
+def test_codex_app_server_retry_error_is_not_terminal_failure():
+    proxy = AgentProxy(
+        agent_type=AgentType.CODEX,
+        session_manager=SessionManager(),
+        unifier=ProtocolUnifier(),
+        executable="codex.exe",
+        mode="app_server",
+    )
+
+    event = proxy._codex_app_server_notification_to_event(
+        "sess_1",
+        {
+            "method": "error",
+            "params": {
+                "error": {"message": "Reconnecting... 2/5"},
+                "willRetry": True,
+            },
+        },
+    )
+
+    assert event["type"] == "task_update"
+    assert event["state"] == AgentState.WORKING.value
+
+
+def test_codex_app_server_task_stops_after_turn_completed(monkeypatch):
+    terminated = []
+    monkeypatch.setattr(agent_proxy_module.sys, "platform", "linux")
+
+    class FakeClient:
+        def __init__(self, reader, writer, on_server_request=None, on_notification=None):
+            self._on_notification = on_notification
+
+        async def read_loop(self):
+            await asyncio.Future()
+
+        async def initialize(self):
+            return {"ok": True}
+
+        async def start_thread(self, cwd):
+            return {"thread": {"id": "thread_1"}}
+
+        async def start_turn(self, thread_id, prompt, cwd):
+            self._on_notification({
+                "method": "turn/completed",
+                "params": {"threadId": thread_id, "turnId": "turn_1"},
+            })
+            return {"turn": {"id": "turn_1"}}
+
+    class FakeProc:
+        class Stderr:
+            async def readline(self):
+                return b""
+
+        stdout = object()
+        stderr = Stderr()
+        stdin = object()
+        returncode = None
+
+        def terminate(self):
+            terminated.append("terminate")
+            self.returncode = 0
+
+        async def wait(self):
+            return 0
+
+    monkeypatch.setattr(agent_proxy_module, "CodexAppServerClient", FakeClient)
+    proxy = AgentProxy(
+        agent_type=AgentType.CODEX,
+        session_manager=SessionManager(),
+        unifier=ProtocolUnifier(),
+        executable="codex.exe",
+        mode="app_server",
+    )
+    session = proxy._sm.create(AgentType.CODEX)
+
+    async def run():
+        task = asyncio.create_task(proxy._read_codex_app_server(session.session_id, FakeProc(), "hello"))
+        proxy._read_tasks[session.session_id] = task
+        await asyncio.wait_for(task, timeout=1)
+
+    asyncio.run(run())
+
+    assert terminated == ["terminate"]
+    assert session.session_id not in proxy._processes
+    assert session.session_id not in proxy._read_tasks
+    assert proxy._sm.get(session.session_id).state == AgentState.COMPLETED
 
 
 def test_unsupported_permission_forwarding_reports_evidence():
