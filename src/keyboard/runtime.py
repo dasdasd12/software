@@ -81,9 +81,7 @@ class KeyboardRuntime:
             existing_sessions=self.state_store.sessions.keys(),
             existing_runs=self.state_store.runs.keys(),
         )
-        if self._focus_identity(previous_focus) != self._focus_identity(focus):
-            self._publish_focus_changed(focus)
-        return self.target_resolver.resolve(
+        resolution = self.target_resolver.resolve(
             selector,
             focus=focus,
             instances=self.state_store.agents,
@@ -91,6 +89,12 @@ class KeyboardRuntime:
             runs=self.state_store.runs,
             permissions=self.state_store.permissions.values(),
         )
+        if self._focus_identity(previous_focus) != self._focus_identity(focus):
+            if not resolution.resolved:
+                self.focus_manager.set_focus(previous_focus)
+                return resolution
+            self._publish_focus_changed(focus)
+        return resolution
 
     def _focus_from_command(self, command: CommandEnvelope) -> ScreenFocus:
         target = self._target_mapping(command)

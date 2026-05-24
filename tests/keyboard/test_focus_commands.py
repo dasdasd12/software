@@ -254,6 +254,34 @@ def test_focused_permission_rejects_run_id_collision_with_parent_scope_mismatch(
     assert result.code == "UNRESOLVED_TARGET"
 
 
+def test_focused_permission_conflict_does_not_fallback_to_global_permission():
+    resolver = TargetResolver()
+
+    result = resolver.resolve(
+        "focused_permission",
+        focus=ScreenFocus(
+            device_id="kbd_01",
+            mode="run",
+            instance_id="codex-software",
+            session_id="sess_01",
+            run_id="run_01",
+        ),
+        permissions=[
+            {
+                "request_id": "perm_wrong_parent",
+                "instance_id": "claude-hardware",
+                "session_id": "sess_other",
+                "run_id": "run_01",
+                "priority": 100,
+            },
+            {"request_id": "perm_global", "priority": 1},
+        ],
+    )
+
+    assert not result.resolved
+    assert result.code == "UNRESOLVED_TARGET"
+
+
 def test_focused_permission_rejects_session_id_match_with_instance_mismatch():
     resolver = TargetResolver()
 
@@ -568,3 +596,55 @@ def test_symbolic_target_fallback_syncs_snapshot_and_emits_focus_changed():
     assert len(fallback_events) == 1
     assert fallback_events[0].payload["mode"] == "session"
     assert fallback_events[0].payload["target"]["run_id"] is None
+
+
+def test_unsafe_focus_fallback_to_mismatched_session_does_not_publish_or_mutate_snapshot():
+    runtime = build_runtime()
+    runtime.state_store.sessions = {
+        "sess_01": {"session_id": "sess_01", "instance_id": "claude-hardware"},
+    }
+    calls = []
+
+    def downstream(command: CommandEnvelope) -> EventEnvelope:
+        calls.append(command)
+        return EventEnvelope(seq=0, type="downstream.called", payload={})
+
+    runtime.keyboard_runtime.register_targeted_handlers(runtime.command_router, {
+        "agent.session.close": downstream,
+        "agent.run.interrupt": downstream,
+    })
+    runtime.command_router.dispatch(_command(
+        "agent.focus.set",
+        target={"device_id": "kbd_01"},
+        payload={
+            "mode": "run",
+            "instance_id": "codex-software",
+            "session_id": "sess_01",
+            "run_id": "run_missing",
+        },
+    ))
+    original_focus = runtime.snapshot().to_dict()["focus"]["kbd_01"]
+    after_initial_focus_seq = runtime.event_bus.last_seq
+
+    session_event = runtime.command_router.dispatch(_command(
+        "agent.session.close",
+        target="focused_session",
+        command_id="cmd_close_unsafe_fallback",
+    ))
+    run_event = runtime.command_router.dispatch(_command(
+        "agent.run.interrupt",
+        target="focused_run",
+        command_id="cmd_interrupt_unsafe_fallback",
+    ))
+
+    assert calls == []
+    assert session_event.type == "command.target.unresolved"
+    assert run_event.type == "command.target.unresolved"
+    assert runtime.snapshot().to_dict()["focus"]["kbd_01"] == original_focus
+
+    fallback_events = [
+        item
+        for item in runtime.event_bus.events_after(after_initial_focus_seq)
+        if item.type == "agent.focus.changed"
+    ]
+    assert fallback_events == []

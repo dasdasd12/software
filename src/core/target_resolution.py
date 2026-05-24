@@ -96,6 +96,9 @@ class TargetResolver:
             if match:
                 return TargetResolution.resolved_target(selector, self._permission_target(match))
 
+        if self._has_permission_focus_scope_conflict(pending, focus):
+            return TargetResolution.unresolved(selector, "focused permission conflicts with parent focus scope")
+
         global_match = self._first(pending, self._is_global_permission)
         if global_match:
             return TargetResolution.resolved_target(selector, self._permission_target(global_match))
@@ -234,6 +237,29 @@ class TargetResolver:
         if not permission_value:
             return True
         return permission_value == self._focus_value(focus, parent_field)
+
+    def _has_permission_focus_scope_conflict(
+        self,
+        permissions: Iterable[Mapping[str, Any]],
+        focus: Any,
+    ) -> bool:
+        for permission in permissions:
+            run_id = self._focus_value(focus, "run_id")
+            if (
+                run_id
+                and permission.get("run_id") == run_id
+                and not self._permission_matches_focus_scope(permission, focus, "run_id")
+            ):
+                return True
+
+            session_id = self._focus_value(focus, "session_id")
+            if (
+                session_id
+                and permission.get("session_id") == session_id
+                and not self._permission_matches_focus_scope(permission, focus, "session_id")
+            ):
+                return True
+        return False
 
     def _run_matches_focus(self, run: Mapping[str, Any], focus: Any) -> bool:
         for field in ("session_id", "instance_id"):
