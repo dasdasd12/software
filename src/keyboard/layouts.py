@@ -34,6 +34,7 @@ def _default_key_ids() -> FrozenSet[str]:
         "K_ENTER",
         "K_ESC",
         "K_TAB",
+        "K_CAPS_LOCK",
         "K_SPACE",
         "K_BACKSPACE",
         "K_DELETE",
@@ -42,6 +43,9 @@ def _default_key_ids() -> FrozenSet[str]:
         "K_PAGE_UP",
         "K_PAGE_DOWN",
         "K_INSERT",
+        "K_PRINT_SCREEN",
+        "K_SCROLL_LOCK",
+        "K_PAUSE",
     ]
     agent_keys = ["K_LAUNCH", "K_TOOL_1", "K_TOOL_2", "K_TOOL_3", "K_TOOL_4"]
     macro_keys = [f"K_MACRO_{number}" for number in range(1, 7)]

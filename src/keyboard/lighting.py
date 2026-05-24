@@ -4,6 +4,10 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional
 
 
+class LightingConfigParseError(ValueError):
+    """Raised when lighting JSON cannot be parsed into the typed model."""
+
+
 @dataclass(frozen=True)
 class LightingLayer:
     id: str
@@ -40,22 +44,39 @@ class LightingConfig:
 
 
 def lighting_layer_from_dict(data: Dict[str, Any]) -> LightingLayer:
+    if not isinstance(data, dict):
+        raise LightingConfigParseError("lighting_config.layers items must be objects")
+    per_key = data.get("per_key") or {}
+    if not isinstance(per_key, dict):
+        raise LightingConfigParseError("lighting_config.layers.per_key must be an object")
     return LightingLayer(
         id=data.get("id", ""),
         effect=data.get("effect", "static"),
         color=data.get("color"),
         speed=data.get("speed"),
-        per_key={key: dict(value) for key, value in (data.get("per_key") or {}).items()},
+        per_key={key: dict(value) for key, value in per_key.items()},
     )
 
 
 def lighting_config_from_dict(data: Optional[Dict[str, Any]]) -> Optional[LightingConfig]:
     if data is None:
         return None
+    if not isinstance(data, dict):
+        raise LightingConfigParseError("lighting_config must be an object")
+    enabled = data.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise LightingConfigParseError("lighting_config.enabled must be a boolean")
+    layers = data.get("layers", [])
+    if not isinstance(layers, list):
+        raise LightingConfigParseError("lighting_config.layers must be a list")
+    try:
+        brightness = int(data.get("brightness", 100))
+    except (TypeError, ValueError) as exc:
+        raise LightingConfigParseError("lighting_config.brightness must be an integer") from exc
     return LightingConfig(
-        enabled=bool(data.get("enabled", True)),
-        brightness=int(data.get("brightness", 100)),
-        layers=[lighting_layer_from_dict(item) for item in data.get("layers", [])],
+        enabled=enabled,
+        brightness=brightness,
+        layers=[lighting_layer_from_dict(item) for item in layers],
     )
 
 

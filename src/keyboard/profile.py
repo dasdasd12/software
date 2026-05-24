@@ -2,7 +2,7 @@
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .layouts import DEFAULT_PHYSICAL_LAYOUT_ID, get_layout_keys
 from .lighting import LightingConfig, lighting_config_from_dict, iter_lighting_key_references
@@ -17,6 +17,15 @@ SUPPORTED_ACTION_PREFIXES = (
     "agent.",
     "device.",
 )
+OFFLINE_ACTION_PREFIXES = (
+    "hid.",
+    "layer.",
+    "macro.",
+    "profile.",
+    "screen.",
+    "device.",
+)
+SERVICE_REQUIRED_ACTION_PREFIXES = ("agent.",)
 SUPPORTED_TRIGGER_SOURCES = {"key", "encoder", "screen_button", "system"}
 SUPPORTED_TRIGGER_EVENTS = {
     "press",
@@ -196,14 +205,14 @@ def validate_profile(
             f"target device family {profile.target_device_family} is incompatible with "
             f"{device_capabilities.device_family}"
         )
-    if device_capabilities and profile.agent_bindings and not device_capabilities.supports_agent_slots:
-        raise ProfileValidationError("device capability does not support agent slots")
-    if device_capabilities and profile.agent_bindings and not device_capabilities.supports_config_sync:
-        raise ProfileValidationError("device capability does not support config sync")
 
+    has_agent_actions = bool(profile.agent_bindings)
     known_keys = _known_layout_keys(profile, layout_keys)
     for key_id in _iter_keymap_key_references(profile.keymap):
         _validate_key_reference(key_id, known_keys)
+    for _, action in iter_keymap_actions(profile.keymap):
+        if _validate_profile_action(action, device_capabilities) == "service_required":
+            has_agent_actions = True
     for key_id in profile.magnetic_config.per_key.keys():
         _validate_key_reference(key_id, known_keys)
     _validate_lighting_config(profile.lighting_config, known_keys, device_capabilities)
@@ -224,6 +233,9 @@ def validate_profile(
             _validate_key_reference(activation_key, known_keys)
         for key_id in _iter_layer_key_references(layer):
             _validate_key_reference(key_id, known_keys)
+        for _, action in iter_layer_actions(layer):
+            if _validate_profile_action(action, device_capabilities) == "service_required":
+                has_agent_actions = True
 
     _validate_screen_layout(profile, device_capabilities)
     for binding in profile.agent_bindings:
@@ -235,20 +247,72 @@ def validate_profile(
             raise ProfileValidationError(f"unsupported trigger event: {binding.trigger.event}")
         if binding.trigger.key:
             _validate_key_reference(binding.trigger.key, known_keys)
-        if not binding.action.type.startswith(SUPPORTED_ACTION_PREFIXES):
-            raise ProfileValidationError(f"unsupported action type: {binding.action.type}")
         if binding.trigger.layer and binding.trigger.layer not in layer_ids:
             raise ProfileValidationError(f"unknown layer reference: {binding.trigger.layer}")
-        if binding.action.type.startswith("agent."):
-            if binding.action.target not in SUPPORTED_AGENT_TARGETS:
-                raise ProfileValidationError(f"unsupported agent target: {binding.action.target}")
-        _validate_action_capability(binding.action.type, device_capabilities)
+        if _validate_profile_action(binding.action, device_capabilities) == "service_required":
+            has_agent_actions = True
         _validate_binding_safety(binding)
+
+    if device_capabilities and has_agent_actions and not device_capabilities.supports_agent_slots:
+        raise ProfileValidationError("device capability does not support agent slots")
+    if device_capabilities and has_agent_actions and not device_capabilities.supports_config_sync:
+        raise ProfileValidationError("device capability does not support config sync")
 
 
 def _validate_key_reference(key_id: str, known_keys: set) -> None:
     if known_keys and key_id not in known_keys:
         raise ProfileValidationError(f"unknown key reference: {key_id}")
+
+
+def iter_keymap_actions(keymap: Dict[str, Any]) -> Iterable[Tuple[str, KeyboardAction]]:
+    for key_id, raw_action in _iter_keymap_action_items(keymap):
+        yield key_id, normalize_profile_action(raw_action)
+
+
+def iter_layer_actions(layer: Dict[str, Any]) -> Iterable[Tuple[str, KeyboardAction]]:
+    for key_id, raw_action in _iter_layer_action_items(layer):
+        yield key_id, normalize_profile_action(raw_action)
+
+
+def normalize_profile_action(action: Any) -> KeyboardAction:
+    if isinstance(action, KeyboardAction):
+        return action
+    if isinstance(action, str):
+        return KeyboardAction(type=action)
+    if isinstance(action, dict):
+        action_data = dict(action)
+        action_type = action_data.pop("type", "")
+        action_target = action_data.pop("target", None)
+        return KeyboardAction(type=action_type, target=action_target, payload=action_data)
+    raise ProfileValidationError("profile action must be a string or object")
+
+
+def classify_profile_action(action: KeyboardAction) -> str:
+    if action.type.startswith(OFFLINE_ACTION_PREFIXES):
+        return "offline"
+    if action.type.startswith(SERVICE_REQUIRED_ACTION_PREFIXES):
+        return "service_required"
+    raise ProfileValidationError(f"unsupported action type: {action.type}")
+
+
+def is_offline_profile_action(action: KeyboardAction) -> bool:
+    return classify_profile_action(action) == "offline"
+
+
+def is_service_required_profile_action(action: KeyboardAction) -> bool:
+    return classify_profile_action(action) == "service_required"
+
+
+def profile_action_to_dict(action: KeyboardAction) -> Dict[str, Any]:
+    return action.to_dict()
+
+
+def _validate_profile_action(action: KeyboardAction, device_capabilities: Optional[Any]) -> str:
+    action_class = classify_profile_action(action)
+    if action_class == "service_required" and action.target not in SUPPORTED_AGENT_TARGETS:
+        raise ProfileValidationError(f"unsupported agent target: {action.target}")
+    _validate_action_capability(action.type, device_capabilities)
+    return action_class
 
 
 def _known_layout_keys(profile: Profile, layout_keys: Optional[Iterable[str]]) -> set:
@@ -278,6 +342,19 @@ def _iter_keymap_key_references(keymap: Dict[str, Any]) -> Iterable[str]:
             yield key_id
 
 
+def _iter_keymap_action_items(keymap: Dict[str, Any]) -> Iterable[Tuple[str, Any]]:
+    if not isinstance(keymap, dict):
+        raise ProfileValidationError("keymap must be an object")
+    for field in ("bindings", "keys"):
+        value = keymap.get(field)
+        if isinstance(value, dict):
+            yield from value.items()
+    reserved = {"physical_layout_id", "bindings", "keys"}
+    for key_id, action in keymap.items():
+        if key_id not in reserved:
+            yield key_id, action
+
+
 def _iter_layer_key_references(layer: Dict[str, Any]) -> Iterable[str]:
     for field in ("keymap", "bindings", "keys"):
         value = layer.get(field)
@@ -287,6 +364,13 @@ def _iter_layer_key_references(layer: Dict[str, Any]) -> Iterable[str]:
             yield from value.keys()
 
 
+def _iter_layer_action_items(layer: Dict[str, Any]) -> Iterable[Tuple[str, Any]]:
+    for field in ("keymap", "bindings", "keys"):
+        value = layer.get(field)
+        if isinstance(value, dict):
+            yield from value.items()
+
+
 def _validate_lighting_config(
     lighting_config: Optional[LightingConfig],
     known_keys: set,
@@ -294,7 +378,13 @@ def _validate_lighting_config(
 ) -> None:
     if lighting_config is None:
         return
-    if not 0 <= int(lighting_config.brightness) <= 100:
+    if not isinstance(lighting_config.enabled, bool):
+        raise ProfileValidationError("lighting enabled must be a boolean")
+    try:
+        brightness = int(lighting_config.brightness)
+    except (TypeError, ValueError) as exc:
+        raise ProfileValidationError("lighting brightness must be an integer") from exc
+    if not 0 <= brightness <= 100:
         raise ProfileValidationError("lighting brightness must be between 0 and 100")
     for layer in lighting_config.layers:
         if not layer.id:
@@ -344,7 +434,10 @@ def profile_from_dict(data: Dict[str, Any]) -> Profile:
         raise ProfileValidationError(f"unsupported schema_version: {schema_version}")
 
     magnetic = data.get("magnetic_config") or {}
-    lighting = lighting_config_from_dict(data.get("lighting_config")) if "lighting_config" in data else None
+    try:
+        lighting = lighting_config_from_dict(data.get("lighting_config")) if "lighting_config" in data else None
+    except ValueError as exc:
+        raise ProfileValidationError(str(exc)) from exc
     bindings = []
     for item in data.get("agent_bindings", []):
         trigger_data = item.get("trigger") or {}

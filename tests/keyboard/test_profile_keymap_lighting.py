@@ -50,6 +50,7 @@ def _profile(**overrides):
             "bindings": {
                 "K_A": {"type": "hid.key", "usage": "KEY_A"},
                 "K_MACRO_1": {"type": "macro.play", "macro_id": "build"},
+                "K_LAUNCH": {"type": "profile.switch", "profile_id": "profile_ops"},
             },
         },
         "layers": [
@@ -95,7 +96,27 @@ def test_default_physical_layout_contains_core_agent_keys():
     layout = get_default_physical_layout()
 
     assert layout.layout_id == "ansi_75_ai_keyboard"
-    assert {"K_FN", "K_ENTER", "K_ESC", "K_LAUNCH", "K_TOOL_1", "K_TOOL_2"}.issubset(layout.key_ids)
+    assert {
+        "K_FN",
+        "K_ENTER",
+        "K_ESC",
+        "K_TAB",
+        "K_CAPS_LOCK",
+        "K_SPACE",
+        "K_BACKSPACE",
+        "K_DELETE",
+        "K_HOME",
+        "K_END",
+        "K_PAGE_UP",
+        "K_PAGE_DOWN",
+        "K_UP",
+        "K_DOWN",
+        "K_LEFT",
+        "K_RIGHT",
+        "K_LAUNCH",
+        "K_TOOL_1",
+        "K_TOOL_2",
+    }.issubset(layout.key_ids)
 
 
 @pytest.mark.parametrize(
@@ -139,7 +160,76 @@ def test_device_without_lighting_feature_rejects_lighting_profile_sync():
     service.upsert(profile)
 
     with pytest.raises(ProfileValidationError, match="lighting"):
-        service.validate_for_sync("profile_dev", _capabilities({"hid", "layers", "macros", "agent_bindings"}))
+        service.validate_for_sync("profile_dev", _capabilities({"hid", "layers", "macros", "profiles", "agent_bindings"}))
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        lambda profile: profile.keymap["bindings"].__setitem__("K_A", {"type": "unknown.action"}),
+        lambda profile: profile.layers[0]["keymap"].__setitem__("K_ENTER", {"type": "unknown.action"}),
+    ],
+)
+def test_profile_validation_rejects_unknown_keymap_and_layer_actions(patch):
+    profile = _profile()
+    patch(profile)
+
+    with pytest.raises(ProfileValidationError, match="unsupported action type"):
+        validate_profile(profile)
+
+
+def test_keymap_agent_action_requires_device_agent_capability():
+    profile = _profile(keymap={
+        "physical_layout_id": "ansi_75_ai_keyboard",
+        "bindings": {"K_A": {"type": "agent.run.interrupt", "target": "focused_run"}},
+    }, agent_bindings=[])
+
+    with pytest.raises(ProfileValidationError, match="agent_bindings"):
+        compile_profile_for_device(profile, _capabilities({"hid", "layers", "macros", "profiles", "lighting"}))
+
+
+def test_agent_actions_in_keymap_and_layers_are_service_required():
+    profile = _profile(
+        keymap={
+            "physical_layout_id": "ansi_75_ai_keyboard",
+            "bindings": {"K_ESC": {"type": "agent.run.interrupt", "target": "focused_run"}},
+        },
+        layers=[
+            {
+                "id": "layer_fn",
+                "activation": {"type": "hold_key", "key": "K_FN"},
+                "keymap": {
+                    "K_ENTER": {
+                        "type": "agent.permission.respond",
+                        "target": "focused_permission",
+                        "decision": "approve",
+                    }
+                },
+            }
+        ],
+        agent_bindings=[],
+    )
+
+    compiled = compile_profile_for_device(
+        profile,
+        _capabilities({"hid", "layers", "macros", "profiles", "lighting", "agent_bindings"}),
+    )
+
+    assert compiled["offline"]["keymap"] == {}
+    assert compiled["offline"]["layers"][0]["keymap"] == {}
+    assert compiled["service_required_actions"] == [
+        {
+            "key_id": "K_ESC",
+            "action_type": "agent.run.interrupt",
+            "target": "focused_run",
+        },
+        {
+            "layer_id": "layer_fn",
+            "key_id": "K_ENTER",
+            "action_type": "agent.permission.respond",
+            "target": "focused_permission",
+        },
+    ]
 
 
 def test_profile_json_round_trip_preserves_lighting_and_key_bindings():
@@ -155,6 +245,22 @@ def test_profile_json_round_trip_preserves_lighting_and_key_bindings():
     assert payload["keymap"]["bindings"]["K_MACRO_1"]["macro_id"] == "build"
 
 
+def test_lighting_json_rejects_non_object_config_without_attribute_error():
+    payload = _profile().to_dict()
+    payload["lighting_config"] = []
+
+    with pytest.raises(ProfileValidationError, match="lighting_config"):
+        import_profile_json(json.dumps(payload))
+
+
+def test_lighting_json_rejects_non_boolean_enabled_value():
+    payload = _profile().to_dict()
+    payload["lighting_config"]["enabled"] = "false"
+
+    with pytest.raises(ProfileValidationError, match="enabled"):
+        import_profile_json(json.dumps(payload))
+
+
 def test_compiler_outputs_offline_subset_and_service_required_actions():
     profile = _profile()
 
@@ -165,7 +271,10 @@ def test_compiler_outputs_offline_subset_and_service_required_actions():
 
     assert compiled["profile_id"] == "profile_dev"
     assert compiled["offline"]["hid"]["K_A"]["usage"] == "KEY_A"
+    assert compiled["offline"]["keymap"]["K_MACRO_1"]["macro_id"] == "build"
+    assert compiled["offline"]["keymap"]["K_LAUNCH"]["profile_id"] == "profile_ops"
     assert compiled["offline"]["layers"][0]["keymap"]["K_ENTER"]["usage"] == "KEY_ENTER"
+    assert compiled["offline"]["layers"][0]["keymap"]["K_TOOL_1"]["profile_id"] == "profile_ops"
     assert compiled["offline"]["macros"] == profile.macros
     assert compiled["offline"]["lighting"]["brightness"] == 70
     assert compiled["service_required_actions"] == [
