@@ -54,6 +54,8 @@ class AgentCommandService:
             accepted = await controller.send_interrupt(session_id)
         except Exception as exc:
             raise AgentLifecycleError("INTERRUPT_FAILED", str(exc)) from exc
+        if not accepted:
+            raise AgentLifecycleError("INTERRUPT_FAILED", "interrupt was not accepted by controller")
 
         self.runtime.update_state(session_id, "CANCELLED")
         self.runtime.persist(session_id)
@@ -67,6 +69,8 @@ class AgentCommandService:
             accepted = await controller.terminate(session_id)
         except Exception as exc:
             raise AgentLifecycleError("TERMINATE_FAILED", str(exc)) from exc
+        if not accepted:
+            raise AgentLifecycleError("TERMINATE_FAILED", "terminate was not accepted by controller")
 
         self.runtime.update_state(session_id, "CANCELLED")
         self.runtime.persist(session_id)
@@ -83,7 +87,7 @@ class AgentCommandService:
 
     @staticmethod
     def _agent(command: CommandEnvelope) -> Optional[str]:
-        target = command.target or {}
+        target = AgentCommandService._target(command)
         for container in (command.payload, target):
             value = container.get("agent") or container.get("provider_id")
             if isinstance(value, str) and value:
@@ -92,12 +96,20 @@ class AgentCommandService:
 
     @staticmethod
     def _session_id(command: CommandEnvelope) -> Optional[str]:
-        target = command.target or {}
+        target = AgentCommandService._target(command)
         for container in (target, command.payload):
             value = container.get("session_id")
             if isinstance(value, str) and value:
                 return value
         return None
+
+    @staticmethod
+    def _target(command: CommandEnvelope) -> dict:
+        if command.target is None:
+            return {}
+        if not isinstance(command.target, dict):
+            raise AgentLifecycleError("INVALID_COMMAND", "command target must be an object")
+        return command.target
 
     def _required_session_id(self, command: CommandEnvelope) -> str:
         session_id = self._session_id(command)

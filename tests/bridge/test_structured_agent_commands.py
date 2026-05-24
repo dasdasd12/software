@@ -36,6 +36,9 @@ class FakeController:
         self.resumes = []
         self.interrupts = []
         self.terminations = []
+        self.interrupt_error = None
+        self.interrupt_result = True
+        self.terminate_result = True
 
     def is_available(self):
         return True
@@ -49,12 +52,14 @@ class FakeController:
         return self.service.session_mgr.get(session_id)
 
     async def send_interrupt(self, session_id):
+        if self.interrupt_error:
+            raise self.interrupt_error
         self.interrupts.append(session_id)
-        return True
+        return self.interrupt_result
 
     async def terminate(self, session_id):
         self.terminations.append(session_id)
-        return True
+        return self.terminate_result
 
 
 def make_server():
@@ -90,6 +95,12 @@ def read_event(queue):
     payload = json.loads(queue.get_nowait())
     assert payload["type"] == "event"
     return payload["event"]
+
+
+def read_error(queue):
+    payload = json.loads(queue.get_nowait())
+    assert payload["type"] == "error"
+    return payload
 
 
 def test_structured_launch_or_resume_new_session_creates_session_and_calls_launch():
@@ -213,3 +224,78 @@ def test_legacy_launch_and_interrupt_share_structured_lifecycle_path_without_res
     ]
     assert events[-1].payload["session_id"] == session_id
     assert queue.items == []
+
+
+def test_legacy_interrupt_returns_error_when_controller_fails():
+    server = make_server()
+    session = server.session_mgr.create(AgentType.CODEX)
+    server.agents[AgentType.CODEX].interrupt_error = RuntimeError("provider refused interrupt")
+    queue = CaptureQueue()
+
+    asyncio.run(server._cmd_interrupt({
+        "type": "interrupt",
+        "session_id": session.session_id,
+    }, queue))
+
+    error = read_error(queue)
+    assert error["code"] == "INTERRUPT_FAILED"
+    assert error["message"] == "provider refused interrupt"
+    assert server.session_mgr.get(session.session_id).state != AgentState.CANCELLED
+
+
+def test_structured_command_with_non_object_target_returns_invalid_command():
+    server = make_server()
+    queue = CaptureQueue()
+
+    asyncio.run(server._cmd_structured_command({
+        "type": "command",
+        "command": {
+            "command_id": "cmd_bad_target",
+            "type": "agent.run.interrupt",
+            "source": {"kind": "test-client", "client_id": "pytest"},
+            "target": "bad",
+            "payload": {},
+        },
+    }, queue))
+
+    error = read_error(queue)
+    assert error["code"] == "INVALID_COMMAND"
+    assert "target" in error["message"]
+
+
+def test_structured_interrupt_returning_false_does_not_mark_cancelled():
+    server = make_server()
+    session = server.session_mgr.create(AgentType.CODEX)
+    server.session_mgr.update_state(session.session_id, AgentState.WORKING)
+    server.agents[AgentType.CODEX].interrupt_result = False
+    queue = CaptureQueue()
+
+    asyncio.run(server._cmd_structured_command(command_message(
+        "agent.run.interrupt",
+        target={"session_id": session.session_id},
+        command_id="cmd_interrupt_false",
+    ), queue))
+
+    error = read_error(queue)
+    assert error["code"] == "INTERRUPT_FAILED"
+    assert "not accepted" in error["message"]
+    assert server.session_mgr.get(session.session_id).state == AgentState.WORKING
+
+
+def test_structured_close_returning_false_does_not_mark_cancelled():
+    server = make_server()
+    session = server.session_mgr.create(AgentType.CODEX)
+    server.session_mgr.update_state(session.session_id, AgentState.WORKING)
+    server.agents[AgentType.CODEX].terminate_result = False
+    queue = CaptureQueue()
+
+    asyncio.run(server._cmd_structured_command(command_message(
+        "agent.session.close",
+        target={"session_id": session.session_id},
+        command_id="cmd_close_false",
+    ), queue))
+
+    error = read_error(queue)
+    assert error["code"] == "TERMINATE_FAILED"
+    assert "not accepted" in error["message"]
+    assert server.session_mgr.get(session.session_id).state == AgentState.WORKING

@@ -477,8 +477,7 @@ class LocalCoreServiceMVP:
         try:
             await self.runtime.command_router.dispatch_async(command)
         except AgentLifecycleError as exc:
-            if exc.code == "SESSION_NOT_FOUND":
-                await self._send_error(queue, exc.code, exc.message)
+            await self._send_error(queue, exc.code, exc.message)
 
     async def _cmd_list_sessions(self, msg: Dict[str, Any], queue: asyncio.Queue) -> None:
         if not await self._require_capability(queue, CAP_SESSION_LIST):
