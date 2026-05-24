@@ -27,6 +27,8 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from agent_proxy import AgentProxy
+from agents.commands import AgentCommandService
+from agents.runtime import AgentLifecycleError, AgentRuntime
 from app import build_runtime
 from core import CommandEnvelope, CommandSource
 from persistence import SQLiteAppStore
@@ -89,6 +91,13 @@ class LocalCoreServiceMVP:
         # Agent proxies
         self.agents: Dict[AgentType, AgentProxy] = {}
         self._init_agents()
+        self.agent_runtime = AgentRuntime(
+            session_manager=self.session_mgr,
+            controllers=self.agents,
+            persist_session=self._persist_session,
+        )
+        self.agent_commands = AgentCommandService(self.agent_runtime)
+        self.runtime.configure_agent_commands(self.agent_commands)
 
         # Local API client state. This is not the product device transport.
         self.connected_clients: Set[asyncio.Queue] = set()
@@ -339,6 +348,9 @@ class LocalCoreServiceMVP:
         except KeyError as exc:
             await self._send_error(queue, "UNKNOWN_COMMAND", str(exc))
             return
+        except AgentLifecycleError as exc:
+            await self._send_error(queue, exc.code, exc.message)
+            return
 
         if command.type == "system.snapshot.request":
             self._sync_runtime_state()
@@ -352,48 +364,35 @@ class LocalCoreServiceMVP:
             self._broadcast_core_event(event)
             return
 
+        self._sync_runtime_state()
         self._broadcast_core_event(event)
 
     async def _cmd_agent_launch(self, msg: Dict[str, Any], queue: asyncio.Queue) -> None:
         if not await self._require_capability(queue, CAP_AGENT_LAUNCH):
             return
 
-        agent_str = msg.get("agent", "claude")
+        agent_str = "claude" if msg.get("agent", "claude") == "claude" else "codex"
         session_id = msg.get("session_id", "new")
         context = msg.get("context", "")
-
-        agent_type = AgentType.CLAUDE if agent_str == "claude" else AgentType.CODEX
-        proxy = self.agents.get(agent_type)
-
-        if not proxy:
-            await self._send_error(queue, "AGENT_NOT_FOUND", f"{agent_str} is not configured")
+        command = self._legacy_agent_command(
+            "agent.session.launch_or_resume",
+            target={"session_id": session_id},
+            payload={"agent": agent_str, "context": context},
+        )
+        try:
+            event = await self.runtime.command_router.dispatch_async(command)
+        except AgentLifecycleError as exc:
+            self.logger.error(f"Launch failed: {exc.message}" if exc.code == "LAUNCH_FAILED" else exc.message)
+            await self._send_error(queue, exc.code, exc.message)
             return
-        if not proxy.is_available():
-            await self._send_error(queue, "AGENT_UNAVAILABLE", f"{agent_str} executable not found")
-            return
 
-        if session_id == "new":
-            sess = self.session_mgr.create(agent_type)
-            session_id = sess.session_id
-            self._persist_session(session_id)
-            try:
-                await proxy.launch(session_id, context)
-            except Exception as exc:
-                self.logger.error(f"Launch failed: {exc}")
-                await self._send_error(queue, "LAUNCH_FAILED", str(exc))
-                return
-        else:
-            sess = self.session_mgr.get(session_id)
-            if not sess:
-                await self._send_error(queue, "SESSION_NOT_FOUND", f"Session {session_id} does not exist")
-                return
-            await proxy.resume(session_id)
+        session_id = event.payload["session_id"]
 
         # Acknowledge launch
         ack = self.unifier.encode_device_message({
             "type": "task_update",
             "session_id": session_id,
-            "agent": agent_type.value,
+            "agent": event.payload["agent"],
             "state": AgentState.SUBMITTED.value,
         })
         await queue.put(ack)
@@ -471,16 +470,15 @@ class LocalCoreServiceMVP:
             return
 
         session_id = msg.get("session_id", "")
-        sess = self.session_mgr.get(session_id)
-        if not sess:
-            await self._send_error(queue, "SESSION_NOT_FOUND", f"Session {session_id} not found")
-            return
-
-        proxy = self.agents.get(sess.agent)
-        if proxy:
-            await proxy.send_interrupt(session_id)
-            self.session_mgr.update_state(session_id, AgentState.CANCELLED)
-            self._persist_session(session_id)
+        command = self._legacy_agent_command(
+            "agent.run.interrupt",
+            target={"session_id": session_id},
+        )
+        try:
+            await self.runtime.command_router.dispatch_async(command)
+        except AgentLifecycleError as exc:
+            if exc.code == "SESSION_NOT_FOUND":
+                await self._send_error(queue, exc.code, exc.message)
 
     async def _cmd_list_sessions(self, msg: Dict[str, Any], queue: asyncio.Queue) -> None:
         if not await self._require_capability(queue, CAP_SESSION_LIST):
@@ -832,6 +830,9 @@ class LocalCoreServiceMVP:
     @staticmethod
     def _capability_for_command(command_type: str) -> Optional[str]:
         return {
+            "agent.session.launch_or_resume": CAP_AGENT_LAUNCH,
+            "agent.run.interrupt": CAP_AGENT_LAUNCH,
+            "agent.session.close": CAP_AGENT_LAUNCH,
             "system.snapshot.request": CAP_SESSION_LIST,
             "notification.create": CAP_NOTIFICATION_CREATE,
         }.get(command_type)
@@ -849,6 +850,20 @@ class LocalCoreServiceMVP:
             target=command.target,
             command_id=command.command_id,
             timestamp=command.timestamp,
+        )
+
+    @staticmethod
+    def _legacy_agent_command(
+        command_type: str,
+        *,
+        target: Optional[Dict[str, Any]] = None,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> CommandEnvelope:
+        return CommandEnvelope(
+            type=command_type,
+            source=CommandSource(kind="legacy-local-api", client_id="legacy-local-api"),
+            payload=dict(payload or {}),
+            target=dict(target or {}),
         )
 
     def _is_websocket_origin_allowed(self, websocket: Any) -> bool:
