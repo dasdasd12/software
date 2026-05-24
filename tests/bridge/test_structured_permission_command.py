@@ -399,6 +399,8 @@ def test_unresolved_focused_permission_structured_command_returns_error_envelope
     error = read_payload(queue)
     assert error["type"] == "error"
     assert error["code"] == "UNRESOLVED_TARGET"
+    assert isinstance(error["message"], str)
+    assert isinstance(error["timestamp"], int)
 
 
 def test_device_structured_permission_cannot_approve_high_risk_permission():

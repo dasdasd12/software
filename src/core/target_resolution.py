@@ -113,8 +113,10 @@ class TargetResolver:
 
         run_id = self._focus_value(focus, "run_id")
         run = runs_by_id.get(run_id or "")
-        if run and self._run_matches_focus(run, focus):
-            return TargetResolution.resolved_target(selector, self._run_target(run))
+        if run:
+            if self._run_matches_focus(run, focus):
+                return TargetResolution.resolved_target(selector, self._run_target(run))
+            return TargetResolution.unresolved(selector, "focused run conflicts with parent focus scope")
 
         session_id = self._focus_value(focus, "session_id")
         session = sessions_by_id.get(session_id or "")
@@ -136,14 +138,17 @@ class TargetResolver:
         sessions_by_id = self._records_by_id(sessions, "session_id")
         runs_by_id = self._records_by_id(runs, "run_id")
 
+        run_id = self._focus_value(focus, "run_id")
+        run = runs_by_id.get(run_id or "")
+        if run and not self._run_matches_focus(run, focus):
+            return TargetResolution.unresolved(selector, "focused run conflicts with parent focus scope")
+
         session_id = self._focus_value(focus, "session_id")
         session = sessions_by_id.get(session_id or "")
         if session and self._session_matches_focus(session, focus):
             return TargetResolution.resolved_target(selector, self._session_target(session))
 
-        run_id = self._focus_value(focus, "run_id")
-        run = runs_by_id.get(run_id or "")
-        if run and self._run_matches_focus(run, focus):
+        if run:
             run_session_id = run.get("session_id")
             session = sessions_by_id.get(run_session_id or "")
             if session and self._session_matches_focus(session, focus):

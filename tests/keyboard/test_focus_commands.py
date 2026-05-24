@@ -424,6 +424,59 @@ def test_focused_run_rejects_active_run_from_another_session():
     assert result.code == "UNRESOLVED_TARGET"
 
 
+def test_focused_run_does_not_fallback_to_active_run_when_explicit_run_conflicts():
+    resolver = TargetResolver()
+
+    result = resolver.resolve(
+        "focused_run",
+        focus=ScreenFocus(
+            device_id="kbd_01",
+            mode="run",
+            session_id="sess_01",
+            run_id="run_conflict",
+        ),
+        sessions={"sess_01": {"session_id": "sess_01", "active_run_id": "run_active"}},
+        runs={
+            "run_conflict": {"run_id": "run_conflict", "session_id": "sess_other"},
+            "run_active": {"run_id": "run_active", "session_id": "sess_01"},
+        },
+    )
+
+    assert not result.resolved
+    assert result.code == "UNRESOLVED_TARGET"
+
+
+def test_focused_session_rejects_conflicting_explicit_run_child():
+    resolver = TargetResolver()
+
+    result = resolver.resolve(
+        "focused_session",
+        focus=ScreenFocus(
+            device_id="kbd_01",
+            mode="run",
+            instance_id="codex-software",
+            session_id="sess_01",
+            run_id="run_conflict",
+        ),
+        sessions={
+            "sess_01": {
+                "session_id": "sess_01",
+                "instance_id": "codex-software",
+            }
+        },
+        runs={
+            "run_conflict": {
+                "run_id": "run_conflict",
+                "instance_id": "codex-software",
+                "session_id": "sess_other",
+            }
+        },
+    )
+
+    assert not result.resolved
+    assert result.code == "UNRESOLVED_TARGET"
+
+
 def test_empty_snapshot_contains_focus_map():
     runtime = build_runtime()
 
