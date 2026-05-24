@@ -1,17 +1,25 @@
-"""Agent lifecycle command handlers."""
+"""Agent command handlers."""
 
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional
 
 from core import CommandEnvelope, CommandRouter, EventEnvelope
 
 from .runtime import AgentLifecycleError, AgentRuntime
 
 
-class AgentCommandService:
-    """Owns lifecycle side effects for structured agent commands."""
+PermissionResponder = Callable[[CommandEnvelope], Awaitable[Dict[str, Any]]]
 
-    def __init__(self, runtime: AgentRuntime):
+
+class AgentCommandService:
+    """Owns agent side effects for structured agent commands."""
+
+    def __init__(
+        self,
+        runtime: AgentRuntime,
+        permission_responder: Optional[PermissionResponder] = None,
+    ):
         self.runtime = runtime
+        self._permission_responder = permission_responder
 
     async def launch_or_resume(self, command: CommandEnvelope) -> EventEnvelope:
         session_id = self._session_id(command) or "new"
@@ -76,6 +84,23 @@ class AgentCommandService:
         self.runtime.persist(session_id)
         return self._event("agent.session.closed", session_id, closed=True, accepted=bool(accepted))
 
+    async def respond_permission(self, command: CommandEnvelope) -> EventEnvelope:
+        if self._permission_responder is None:
+            raise AgentLifecycleError(
+                "PERMISSION_UNAVAILABLE",
+                "permission response handling is not configured",
+            )
+        ack = await self._permission_responder(command)
+        return EventEnvelope(
+            seq=0,
+            type="agent.permission.resolved",
+            target={
+                "permission_id": ack.get("request_id"),
+                "session_id": ack.get("session_id"),
+            },
+            payload=ack,
+        )
+
     def _event(self, event_type: str, session_id: str, **extra: Any) -> EventEnvelope:
         payload = self.runtime.session_payload(session_id, **extra)
         return EventEnvelope(
@@ -125,3 +150,4 @@ def register_agent_lifecycle_handlers(
     router.register("agent.session.launch_or_resume", service.launch_or_resume)
     router.register("agent.run.interrupt", service.interrupt)
     router.register("agent.session.close", service.close_session)
+    router.register("agent.permission.respond", service.respond_permission)

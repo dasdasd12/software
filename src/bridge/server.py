@@ -96,7 +96,10 @@ class LocalCoreServiceMVP:
             controllers=self.agents,
             persist_session=self._persist_session,
         )
-        self.agent_commands = AgentCommandService(self.agent_runtime)
+        self.agent_commands = AgentCommandService(
+            self.agent_runtime,
+            permission_responder=self._handle_permission_command,
+        )
         self.runtime.configure_agent_commands(self.agent_commands)
 
         # Local API client state. This is not the product device transport.
@@ -341,6 +344,9 @@ class LocalCoreServiceMVP:
         if required_capability and not await self._require_capability(queue, required_capability):
             return
         command = self._command_from_client_identity(command, queue)
+        if command.type == "agent.permission.respond":
+            await self._dispatch_permission_command(command, queue)
+            return
 
         self._sync_runtime_state()
         try:
@@ -398,26 +404,69 @@ class LocalCoreServiceMVP:
         await queue.put(ack)
 
     async def _cmd_permission_response(self, msg: Dict[str, Any], queue: asyncio.Queue) -> None:
-        request_id = msg.get("request_id", "")
+        target: Dict[str, Any] = {"permission_id": msg.get("request_id", "")}
         session_id = msg.get("session_id")
+        if isinstance(session_id, str) and session_id:
+            target["session_id"] = session_id
+        command = CommandEnvelope(
+            type="agent.permission.respond",
+            source=self._command_source_for_queue(queue),
+            target=target,
+            payload={"approved": msg.get("approved", False)},
+        )
+        await self._dispatch_permission_command(command, queue)
+
+    async def _dispatch_permission_command(
+        self,
+        command: CommandEnvelope,
+        queue: asyncio.Queue,
+    ) -> None:
+        await self._prune_expired_permissions_async()
         try:
-            approved = self._parse_approved(msg.get("approved", False))
-        except ValueError as exc:
-            await self._send_error(queue, "INVALID_PERMISSION_RESPONSE", str(exc))
+            event = await self.runtime.command_router.dispatch_async(command)
+        except KeyError as exc:
+            await self._send_error(queue, "UNKNOWN_COMMAND", str(exc))
+            return
+        except AgentLifecycleError as exc:
+            await self._send_error(queue, exc.code, exc.message)
             return
 
+        self._sync_runtime_state()
+        await queue.put(self.unifier.encode_device_message(dict(event.payload)))
+
+    async def _handle_permission_command(self, command: CommandEnvelope) -> Dict[str, Any]:
+        target = command.target
+        if target is None:
+            target = {}
+        if not isinstance(target, dict):
+            raise AgentLifecycleError("INVALID_COMMAND", "command target must be an object")
+
+        request_id = (
+            target.get("permission_id")
+            or target.get("request_id")
+            or command.payload.get("permission_id")
+            or command.payload.get("request_id")
+        )
+        if not isinstance(request_id, str) or not request_id:
+            raise AgentLifecycleError("INVALID_COMMAND", "target.permission_id is required")
+        session_id = target.get("session_id") or command.payload.get("session_id")
+        if not isinstance(session_id, str):
+            session_id = None
+        try:
+            approved = self._parse_approved(command.payload.get("approved", False))
+        except ValueError as exc:
+            raise AgentLifecycleError("INVALID_PERMISSION_RESPONSE", str(exc)) from exc
+
         self.logger.info(f"Permission {request_id}: {'APPROVED' if approved else 'DENIED'}")
-        await self._prune_expired_permissions_async()
 
         pending_key, pending = self._find_pending_permission(request_id, session_id)
         if not pending:
-            await self._send_error(queue, "REQUEST_NOT_FOUND", f"Permission request {request_id} not found")
-            return
+            raise AgentLifecycleError("REQUEST_NOT_FOUND", f"Permission request {request_id} not found")
 
-        allowed, code, reason = self._can_submit_permission_response(queue, pending, approved)
+        client = self._client_for_command_source(command.source)
+        allowed, code, reason = self._can_submit_permission_response_for_client(client, pending, approved)
         if not allowed:
-            await self._send_error(queue, code, reason)
-            return
+            raise AgentLifecycleError(code, reason)
 
         proxy = self.agents.get(pending.agent)
         result = {"accepted": True, "forwarded": False, "evidence": {}}
@@ -425,45 +474,39 @@ class LocalCoreServiceMVP:
             try:
                 result = await proxy.handle_permission_response(
                     pending.session_id,
-                    request_id,
+                    pending.request_id,
                     approved,
                 )
             except Exception as exc:
                 self.logger.warning(f"Permission forward failed for {request_id}: {exc}")
-                await self._send_error(queue, "PERMISSION_FORWARD_FAILED", str(exc))
-                return
+                raise AgentLifecycleError("PERMISSION_FORWARD_FAILED", str(exc)) from exc
 
         if not result.get("accepted", True):
-            await self._send_error(
-                queue,
+            raise AgentLifecycleError(
                 "PERMISSION_REJECTED",
                 "permission adapter rejected the response",
             )
-            return
 
         if proxy and not result.get("forwarded", False) and self._requires_native_forwarding(pending.agent, result):
-            await self._send_error(
-                queue,
+            raise AgentLifecycleError(
                 "PERMISSION_FORWARD_FAILED",
                 result.get("evidence", {}).get("reason", "permission was not forwarded to provider"),
             )
-            return
 
         self.pending_permissions.pop(pending_key, None)
 
         if not self._is_terminal_session(pending.session_id):
             self.session_mgr.update_state(pending.session_id, AgentState.WORKING)
-        self._append_permission_history(queue, pending, approved, result)
+        self._append_permission_history(client, pending, approved, result)
         self._persist_session(pending.session_id)
-        ack = self.unifier.encode_device_message({
+        return {
             "type": "permission_ack",
-            "request_id": request_id,
+            "request_id": pending.request_id,
             "session_id": pending.session_id,
             "approved": approved,
             "forwarded": bool(result.get("forwarded", False)),
             "evidence": result.get("evidence", {}),
-        })
-        await queue.put(ack)
+        }
 
     async def _cmd_interrupt(self, msg: Dict[str, Any], queue: asyncio.Queue) -> None:
         if not await self._require_capability(queue, CAP_AGENT_LAUNCH):
@@ -665,14 +708,13 @@ class LocalCoreServiceMVP:
 
     def _append_permission_history(
         self,
-        queue: asyncio.Queue,
+        client: ClientIdentity,
         pending: PendingPermission,
         approved: bool,
         result: Dict[str, Any],
     ) -> None:
         if not self.app_store:
             return
-        client = self._client_for_queue(queue)
         try:
             self.app_store.permission_history.append({
                 "permission_id": pending.request_id,
@@ -719,6 +761,26 @@ class LocalCoreServiceMVP:
             capabilities=default_capabilities_for(ClientKind.DESKTOP_UI),
         )
 
+    def _client_for_command_source(self, source: CommandSource) -> ClientIdentity:
+        for identity in self.client_identities.values():
+            if identity.kind.value == source.kind and identity.client_id == source.client_id:
+                return identity
+
+        try:
+            kind = ClientKind(source.kind)
+        except ValueError:
+            return ClientIdentity(
+                kind=ClientKind.DESKTOP_UI,
+                client_id=source.client_id or "legacy-local-api",
+                capabilities=default_capabilities_for(ClientKind.DESKTOP_UI),
+            )
+
+        return ClientIdentity(
+            kind=kind,
+            client_id=source.client_id or kind.value,
+            capabilities=default_capabilities_for(kind),
+        )
+
     def _can_submit_permission_response(
         self,
         queue: asyncio.Queue,
@@ -726,6 +788,14 @@ class LocalCoreServiceMVP:
         approved: bool,
     ) -> Tuple[bool, str, str]:
         client = self._client_for_queue(queue)
+        return self._can_submit_permission_response_for_client(client, pending, approved)
+
+    def _can_submit_permission_response_for_client(
+        self,
+        client: ClientIdentity,
+        pending: PendingPermission,
+        approved: bool,
+    ) -> Tuple[bool, str, str]:
         policy = self.approval_policy_engine.evaluate(
             self.approval_policy,
             pending.risk_level,
@@ -844,12 +914,16 @@ class LocalCoreServiceMVP:
         client = self._client_for_queue(queue)
         return CommandEnvelope(
             type=command.type,
-            source=CommandSource(kind=client.kind.value, client_id=client.client_id),
+            source=self._command_source_for_queue(queue),
             payload=dict(command.payload),
             target=command.target,
             command_id=command.command_id,
             timestamp=command.timestamp,
         )
+
+    def _command_source_for_queue(self, queue: asyncio.Queue) -> CommandSource:
+        client = self._client_for_queue(queue)
+        return CommandSource(kind=client.kind.value, client_id=client.client_id)
 
     @staticmethod
     def _legacy_agent_command(
