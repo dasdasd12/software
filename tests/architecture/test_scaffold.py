@@ -59,6 +59,7 @@ def test_runtime_builds_snapshot_and_routes_events():
         "profiles",
         "notifications",
         "permissions",
+        "active_tools",
     }
 
 

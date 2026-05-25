@@ -45,6 +45,11 @@ def make_server(security):
     })
 
 
+def find_pending_permission(server, request_id, session_id=None, instance_id=None, run_id=None):
+    _key, pending = server._find_pending_permission(request_id, session_id, instance_id, run_id)
+    return pending
+
+
 async def serve(server):
     ws_server = await websockets.serve(server._handle_local_api_client, "127.0.0.1", 0)
     port = ws_server.sockets[0].getsockname()[1]
@@ -379,7 +384,7 @@ def test_test_client_without_permission_capability_cannot_approve_real_permissio
     error = json.loads(queue.get_nowait())
     assert error["type"] == "error"
     assert error["code"] == "CAPABILITY_DENIED"
-    assert "req_test" in server.pending_permissions
+    assert find_pending_permission(server, "req_test", session.session_id) is not None
     assert proxy.responses == []
 
 
@@ -413,7 +418,7 @@ def test_device_transport_requires_desktop_confirm_for_high_risk_approval():
     error = json.loads(queue.get_nowait())
     assert error["type"] == "error"
     assert error["code"] == "REQUIRE_DESKTOP_CONFIRM"
-    assert "req_high" in server.pending_permissions
+    assert find_pending_permission(server, "req_high", session.session_id) is not None
     assert proxy.responses == []
 
 
@@ -447,5 +452,5 @@ def test_device_transport_can_approve_low_risk_permission_with_low_risk_capabili
     ack = json.loads(queue.get_nowait())
     assert ack["type"] == "permission_ack"
     assert ack["request_id"] == "req_low"
-    assert "req_low" not in server.pending_permissions
+    assert find_pending_permission(server, "req_low", session.session_id) is None
     assert proxy.responses == [(session.session_id, "req_low", True)]
