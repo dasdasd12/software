@@ -10,7 +10,7 @@ BRIDGE_DIR = Path(__file__).resolve().parents[2] / "src" / "bridge"
 sys.path.insert(0, str(BRIDGE_DIR))
 
 from server import LocalCoreServiceMVP  # noqa: E402
-from session_manager import AgentState, AgentType  # noqa: E402
+from session_manager import AgentState, AgentType, Session  # noqa: E402
 
 
 class FakeProxy:
@@ -388,6 +388,103 @@ def test_global_permission_snapshot_and_focused_permission_scope_boundaries():
     asyncio.run(with_local_api(run_client))
 
 
+def test_focused_permission_priority_selects_highest_global_request():
+    async def run_client(service, uri):
+        async with websockets.connect(uri) as ws:
+            service._on_agent_event(service.unifier.encode_device_message({
+                "type": "permission_request",
+                "request_id": "req_global_low_priority",
+                "agent": "codex",
+                "tool": "shell",
+                "description": "Low priority global command",
+                "timeout_sec": 30,
+                "risk_level": "low",
+                "priority": "invalid",
+            }))
+            low_request = await recv_json(ws)
+            assert low_request["type"] == "permission_request"
+
+            service._on_agent_event(service.unifier.encode_device_message({
+                "type": "permission_request",
+                "request_id": "req_global_high_priority",
+                "agent": "codex",
+                "tool": "shell",
+                "description": "High priority global command",
+                "timeout_sec": 30,
+                "risk_level": "low",
+                "priority": "50",
+            }))
+            high_request = await recv_json(ws)
+            assert high_request["type"] == "permission_request"
+
+            await ws.send(json.dumps({
+                "type": "command",
+                "command": {
+                    "command_id": "cmd_priority_snapshot",
+                    "type": "system.snapshot.request",
+                    "source": {"kind": "test-client", "client_id": "pytest"},
+                    "payload": {},
+                },
+            }))
+            snapshot = await recv_json(ws)
+            permissions = {
+                permission["request_id"]: permission
+                for permission in snapshot["snapshot"]["permissions"]
+            }
+            assert permissions["req_global_low_priority"]["priority"] == 0
+            assert permissions["req_global_high_priority"]["priority"] == 50
+            snapshot_event = await recv_json(ws)
+            assert snapshot_event["type"] == "event"
+            assert snapshot_event["event"]["type"] == "system.snapshot.generated"
+
+            await ws.send(json.dumps({
+                "type": "command",
+                "command": {
+                    "command_id": "cmd_focus_dashboard_for_priority",
+                    "type": "agent.focus.set",
+                    "source": {
+                        "kind": "keyboard-device",
+                        "client_id": "kbd_01",
+                        "device_id": "kbd_01",
+                    },
+                    "target": {"device_id": "legacy-local-api"},
+                    "payload": {"mode": "global_dashboard"},
+                },
+            }))
+            focus_event = await recv_json(ws)
+            assert focus_event["type"] == "event"
+            assert focus_event["event"]["type"] == "agent.focus.changed"
+
+            await ws.send(json.dumps({
+                "type": "command",
+                "command": {
+                    "command_id": "cmd_approve_highest_priority_global",
+                    "type": "agent.permission.respond",
+                    "source": {
+                        "kind": "keyboard-device",
+                        "client_id": "kbd_01",
+                        "device_id": "kbd_01",
+                    },
+                    "target": "focused_permission",
+                    "payload": {"approved": True},
+                },
+            }))
+            ack = await recv_json(ws)
+            resolved = await recv_json(ws)
+
+            assert ack["type"] == "permission_ack"
+            assert ack["request_id"] == "req_global_high_priority"
+            assert resolved["type"] == "event"
+            assert resolved["event"]["type"] == "agent.permission.resolved"
+            assert "req_global_high_priority" not in service.pending_permissions
+            assert "req_global_low_priority" in service.pending_permissions
+            assert service.agents[AgentType.CODEX].permission_responses == [
+                (None, "req_global_high_priority", True)
+            ]
+
+    asyncio.run(with_local_api(run_client))
+
+
 def test_run_only_permission_snapshot_and_run_focus_approval():
     async def run_client(service, uri):
         async with websockets.connect(uri) as ws:
@@ -474,6 +571,100 @@ def test_run_only_permission_snapshot_and_run_focus_approval():
             assert service.agents[AgentType.CODEX].permission_responses == [
                 (None, "req_run_only_snapshot", True)
             ]
+
+    asyncio.run(with_local_api(run_client))
+
+
+def test_existing_run_ancestry_conflict_keeps_permission_unresolved():
+    async def run_client(service, uri):
+        session = Session(
+            session_id="conflict",
+            agent=AgentType.CODEX,
+            state=AgentState.WORKING,
+        )
+        service.session_mgr.restore(session)
+
+        async with websockets.connect(uri) as ws:
+            service._on_agent_event(service.unifier.encode_device_message({
+                "type": "permission_request",
+                "request_id": "req_conflicting_parent",
+                "run_id": "run_conflict",
+                "session_id": "wrong_session",
+                "agent": "codex",
+                "tool": "shell",
+                "description": "Run-scoped command with conflicting parent",
+                "timeout_sec": 30,
+                "risk_level": "low",
+            }))
+            request = await recv_json(ws)
+            assert request["type"] == "permission_request"
+            assert request["run_id"] == "run_conflict"
+            assert request["session_id"] == "wrong_session"
+
+            await ws.send(json.dumps({
+                "type": "command",
+                "command": {
+                    "command_id": "cmd_conflict_snapshot",
+                    "type": "system.snapshot.request",
+                    "source": {"kind": "test-client", "client_id": "pytest"},
+                    "payload": {},
+                },
+            }))
+            snapshot = await recv_json(ws)
+            run_record = snapshot["snapshot"]["runs"]["run_conflict"]
+            assert run_record["session_id"] == "conflict"
+            assert run_record["instance_id"] == "codex-default"
+            permission = snapshot["snapshot"]["permissions"][0]
+            assert permission["request_id"] == "req_conflicting_parent"
+            assert permission["run_id"] == "run_conflict"
+            assert permission["session_id"] == "wrong_session"
+            snapshot_event = await recv_json(ws)
+            assert snapshot_event["type"] == "event"
+            assert snapshot_event["event"]["type"] == "system.snapshot.generated"
+
+            await ws.send(json.dumps({
+                "type": "command",
+                "command": {
+                    "command_id": "cmd_focus_authoritative_run",
+                    "type": "agent.focus.set",
+                    "source": {
+                        "kind": "keyboard-device",
+                        "client_id": "kbd_01",
+                        "device_id": "kbd_01",
+                    },
+                    "target": {"device_id": "legacy-local-api"},
+                    "payload": {
+                        "mode": "run",
+                        "instance_id": "codex-default",
+                        "session_id": "conflict",
+                        "run_id": "run_conflict",
+                    },
+                },
+            }))
+            focus_event = await recv_json(ws)
+            assert focus_event["type"] == "event"
+            assert focus_event["event"]["type"] == "agent.focus.changed"
+
+            await ws.send(json.dumps({
+                "type": "command",
+                "command": {
+                    "command_id": "cmd_reject_conflicting_parent_permission",
+                    "type": "agent.permission.respond",
+                    "source": {
+                        "kind": "keyboard-device",
+                        "client_id": "kbd_01",
+                        "device_id": "kbd_01",
+                    },
+                    "target": "focused_permission",
+                    "payload": {"approved": True},
+                },
+            }))
+            error = await recv_json(ws)
+
+            assert error["type"] == "error"
+            assert error["code"] == "UNRESOLVED_TARGET"
+            assert "req_conflicting_parent" in service.pending_permissions
+            assert service.agents[AgentType.CODEX].permission_responses == []
 
     asyncio.run(with_local_api(run_client))
 

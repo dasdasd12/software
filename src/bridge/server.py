@@ -73,6 +73,7 @@ class PendingPermission:
     tool: str = "unknown"
     description: str = ""
     run_id: Optional[str] = None
+    priority: int = 0
     native: Optional[Dict[str, Any]] = None
 
 
@@ -659,19 +660,43 @@ class LocalCoreServiceMVP:
             "risk_level": pending.risk_level.value,
             "tool": pending.tool,
             "description": pending.description,
+            "priority": pending.priority,
         }
         run_id = self._pending_run_id(pending)
         if run_id:
             record["run_id"] = run_id
         run_record = runs.get(run_id, {}) if run_id else {}
-        session_id = self._pending_permission_session_id(pending, run_record)
+        run_record_for_derivation = (
+            run_record
+            if not self._permission_parent_conflicts_with_run(pending, run_record)
+            else {}
+        )
+        session_id = self._pending_permission_session_id(pending, run_record_for_derivation)
         if session_id:
             record["session_id"] = session_id
         session_record = sessions.get(session_id, {}) if session_id else {}
-        instance_id = self._pending_permission_instance_id(pending, session_record, run_record)
+        instance_id = self._pending_permission_instance_id(
+            pending,
+            session_record,
+            run_record_for_derivation,
+        )
         if instance_id:
             record["instance_id"] = instance_id
         return record
+
+    @staticmethod
+    def _permission_parent_conflicts_with_run(
+        pending: PendingPermission,
+        run_record: Dict[str, Any],
+    ) -> bool:
+        if not run_record:
+            return False
+        for field in ("session_id", "instance_id"):
+            pending_value = getattr(pending, field)
+            run_value = run_record.get(field)
+            if pending_value and run_value and pending_value != run_value:
+                return True
+        return False
 
     @staticmethod
     def _pending_permission_session_id(
@@ -710,16 +735,29 @@ class LocalCoreServiceMVP:
         run_id = permission_record.get("run_id")
         if not isinstance(run_id, str) or not run_id:
             return
-        session_id = permission_record.get("session_id")
+        existing_run = runs.get(run_id)
+        if existing_run:
+            run_record = dict(existing_run)
+            run_record.setdefault("run_id", run_id)
+            for field in ("session_id", "instance_id", "provider_id", "agent"):
+                if run_record.get(field):
+                    continue
+                value = permission_record.get(field)
+                if value:
+                    run_record[field] = value
+            session_id = run_record.get("session_id")
+            session_record = sessions.get(session_id, {}) if isinstance(session_id, str) else {}
+            run_record.setdefault("state", session_record.get("state", AgentState.WAITING_PERMISSION.value))
+            runs[run_id] = run_record
+            return
+
+        run_record = {"run_id": run_id}
+        for field in ("session_id", "instance_id", "provider_id", "agent"):
+            value = permission_record.get(field)
+            if value:
+                run_record[field] = value
+        session_id = run_record.get("session_id")
         session_record = sessions.get(session_id, {}) if isinstance(session_id, str) else {}
-        run_record = dict(runs.get(run_id, {}))
-        run_record.update({
-            "run_id": run_id,
-            "session_id": permission_record.get("session_id"),
-            "instance_id": permission_record.get("instance_id"),
-            "provider_id": permission_record.get("provider_id"),
-            "agent": permission_record.get("agent"),
-        })
         run_record.setdefault("state", session_record.get("state", AgentState.WAITING_PERMISSION.value))
         runs[run_id] = run_record
 
@@ -865,6 +903,7 @@ class LocalCoreServiceMVP:
             tool=str(event.get("tool", "unknown")),
             description=str(event.get("description", "")),
             run_id=run_id,
+            priority=self._priority_from_event(event.get("priority")),
             native=event.get("native") if isinstance(event.get("native"), dict) else None,
         )
         if session_id:
@@ -1068,6 +1107,13 @@ class LocalCoreServiceMVP:
             return RiskLevel(value)
         except (TypeError, ValueError):
             return RiskLevel.MEDIUM
+
+    @staticmethod
+    def _priority_from_event(value: Any) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError, OverflowError):
+            return 0
 
     @staticmethod
     def _parse_approved(value: Any) -> bool:
