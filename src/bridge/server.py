@@ -64,10 +64,11 @@ _permission_client_context: ContextVar[Optional[ClientIdentity]] = ContextVar(
 @dataclass
 class PendingPermission:
     request_id: str
-    session_id: str
     agent: AgentType
     created_at: float
     timeout_sec: int
+    session_id: Optional[str] = None
+    instance_id: Optional[str] = None
     risk_level: RiskLevel = RiskLevel.MEDIUM
     tool: str = "unknown"
     description: str = ""
@@ -491,6 +492,9 @@ class LocalCoreServiceMVP:
         session_id = target.get("session_id") or command.payload.get("session_id")
         if not isinstance(session_id, str):
             session_id = None
+        instance_id = target.get("instance_id") or command.payload.get("instance_id")
+        if not isinstance(instance_id, str):
+            instance_id = None
         try:
             approved = self._parse_approved(command.payload.get("approved", False))
         except ValueError as exc:
@@ -498,7 +502,7 @@ class LocalCoreServiceMVP:
 
         self.logger.info(f"Permission {request_id}: {'APPROVED' if approved else 'DENIED'}")
 
-        pending_key, pending = self._find_pending_permission(request_id, session_id)
+        pending_key, pending = self._find_pending_permission(request_id, session_id, instance_id)
         if not pending:
             raise AgentLifecycleError("REQUEST_NOT_FOUND", f"Permission request {request_id} not found")
 
@@ -539,7 +543,7 @@ class LocalCoreServiceMVP:
 
         self.pending_permissions.pop(pending_key, None)
 
-        if not self._is_terminal_session(pending.session_id):
+        if pending.session_id and not self._is_terminal_session(pending.session_id):
             self.session_mgr.update_state(pending.session_id, AgentState.WORKING)
         self._append_permission_history(client, pending, approved, result)
         self._persist_session(pending.session_id)
@@ -643,11 +647,10 @@ class LocalCoreServiceMVP:
         sessions: Dict[str, Dict[str, Any]],
     ) -> Dict[str, Any]:
         provider_id = pending.agent.value
-        session_record = sessions.get(pending.session_id, {})
+        session_record = sessions.get(pending.session_id, {}) if pending.session_id else {}
         instance_id = self._pending_permission_instance_id(pending, session_record)
-        return {
+        record = {
             "request_id": pending.request_id,
-            "session_id": pending.session_id,
             "instance_id": instance_id,
             "provider_id": provider_id,
             "agent": provider_id,
@@ -655,14 +658,21 @@ class LocalCoreServiceMVP:
             "risk_level": pending.risk_level.value,
             "tool": pending.tool,
             "description": pending.description,
-            "run_id": self._pending_run_id(pending),
         }
+        if pending.session_id:
+            record["session_id"] = pending.session_id
+        run_id = self._pending_run_id(pending)
+        if run_id:
+            record["run_id"] = run_id
+        return record
 
     def _pending_permission_instance_id(
         self,
         pending: PendingPermission,
         session_record: Dict[str, Any],
     ) -> str:
+        if pending.instance_id:
+            return pending.instance_id
         instance_id = session_record.get("instance_id")
         if isinstance(instance_id, str) and instance_id:
             return instance_id
@@ -714,7 +724,7 @@ class LocalCoreServiceMVP:
         run_ids: Dict[str, str] = {}
         for pending in self.pending_permissions.values():
             run_id = self._pending_run_id(pending)
-            if run_id:
+            if pending.session_id and run_id:
                 run_ids.setdefault(pending.session_id, run_id)
         return run_ids
 
@@ -807,15 +817,21 @@ class LocalCoreServiceMVP:
             return
 
         request_id = event.get("request_id", "")
-        session_id = event.get("session_id", "")
+        session_id = event.get("session_id")
+        if not isinstance(session_id, str) or not session_id:
+            session_id = None
+        instance_id = event.get("instance_id")
+        if not isinstance(instance_id, str) or not instance_id:
+            instance_id = None
         agent = self._agent_from_string(event.get("agent", ""))
-        if not request_id or not session_id or not agent:
+        if not request_id or not agent or (not session_id and not instance_id):
             return
 
-        permission_key = self._pending_permission_key(request_id, session_id)
+        permission_key = self._pending_permission_key(request_id, session_id, instance_id)
         self.pending_permissions[permission_key] = PendingPermission(
             request_id=request_id,
             session_id=session_id,
+            instance_id=instance_id,
             agent=agent,
             created_at=time.time(),
             timeout_sec=int(event.get("timeout_sec", self.cfg["unifier"].get("permission_timeout_sec", 30))),
@@ -825,8 +841,9 @@ class LocalCoreServiceMVP:
             run_id=event.get("run_id") if isinstance(event.get("run_id"), str) else None,
             native=event.get("native") if isinstance(event.get("native"), dict) else None,
         )
-        self.session_mgr.update_state(session_id, AgentState.WAITING_PERMISSION)
-        self._persist_session(session_id)
+        if session_id:
+            self.session_mgr.update_state(session_id, AgentState.WAITING_PERMISSION)
+            self._persist_session(session_id)
 
     def _collect_expired_permissions(self) -> List[Tuple[str, PendingPermission]]:
         now = time.time()
@@ -876,7 +893,9 @@ class LocalCoreServiceMVP:
                 result.get("evidence", {}).get("reason", "unknown"),
             )
 
-    def _is_terminal_session(self, session_id: str) -> bool:
+    def _is_terminal_session(self, session_id: Optional[str]) -> bool:
+        if not session_id:
+            return False
         session = self.session_mgr.get(session_id)
         return bool(session and session.state in {
             AgentState.COMPLETED,
@@ -897,7 +916,9 @@ class LocalCoreServiceMVP:
         if isinstance(session_id, str) and session_id:
             self._persist_session(session_id)
 
-    def _persist_session(self, session_id: str) -> None:
+    def _persist_session(self, session_id: Optional[str]) -> None:
+        if not session_id:
+            return
         if not self.app_store:
             return
         session = self.session_mgr.get(session_id)
@@ -1034,22 +1055,45 @@ class LocalCoreServiceMVP:
                 return False
         raise ValueError("approved must be a boolean or an explicit approve/deny string")
 
-    def _pending_permission_key(self, request_id: str, session_id: str) -> str:
+    def _pending_permission_key(
+        self,
+        request_id: str,
+        session_id: Optional[str] = None,
+        instance_id: Optional[str] = None,
+    ) -> str:
         existing = self.pending_permissions.get(request_id)
-        if existing is None or existing.session_id == session_id:
+        if (
+            existing is None
+            or (existing.session_id == session_id and existing.instance_id == instance_id)
+        ):
             return request_id
-        return f"{session_id}:{request_id}"
+        if session_id:
+            return f"{session_id}:{request_id}"
+        if instance_id:
+            return f"{instance_id}:{request_id}"
+        return f"global:{request_id}"
 
     def _find_pending_permission(
         self,
         request_id: str,
         session_id: Any = None,
+        instance_id: Any = None,
     ) -> Tuple[str, Optional[PendingPermission]]:
         if isinstance(session_id, str) and session_id:
             matches = [
                 (key, pending)
                 for key, pending in self.pending_permissions.items()
                 if pending.request_id == request_id and pending.session_id == session_id
+            ]
+        elif isinstance(instance_id, str) and instance_id:
+            matches = [
+                (key, pending)
+                for key, pending in self.pending_permissions.items()
+                if (
+                    pending.request_id == request_id
+                    and pending.instance_id == instance_id
+                    and not pending.session_id
+                )
             ]
         else:
             matches = [

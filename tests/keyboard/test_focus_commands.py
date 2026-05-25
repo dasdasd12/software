@@ -780,6 +780,41 @@ def test_unresolved_focused_run_and_session_emit_structured_error_events():
     assert session_event.payload["command_id"] == "cmd_unresolved_session"
 
 
+def test_unresolved_target_dispatch_does_not_publish_or_advance_snapshot_seq():
+    runtime = build_runtime()
+    calls = []
+
+    def downstream(command: CommandEnvelope) -> EventEnvelope:
+        calls.append(command)
+        return EventEnvelope(seq=0, type="downstream.called", payload={})
+
+    runtime.keyboard_runtime.register_targeted_handlers(runtime.command_router, {
+        "agent.run.interrupt": downstream,
+    })
+    runtime.command_router.dispatch(_command(
+        "agent.focus.set",
+        target={"device_id": "kbd_01"},
+        payload={"mode": "global_dashboard"},
+    ))
+    start_seq = runtime.event_bus.last_seq
+    start_snapshot_seq = runtime.snapshot().to_dict()["last_event_seq"]
+
+    event = runtime.command_router.dispatch(_command(
+        "agent.run.interrupt",
+        target="focused_run",
+        command_id="cmd_unpublished_unresolved_run",
+    ))
+
+    assert calls == []
+    assert event.type == "command.target.unresolved"
+    assert runtime.event_bus.last_seq == start_seq
+    assert runtime.snapshot().to_dict()["last_event_seq"] == start_snapshot_seq
+    assert all(
+        item.type != "command.target.unresolved"
+        for item in runtime.event_bus.events_after(start_seq)
+    )
+
+
 def test_symbolic_target_fallback_syncs_snapshot_and_emits_focus_changed():
     runtime = build_runtime()
     runtime.state_store.sessions = {

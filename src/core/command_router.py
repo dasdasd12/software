@@ -53,6 +53,8 @@ class CommandRouter:
         return handler
 
     def _publish(self, event: EventEnvelope) -> EventEnvelope:
+        if event.type == "command.target.unresolved":
+            return event
         if self._state_store is not None:
             self._state_store.apply_event(event)
         return self._event_bus.publish(event)

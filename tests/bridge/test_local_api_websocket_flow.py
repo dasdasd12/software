@@ -208,6 +208,44 @@ def test_structured_snapshot_command_returns_snapshot_with_runtime_state():
     asyncio.run(with_local_api(run_client))
 
 
+def test_structured_snapshot_includes_instance_scoped_permission_without_session_or_run():
+    async def run_client(service, uri):
+        async with websockets.connect(uri) as ws:
+            service._on_agent_event(service.unifier.encode_device_message({
+                "type": "permission_request",
+                "request_id": "req_instance_snapshot",
+                "instance_id": "codex-default",
+                "agent": "codex",
+                "tool": "shell",
+                "description": "Run command",
+                "timeout_sec": 30,
+            }))
+            request = await recv_json(ws)
+            assert request["type"] == "permission_request"
+            assert request["request_id"] == "req_instance_snapshot"
+            assert request["instance_id"] == "codex-default"
+
+            await ws.send(json.dumps({
+                "type": "command",
+                "command": {
+                    "command_id": "cmd_instance_permission_snapshot",
+                    "type": "system.snapshot.request",
+                    "source": {"kind": "test-client", "client_id": "pytest"},
+                    "payload": {},
+                },
+            }))
+            payload = await recv_json(ws)
+
+            assert payload["type"] == "snapshot"
+            permission = payload["snapshot"]["permissions"][0]
+            assert permission["request_id"] == "req_instance_snapshot"
+            assert permission["instance_id"] == "codex-default"
+            assert "session_id" not in permission
+            assert "run_id" not in permission
+
+    asyncio.run(with_local_api(run_client))
+
+
 def test_structured_command_publishes_event_message_to_connected_clients():
     async def run_client(service, uri):
         async with websockets.connect(uri) as ws:
@@ -686,6 +724,78 @@ def test_focused_permission_response_does_not_resolve_session_permission_from_in
             assert ack["type"] == "error"
             assert ack["code"] == "UNRESOLVED_TARGET"
             assert service.agents[AgentType.CODEX].permission_responses == []
+
+    asyncio.run(with_local_api(run_client))
+
+
+def test_focused_permission_response_resolves_instance_scoped_permission_from_instance_focus():
+    async def run_client(service, uri):
+        async with websockets.connect(uri) as ws:
+            await ws.send(json.dumps({
+                "type": "command",
+                "command": {
+                    "command_id": "cmd_focus_codex_instance_permission",
+                    "type": "agent.focus.set",
+                    "source": {
+                        "kind": "keyboard-device",
+                        "client_id": "kbd_01",
+                        "device_id": "kbd_01",
+                    },
+                    "target": {"device_id": "legacy-local-api"},
+                    "payload": {
+                        "mode": "instance",
+                        "instance_id": "codex-default",
+                    },
+                },
+            }))
+            focus_event = await recv_json(ws)
+            assert focus_event["type"] == "event"
+            assert focus_event["event"]["type"] == "agent.focus.changed"
+
+            service._on_agent_event(service.unifier.encode_device_message({
+                "type": "permission_request",
+                "request_id": "req_focused_instance_scope",
+                "instance_id": "codex-default",
+                "agent": "codex",
+                "tool": "shell",
+                "description": "Run command",
+                "timeout_sec": 30,
+                "risk_level": "low",
+            }))
+            request = await recv_json(ws)
+            assert request["type"] == "permission_request"
+            assert request["request_id"] == "req_focused_instance_scope"
+            assert request["instance_id"] == "codex-default"
+            assert "session_id" not in request
+
+            await ws.send(json.dumps({
+                "type": "command",
+                "command": {
+                    "command_id": "cmd_approve_instance_scoped_permission",
+                    "type": "agent.permission.respond",
+                    "source": {
+                        "kind": "keyboard-device",
+                        "client_id": "kbd_01",
+                        "device_id": "kbd_01",
+                    },
+                    "target": "focused_permission",
+                    "payload": {"approved": True},
+                },
+            }))
+            ack = await recv_json(ws)
+            resolved = await recv_json(ws)
+
+            assert ack["type"] == "permission_ack"
+            assert ack["request_id"] == "req_focused_instance_scope"
+            assert ack["session_id"] is None
+            assert ack["approved"] is True
+            assert resolved["type"] == "event"
+            assert resolved["event"]["type"] == "agent.permission.resolved"
+            assert resolved["event"]["payload"]["request_id"] == "req_focused_instance_scope"
+            assert "req_focused_instance_scope" not in service.pending_permissions
+            assert service.agents[AgentType.CODEX].permission_responses == [
+                (None, "req_focused_instance_scope", True)
+            ]
 
     asyncio.run(with_local_api(run_client))
 
