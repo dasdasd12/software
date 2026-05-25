@@ -8,7 +8,7 @@ sys.path.insert(0, str(SRC_DIR))
 from app import build_runtime  # noqa: E402
 from core import CommandEnvelope, CommandSource, EventEnvelope  # noqa: E402
 from core.target_resolution import TargetResolver  # noqa: E402
-from keyboard import ScreenFocus  # noqa: E402
+from keyboard import FocusManager, ScreenFocus  # noqa: E402
 
 
 def _command(
@@ -423,6 +423,172 @@ def test_active_agent_symbolic_command_is_resolved_before_downstream_handler():
         "provider_id": "codex",
         "agent": "codex",
     }
+
+
+def test_resolve_focus_fills_run_ancestry_from_records():
+    manager = FocusManager()
+    manager.set_focus(ScreenFocus(
+        device_id="kbd_01",
+        mode="run",
+        run_id="run_01",
+    ))
+
+    focus = manager.resolve_focus(
+        "kbd_01",
+        existing_instances=[{
+            "instance_id": "codex-software",
+            "provider_id": "codex",
+            "agent": "codex",
+        }],
+        existing_sessions=[{
+            "session_id": "sess_01",
+            "instance_id": "codex-software",
+        }],
+        existing_runs=[{
+            "run_id": "run_01",
+            "session_id": "sess_01",
+            "instance_id": "codex-software",
+        }],
+    )
+
+    assert focus.mode == "run"
+    assert focus.run_id == "run_01"
+    assert focus.session_id == "sess_01"
+    assert focus.instance_id == "codex-software"
+
+
+def test_active_agent_command_resolves_from_session_focus_without_instance_id():
+    runtime = build_runtime()
+    runtime.state_store.agents = {
+        "codex-software": {
+            "instance_id": "codex-software",
+            "provider_id": "codex",
+            "agent": "codex",
+        }
+    }
+    runtime.state_store.sessions = {
+        "sess_01": {"session_id": "sess_01", "instance_id": "codex-software"},
+    }
+    calls = []
+
+    def downstream(command: CommandEnvelope) -> EventEnvelope:
+        calls.append(command)
+        return EventEnvelope(seq=0, type="downstream.called", payload={})
+
+    runtime.keyboard_runtime.register_targeted_handlers(runtime.command_router, {
+        "agent.session.launch_or_resume": downstream,
+    })
+    focus_event = runtime.command_router.dispatch(_command(
+        "agent.focus.set",
+        target={"device_id": "kbd_01"},
+        payload={"mode": "session", "session_id": "sess_01"},
+    ))
+
+    event = runtime.command_router.dispatch(_command(
+        "agent.session.launch_or_resume",
+        target="active_agent",
+        command_id="cmd_active_agent_from_session",
+    ))
+
+    assert focus_event.payload["target"]["instance_id"] == "codex-software"
+    assert event.type == "downstream.called"
+    assert calls[0].target["instance_id"] == "codex-software"
+
+
+def test_active_agent_command_resolves_from_run_focus_without_parents():
+    runtime = build_runtime()
+    runtime.state_store.agents = {
+        "codex-software": {
+            "instance_id": "codex-software",
+            "provider_id": "codex",
+            "agent": "codex",
+        }
+    }
+    runtime.state_store.sessions = {
+        "sess_01": {"session_id": "sess_01", "instance_id": "codex-software"},
+    }
+    runtime.state_store.runs = {
+        "run_01": {
+            "run_id": "run_01",
+            "session_id": "sess_01",
+            "instance_id": "codex-software",
+        },
+    }
+    calls = []
+
+    def downstream(command: CommandEnvelope) -> EventEnvelope:
+        calls.append(command)
+        return EventEnvelope(seq=0, type="downstream.called", payload={})
+
+    runtime.keyboard_runtime.register_targeted_handlers(runtime.command_router, {
+        "agent.session.launch_or_resume": downstream,
+    })
+    focus_event = runtime.command_router.dispatch(_command(
+        "agent.focus.set",
+        target={"device_id": "kbd_01"},
+        payload={"mode": "run", "run_id": "run_01"},
+    ))
+
+    event = runtime.command_router.dispatch(_command(
+        "agent.session.launch_or_resume",
+        target="active_agent",
+        command_id="cmd_active_agent_from_run",
+    ))
+
+    assert focus_event.payload["target"] == {
+        "instance_id": "codex-software",
+        "session_id": "sess_01",
+        "run_id": "run_01",
+    }
+    assert event.type == "downstream.called"
+    assert calls[0].target["instance_id"] == "codex-software"
+
+
+def test_active_agent_does_not_resolve_when_explicit_focus_parent_conflicts():
+    runtime = build_runtime()
+    runtime.state_store.agents = {
+        "codex-software": {"instance_id": "codex-software", "agent": "codex"},
+        "claude-hardware": {"instance_id": "claude-hardware", "agent": "claude"},
+    }
+    runtime.state_store.sessions = {
+        "sess_01": {"session_id": "sess_01", "instance_id": "codex-software"},
+    }
+    runtime.state_store.runs = {
+        "run_01": {
+            "run_id": "run_01",
+            "session_id": "sess_01",
+            "instance_id": "codex-software",
+        },
+    }
+    calls = []
+
+    def downstream(command: CommandEnvelope) -> EventEnvelope:
+        calls.append(command)
+        return EventEnvelope(seq=0, type="downstream.called", payload={})
+
+    runtime.keyboard_runtime.register_targeted_handlers(runtime.command_router, {
+        "agent.session.launch_or_resume": downstream,
+    })
+    runtime.command_router.dispatch(_command(
+        "agent.focus.set",
+        target={"device_id": "kbd_01"},
+        payload={
+            "mode": "run",
+            "run_id": "run_01",
+            "instance_id": "claude-hardware",
+        },
+    ))
+    original_focus = runtime.snapshot().to_dict()["focus"]["kbd_01"]
+
+    event = runtime.command_router.dispatch(_command(
+        "agent.session.launch_or_resume",
+        target="active_agent",
+        command_id="cmd_active_agent_conflict",
+    ))
+
+    assert event.type == "command.target.unresolved"
+    assert calls == []
+    assert runtime.snapshot().to_dict()["focus"]["kbd_01"] == original_focus
 
 
 def test_focused_run_requires_explicit_active_run_for_session_focus():

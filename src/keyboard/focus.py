@@ -69,25 +69,51 @@ class FocusManager:
     def resolve_focus(
         self,
         device_id: str,
-        existing_instances: Iterable[str] = (),
-        existing_sessions: Iterable[str] = (),
-        existing_runs: Iterable[str] = (),
+        existing_instances: Iterable[Any] = (),
+        existing_sessions: Iterable[Any] = (),
+        existing_runs: Iterable[Any] = (),
+        fallback_missing: bool = True,
+        fallback_to_dashboard: bool = True,
     ) -> ScreenFocus:
         focus = self.get_focus(device_id)
-        instances = set(existing_instances)
-        sessions = set(existing_sessions)
-        runs = set(existing_runs)
+        instances = self._records_by_id(existing_instances, "instance_id")
+        sessions = self._records_by_id(existing_sessions, "session_id")
+        runs = self._records_by_id(existing_runs, "run_id")
 
         if focus.run_id and focus.run_id in runs:
+            run = runs[focus.run_id]
+            if not self._record_matches_focus_parents(run, focus, ("session_id", "instance_id")):
+                return focus
+            session_id = focus.session_id or self._str_or_none(run.get("session_id"))
+            instance_id = focus.instance_id or self._str_or_none(run.get("instance_id"))
+            session = sessions.get(session_id or "")
+            if session and not self._record_matches_focus_parents(session, focus, ("instance_id",)):
+                return focus
+            if session and not instance_id:
+                instance_id = self._str_or_none(session.get("instance_id"))
+            return self.set_focus(ScreenFocus(
+                device_id=device_id,
+                mode="run",
+                instance_id=instance_id,
+                session_id=session_id,
+                run_id=focus.run_id,
+                selected_notification_id=focus.selected_notification_id,
+            ))
+        if focus.run_id and not fallback_missing:
             return focus
         if focus.session_id and focus.session_id in sessions:
+            session = sessions[focus.session_id]
+            if not self._record_matches_focus_parents(session, focus, ("instance_id",)):
+                return focus
             return self.set_focus(ScreenFocus(
                 device_id=device_id,
                 mode="session",
-                instance_id=focus.instance_id,
+                instance_id=focus.instance_id or self._str_or_none(session.get("instance_id")),
                 session_id=focus.session_id,
                 selected_notification_id=focus.selected_notification_id,
             ))
+        if focus.session_id and not fallback_missing:
+            return focus
         if focus.instance_id and focus.instance_id in instances:
             return self.set_focus(ScreenFocus(
                 device_id=device_id,
@@ -95,6 +121,10 @@ class FocusManager:
                 instance_id=focus.instance_id,
                 selected_notification_id=focus.selected_notification_id,
             ))
+        if focus.instance_id and not fallback_missing:
+            return focus
+        if not fallback_to_dashboard:
+            return focus
         return self.set_focus(ScreenFocus(device_id=device_id, mode="global_dashboard"))
 
     @staticmethod
@@ -108,6 +138,60 @@ class FocusManager:
             "session_id": getattr(value, "session_id", None),
             "instance_id": getattr(value, "instance_id", None),
         }
+
+    def _records_by_id(self, source: Iterable[Any], id_field: str) -> Dict[str, Dict[str, Any]]:
+        records: Dict[str, Dict[str, Any]] = {}
+        if isinstance(source, Mapping):
+            for key, value in source.items():
+                record = self._record(value, id_field)
+                record.setdefault(id_field, str(key))
+                record_id = self._record_id(record, id_field)
+                if record_id:
+                    records[record_id] = record
+            return records
+
+        for value in source:
+            record = self._record(value, id_field)
+            record_id = self._record_id(record, id_field)
+            if record_id:
+                records[record_id] = record
+        return records
+
+    @staticmethod
+    def _record(value: Any, id_field: str) -> Dict[str, Any]:
+        if isinstance(value, str):
+            return {id_field: value}
+        if isinstance(value, Mapping):
+            return dict(value)
+        to_dict = getattr(value, "to_dict", None)
+        if callable(to_dict):
+            return dict(to_dict())
+        result: Dict[str, Any] = {}
+        for field in ("instance_id", "session_id", "run_id", "active_run_id", "provider_id", "agent"):
+            attr = getattr(value, field, None)
+            if attr is not None:
+                result[field] = attr
+        return result
+
+    @staticmethod
+    def _record_id(record: Mapping[str, Any], id_field: str) -> Optional[str]:
+        value = record.get(id_field)
+        if isinstance(value, str) and value:
+            return value
+        return None
+
+    @staticmethod
+    def _record_matches_focus_parents(
+        record: Mapping[str, Any],
+        focus: ScreenFocus,
+        parent_fields: Iterable[str],
+    ) -> bool:
+        for field in parent_fields:
+            focus_value = getattr(focus, field, None)
+            record_value = record.get(field)
+            if focus_value and record_value and record_value != focus_value:
+                return False
+        return True
 
     @staticmethod
     def _str_or_none(value: Any) -> Optional[str]:

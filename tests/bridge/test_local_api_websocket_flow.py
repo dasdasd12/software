@@ -446,6 +446,59 @@ def test_structured_launch_resolves_active_agent_to_synced_default_instance():
     asyncio.run(with_local_api(run_client))
 
 
+def test_structured_launch_resolves_active_agent_from_session_focus_only():
+    async def run_client(service, uri):
+        session = service.session_mgr.create(AgentType.CODEX)
+
+        async with websockets.connect(uri) as ws:
+            await ws.send(json.dumps({
+                "type": "command",
+                "command": {
+                    "command_id": "cmd_focus_session_for_launch",
+                    "type": "agent.focus.set",
+                    "source": {
+                        "kind": "keyboard-device",
+                        "client_id": "kbd_01",
+                        "device_id": "kbd_01",
+                    },
+                    "target": {"device_id": "legacy-local-api"},
+                    "payload": {
+                        "mode": "session",
+                        "session_id": session.session_id,
+                    },
+                },
+            }))
+            focus_event = await recv_json(ws)
+            assert focus_event["type"] == "event"
+            assert focus_event["event"]["type"] == "agent.focus.changed"
+            assert focus_event["event"]["payload"]["target"]["instance_id"] == "codex-default"
+
+            await ws.send(json.dumps({
+                "type": "command",
+                "command": {
+                    "command_id": "cmd_launch_active_agent_from_session",
+                    "type": "agent.session.launch_or_resume",
+                    "source": {
+                        "kind": "keyboard-device",
+                        "client_id": "kbd_01",
+                        "device_id": "kbd_01",
+                    },
+                    "target": "active_agent",
+                    "payload": {"context": "from focused session agent"},
+                },
+            }))
+            payload = await recv_json(ws)
+
+            assert payload["type"] == "event"
+            assert payload["event"]["type"] == "agent.session.created"
+            assert payload["event"]["payload"]["agent"] == "codex"
+            assert service.agents[AgentType.CODEX].launched == [
+                (payload["event"]["payload"]["session_id"], "from focused session agent")
+            ]
+
+    asyncio.run(with_local_api(run_client))
+
+
 def test_agent_launch_uses_fake_proxy_and_broadcasts_events():
     async def run_client(service, uri):
         async with websockets.connect(uri) as ws:

@@ -41,7 +41,14 @@ class KeyboardRuntime:
             router.register(command_type, self._with_resolved_target(handler))
 
     def set_focus(self, command: CommandEnvelope) -> EventEnvelope:
-        focus = self.focus_manager.set_focus(self._focus_from_command(command))
+        raw_focus = self.focus_manager.set_focus(self._focus_from_command(command))
+        focus = self._resolve_focus_from_state(
+            raw_focus.device_id,
+            fallback_missing=False,
+            fallback_to_dashboard=False,
+        )
+        if not self._focus_ancestry_is_safe(focus):
+            focus = self.focus_manager.set_focus(raw_focus)
         return self._focus_changed_event(focus)
 
     def next_session(self, command: CommandEnvelope) -> EventEnvelope:
@@ -75,17 +82,11 @@ class KeyboardRuntime:
     ) -> TargetResolution:
         device_id = self._device_id(command)
         previous_focus = self.focus_manager.get_focus(device_id)
-        focus = self.focus_manager.resolve_focus(
-            device_id,
-            existing_instances=self.state_store.agents.keys(),
-            existing_sessions=self.state_store.sessions.keys(),
-            existing_runs=self.state_store.runs.keys(),
-        )
+        focus = self._resolve_focus_from_state(device_id)
         focus_changed = self._focus_identity(previous_focus) != self._focus_identity(focus)
-        if focus_changed and not self._focus_ancestry_is_safe(focus):
+        if not self._focus_ancestry_is_safe(focus):
             self.focus_manager.set_focus(previous_focus)
-            focus = previous_focus
-            focus_changed = False
+            return TargetResolution.unresolved(selector, "focused target conflicts with parent focus scope")
 
         resolution = self.target_resolver.resolve(
             selector,
@@ -101,6 +102,22 @@ class KeyboardRuntime:
                 return resolution
             self._publish_focus_changed(focus)
         return resolution
+
+    def _resolve_focus_from_state(
+        self,
+        device_id: str,
+        *,
+        fallback_missing: bool = True,
+        fallback_to_dashboard: bool = True,
+    ) -> ScreenFocus:
+        return self.focus_manager.resolve_focus(
+            device_id,
+            existing_instances=self.state_store.agents,
+            existing_sessions=self.state_store.sessions,
+            existing_runs=self.state_store.runs,
+            fallback_missing=fallback_missing,
+            fallback_to_dashboard=fallback_to_dashboard,
+        )
 
     def _focus_from_command(self, command: CommandEnvelope) -> ScreenFocus:
         target = self._target_mapping(command)
@@ -260,6 +277,7 @@ class KeyboardRuntime:
     ) -> bool:
         for field in parent_fields:
             focus_value = getattr(focus, field, None)
-            if focus_value and record.get(field) != focus_value:
+            record_value = record.get(field)
+            if focus_value and record_value and record_value != focus_value:
                 return False
         return True
