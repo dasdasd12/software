@@ -11,6 +11,7 @@ Usage:
 
 import argparse
 import asyncio
+import hashlib
 import json
 import logging
 import signal
@@ -436,6 +437,12 @@ class LocalCoreServiceMVP:
         session_id = msg.get("session_id")
         if isinstance(session_id, str) and session_id:
             target["session_id"] = session_id
+        instance_id = msg.get("instance_id")
+        if isinstance(instance_id, str) and instance_id:
+            target["instance_id"] = instance_id
+        run_id = msg.get("run_id")
+        if isinstance(run_id, str) and run_id:
+            target["run_id"] = run_id
         command = CommandEnvelope(
             type="agent.permission.respond",
             source=self._command_source_for_queue(queue),
@@ -632,10 +639,17 @@ class LocalCoreServiceMVP:
                 }
             sessions[session.session_id] = session_record
         permissions: Dict[str, Dict[str, Any]] = {}
-        for request_id, pending in self.pending_permissions.items():
+        request_id_counts: Dict[str, int] = {}
+        for pending in self.pending_permissions.values():
+            request_id_counts[pending.request_id] = request_id_counts.get(pending.request_id, 0) + 1
+        for pending_key, pending in self.pending_permissions.items():
             permission_record = self._pending_permission_record(pending, sessions, runs)
             self._ensure_permission_run_ancestry(runs, permission_record, sessions)
-            permissions[request_id] = permission_record
+            if request_id_counts.get(pending.request_id, 0) == 1:
+                projection_key = pending.request_id
+            else:
+                projection_key = self._projected_permission_key(pending_key)
+            permissions[projection_key] = permission_record
 
         store.sessions = sessions
         store.runs = runs
@@ -1135,13 +1149,26 @@ class LocalCoreServiceMVP:
         instance_id: Optional[str] = None,
         run_id: Optional[str] = None,
     ) -> str:
-        if run_id:
-            return f"run:{run_id}:{request_id}"
-        if session_id:
-            return f"session:{session_id}:{request_id}"
-        if instance_id:
-            return f"instance:{instance_id}:{request_id}"
-        return f"global:{request_id}"
+        for key, pending in self.pending_permissions.items():
+            if (
+                pending.request_id == request_id
+                and pending.session_id == session_id
+                and pending.instance_id == instance_id
+                and self._pending_run_id(pending) == run_id
+            ):
+                return key
+        return "|".join((
+            "permission",
+            f"request={request_id}",
+            f"session={session_id or ''}",
+            f"instance={instance_id or ''}",
+            f"run={run_id or ''}",
+        ))
+
+    @staticmethod
+    def _projected_permission_key(pending_key: str) -> str:
+        digest = hashlib.sha256(pending_key.encode("utf-8")).hexdigest()[:16]
+        return f"permission:{digest}"
 
     def _find_pending_permission(
         self,
@@ -1150,52 +1177,72 @@ class LocalCoreServiceMVP:
         instance_id: Any = None,
         run_id: Any = None,
     ) -> Tuple[str, Optional[PendingPermission]]:
-        if isinstance(run_id, str) and run_id:
+        has_run = isinstance(run_id, str) and bool(run_id)
+        has_session = isinstance(session_id, str) and bool(session_id)
+        has_instance = isinstance(instance_id, str) and bool(instance_id)
+
+        matches = [
+            (key, pending)
+            for key, pending in self.pending_permissions.items()
+            if pending.request_id == request_id
+        ]
+
+        if has_run:
             matches = [
                 (key, pending)
-                for key, pending in self.pending_permissions.items()
-                if (
-                    pending.request_id == request_id
-                    and self._pending_run_id(pending) == run_id
-                    and (
-                        not isinstance(session_id, str)
-                        or not session_id
-                        or pending.session_id in {None, session_id}
-                    )
-                    and (
-                        not isinstance(instance_id, str)
-                        or not instance_id
-                        or pending.instance_id in {None, instance_id}
-                    )
-                )
+                for key, pending in matches
+                if self._pending_run_id(pending) == run_id
             ]
-        elif isinstance(session_id, str) and session_id:
+        elif has_session or has_instance:
             matches = [
                 (key, pending)
-                for key, pending in self.pending_permissions.items()
-                if (
-                    pending.request_id == request_id
-                    and pending.session_id == session_id
-                    and not self._pending_run_id(pending)
-                )
+                for key, pending in matches
+                if not self._pending_run_id(pending)
             ]
-        elif isinstance(instance_id, str) and instance_id:
+
+        if has_session:
+            if has_run:
+                exact_session_matches = [
+                    (key, pending)
+                    for key, pending in matches
+                    if pending.session_id == session_id
+                ]
+                matches = exact_session_matches or [
+                    (key, pending)
+                    for key, pending in matches
+                    if pending.session_id is None
+                ]
+            else:
+                matches = [
+                    (key, pending)
+                    for key, pending in matches
+                    if pending.session_id == session_id
+                ]
+        elif has_instance:
             matches = [
                 (key, pending)
-                for key, pending in self.pending_permissions.items()
-                if (
-                    pending.request_id == request_id
-                    and pending.instance_id == instance_id
-                    and not pending.session_id
-                    and not self._pending_run_id(pending)
-                )
+                for key, pending in matches
+                if pending.session_id is None
             ]
-        else:
-            matches = [
-                (key, pending)
-                for key, pending in self.pending_permissions.items()
-                if pending.request_id == request_id
-            ]
+
+        if has_instance:
+            if has_run or has_session:
+                exact_instance_matches = [
+                    (key, pending)
+                    for key, pending in matches
+                    if pending.instance_id == instance_id
+                ]
+                matches = exact_instance_matches or [
+                    (key, pending)
+                    for key, pending in matches
+                    if pending.instance_id is None
+                ]
+            else:
+                matches = [
+                    (key, pending)
+                    for key, pending in matches
+                    if pending.instance_id == instance_id
+                ]
 
         if len(matches) == 1:
             return matches[0]

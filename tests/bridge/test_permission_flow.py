@@ -223,6 +223,62 @@ def test_repeated_session_scoped_request_replaces_pending_after_other_scope_reso
     ]
 
 
+def test_same_request_id_with_different_run_parent_scope_can_coexist_and_disambiguate():
+    server = make_server()
+    proxy = FakeProxy()
+    server.agents[AgentType.CODEX] = proxy
+    first = server.session_mgr.create(AgentType.CODEX)
+    second = server.session_mgr.create(AgentType.CODEX)
+
+    for session in (first, second):
+        server._on_agent_event(server.unifier.encode_device_message({
+            "type": "permission_request",
+            "request_id": "req_same_run",
+            "session_id": session.session_id,
+            "run_id": "run_shared",
+            "agent": "codex",
+            "timeout_sec": 30,
+        }))
+
+    assert pending_count(server, "req_same_run") == 2
+    assert pending_for(
+        server,
+        "req_same_run",
+        session_id=first.session_id,
+        run_id="run_shared",
+    ) is not None
+    assert pending_for(
+        server,
+        "req_same_run",
+        session_id=second.session_id,
+        run_id="run_shared",
+    ) is not None
+    assert pending_for(server, "req_same_run") is None
+    assert pending_for(server, "req_same_run", run_id="run_shared") is None
+
+    queue = CaptureQueue()
+    asyncio.run(server._cmd_permission_response({
+        "type": "permission_response",
+        "request_id": "req_same_run",
+        "session_id": second.session_id,
+        "run_id": "run_shared",
+        "approved": True,
+    }, queue))
+
+    ack = json.loads(queue.get_nowait())
+    assert ack["type"] == "permission_ack"
+    assert ack["request_id"] == "req_same_run"
+    assert ack["session_id"] == second.session_id
+    assert pending_count(server, "req_same_run") == 1
+    assert pending_for(
+        server,
+        "req_same_run",
+        session_id=first.session_id,
+        run_id="run_shared",
+    ) is not None
+    assert proxy.responses == [(second.session_id, "req_same_run", True)]
+
+
 def test_known_permission_response_returns_ack_and_clears_pending():
     server = make_server()
     proxy = FakeProxy()

@@ -123,6 +123,19 @@ def pending_for(server, request_id, *, session_id=None, instance_id=None, run_id
     return pending
 
 
+def pending_count(server, request_id, *, session_id=None, instance_id=None, run_id=None):
+    return sum(
+        1
+        for pending in server.pending_permissions.values()
+        if (
+            pending.request_id == request_id
+            and (session_id is None or pending.session_id == session_id)
+            and (instance_id is None or pending.instance_id == instance_id)
+            and (run_id is None or pending.run_id == run_id)
+        )
+    )
+
+
 def structured_permission_message(permission_id, approved, *, session_id=None, command_id="cmd_permission"):
     target = {"permission_id": permission_id}
     if session_id is not None:
@@ -224,12 +237,21 @@ def test_focused_permission_uses_request_id_when_duplicate_session_scoped_ids_ar
     ))
 
     server._sync_runtime_state()
-    second_key = f"session:{second.session_id}:req_shared"
-    assert second_key in server.runtime.state_store.permissions
-    assert server.runtime.state_store.permissions[second_key]["permission_id"] == "req_shared"
+    projected_permissions = list(server.runtime.state_store.permissions.values())
+    assert any(
+        permission["permission_id"] == "req_shared"
+        and permission.get("session_id") == second.session_id
+        for permission in projected_permissions
+    )
+    assert all(
+        "req_shared" not in key
+        and first.session_id not in key
+        and second.session_id not in key
+        for key in server.runtime.state_store.permissions
+    )
     snapshot = server.runtime.snapshot().to_dict()
     assert all(
-        permission.get("permission_id") != second_key
+        permission.get("permission_id") == "req_shared"
         for permission in snapshot["permissions"]
     )
 
@@ -246,6 +268,61 @@ def test_focused_permission_uses_request_id_when_duplicate_session_scoped_ids_ar
     assert proxy.responses == [(second.session_id, "req_shared", True)]
     assert pending_for(server, "req_shared", session_id=first.session_id) is not None
     assert pending_for(server, "req_shared", session_id=second.session_id) is None
+
+
+def test_focused_permission_reuses_same_session_scope_after_other_duplicate_resolves():
+    server = make_server()
+    proxy = FakeProxy()
+    server.agents[AgentType.CODEX] = proxy
+    first = server.session_mgr.create(AgentType.CODEX)
+    second = server.session_mgr.create(AgentType.CODEX)
+    track_permission(server, first, "req_reused", risk_level="low")
+    track_permission(server, second, "req_reused", risk_level="low")
+
+    first_queue = CaptureQueue()
+    asyncio.run(server._cmd_structured_command(
+        structured_permission_message(
+            "req_reused",
+            True,
+            session_id=first.session_id,
+            command_id="cmd_resolve_first_duplicate",
+        ),
+        first_queue,
+    ))
+
+    track_permission(server, second, "req_reused", risk_level="low")
+
+    assert pending_count(server, "req_reused", session_id=second.session_id) == 1
+    assert pending_count(server, "req_reused") == 1
+
+    second_queue = CaptureQueue()
+    server.register_client_identity(
+        second_queue,
+        "device-transport",
+        "keyboard-1",
+        {"permission:respond:low_risk"},
+    )
+    server.runtime.keyboard_runtime.focus_manager.set_focus(ScreenFocus(
+        device_id="keyboard-1",
+        mode="session",
+        session_id=second.session_id,
+    ))
+
+    asyncio.run(server._cmd_structured_command(
+        structured_focused_permission_message(
+            True,
+            command_id="cmd_focused_reused_duplicate",
+        ),
+        second_queue,
+    ))
+
+    ack = read_payload(second_queue)
+    assert_permission_ack_shape(ack, "req_reused", second.session_id, True)
+    assert pending_for(server, "req_reused", session_id=second.session_id) is None
+    assert proxy.responses == [
+        (first.session_id, "req_reused", True),
+        (second.session_id, "req_reused", True),
+    ]
 
 
 def test_desktop_structured_permission_approval_returns_legacy_permission_ack_shape():
