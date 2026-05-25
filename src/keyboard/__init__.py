@@ -1,7 +1,10 @@
 """Keyboard profile, keymap, layer, and action models."""
 
 from .compiler import compile_profile_for_device
+from .action_commands import command_from_resolved_action
+from .bindings import BindingResolver, ResolvedKeyboardAction
 from .focus import FocusManager, Notification, NotificationQueue, PermissionRequest, ScreenFocus
+from .input import KeyboardInputEvent
 from .layouts import DEFAULT_PHYSICAL_LAYOUT_ID, PhysicalLayout, get_default_physical_layout, get_layout_keys
 from .lighting import LightingConfig, LightingLayer
 from .profile import (
@@ -27,9 +30,11 @@ __all__ = [
     "AgentBinding",
     "AppConfig",
     "BindingTrigger",
+    "BindingResolver",
     "DEFAULT_PHYSICAL_LAYOUT_ID",
     "FocusManager",
     "KeyboardAction",
+    "KeyboardInputEvent",
     "KeyboardRuntime",
     "LightingConfig",
     "LightingLayer",
@@ -41,8 +46,10 @@ __all__ = [
     "Profile",
     "ProfileService",
     "ProfileValidationError",
+    "ResolvedKeyboardAction",
     "ScreenFocus",
     "app_config_from_dict",
+    "command_from_resolved_action",
     "compile_profile_for_device",
     "export_app_config_json",
     "export_profile_json",

@@ -2,7 +2,7 @@
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple, Union
 
 from .layouts import DEFAULT_PHYSICAL_LAYOUT_ID, get_layout_keys
 from .lighting import LightingConfig, lighting_config_from_dict, iter_lighting_key_references
@@ -74,7 +74,7 @@ class BindingTrigger:
 @dataclass(frozen=True)
 class KeyboardAction:
     type: str
-    target: Optional[str] = None
+    target: Optional[Union[Dict[str, Any], str]] = None
     payload: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -315,12 +315,24 @@ def _validate_agent_action_target(action: KeyboardAction) -> None:
     allowed_targets = AGENT_ACTION_TARGETS.get(action.type)
     if allowed_targets is None:
         raise ProfileValidationError(f"unsupported agent action type: {action.type}")
-    if action.target not in SUPPORTED_AGENT_TARGETS:
+    target_selector = _action_target_selector(action.target)
+    if target_selector not in SUPPORTED_AGENT_TARGETS:
         raise ProfileValidationError(f"unsupported agent target: {action.target}")
-    if action.target not in allowed_targets:
+    if target_selector not in allowed_targets:
         raise ProfileValidationError(
             f"incompatible agent target for {action.type}: {action.target}"
         )
+
+
+def _action_target_selector(target: Optional[Union[Dict[str, Any], str]]) -> Optional[str]:
+    if isinstance(target, str):
+        return target
+    if isinstance(target, Mapping):
+        for field in ("selector", "target", "target_selector"):
+            value = target.get(field)
+            if isinstance(value, str):
+                return value
+    return None
 
 
 def _known_layout_keys(profile: Profile, layout_keys: Optional[Iterable[str]]) -> set:
