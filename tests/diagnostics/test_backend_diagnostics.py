@@ -102,6 +102,10 @@ def test_diagnostic_export_redacts_nested_tokens_and_api_keys():
                 "session_token": "session-token-value",
                 "x-api-key": "header-api-key-value",
                 "clientSecret": "client-secret-value",
+                "apiKeyValue": "api-key-suffix-value",
+                "accessTokenValue": "access-token-suffix-value",
+                "refreshTokenValue": "refresh-token-suffix-value",
+                "authorizationHeader": "Bearer header-secret",
                 "safe": "visible",
                 "token_count": 123,
                 "secretariat": "visible-office",
@@ -121,6 +125,10 @@ def test_diagnostic_export_redacts_nested_tokens_and_api_keys():
     assert check["details"]["nested"]["session_token"] == "<redacted>"
     assert check["details"]["nested"]["x-api-key"] == "<redacted>"
     assert check["details"]["nested"]["clientSecret"] == "<redacted>"
+    assert check["details"]["nested"]["apiKeyValue"] == "<redacted>"
+    assert check["details"]["nested"]["accessTokenValue"] == "<redacted>"
+    assert check["details"]["nested"]["refreshTokenValue"] == "<redacted>"
+    assert check["details"]["nested"]["authorizationHeader"] == "<redacted>"
     assert check["details"]["nested"]["safe"] == "visible"
     assert check["details"]["nested"]["token_count"] == 123
     assert check["details"]["nested"]["secretariat"] == "visible-office"

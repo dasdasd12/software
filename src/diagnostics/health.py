@@ -168,6 +168,19 @@ SENSITIVE_DETAIL_KEYS = {
     "access_token",
     "refresh_token",
 }
+SENSITIVE_KEY_SUFFIXES = {
+    "credential",
+    "credentials",
+    "header",
+    "raw",
+    "string",
+    "value",
+}
+SENSITIVE_TOKEN_GROUPS = (
+    ("api", "key"),
+    ("access", "token"),
+    ("refresh", "token"),
+)
 
 _CAMEL_CASE_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
@@ -204,8 +217,24 @@ def _is_sensitive_key(key: Any) -> bool:
         return True
     if compact.endswith("apikey"):
         return True
+    if _has_sensitive_group_with_suffix(tokens):
+        return True
     if len(tokens) >= 2 and tokens[-2:] == ["api", "key"]:
         return True
     if tokens and tokens[-1] == "token":
         return True
+    return False
+
+
+def _has_sensitive_group_with_suffix(tokens: List[str]) -> bool:
+    for group in SENSITIVE_TOKEN_GROUPS:
+        group_len = len(group)
+        for index in range(0, len(tokens) - group_len + 1):
+            if tuple(tokens[index:index + group_len]) != group:
+                continue
+            suffix = tokens[index + group_len:]
+            if suffix and all(token in SENSITIVE_KEY_SUFFIXES for token in suffix):
+                return True
+    if tokens[:1] == ["token"] and all(token in SENSITIVE_KEY_SUFFIXES for token in tokens[1:]):
+        return len(tokens) > 1
     return False
