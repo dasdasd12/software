@@ -449,6 +449,10 @@ class LocalCoreServiceMVP:
         context_token = _permission_client_context.set(self._client_for_queue(queue))
         try:
             event = await self.runtime.command_router.dispatch_async(command)
+            if event.type == "command.target.unresolved":
+                fallback_command = self._instance_focused_permission_command(command)
+                if fallback_command is not None:
+                    event = await self.runtime.command_router.dispatch_async(fallback_command)
         except KeyError as exc:
             await self._send_error(queue, "UNKNOWN_COMMAND", str(exc))
             return
@@ -464,6 +468,86 @@ class LocalCoreServiceMVP:
 
         self._sync_runtime_state()
         await queue.put(self.unifier.encode_device_message(dict(event.payload)))
+
+    def _instance_focused_permission_command(
+        self,
+        command: CommandEnvelope,
+    ) -> Optional[CommandEnvelope]:
+        if not self._is_focused_permission_target(command.target):
+            return None
+        focus = self._resolved_command_focus(command)
+        if not focus or not getattr(focus, "instance_id", None):
+            return None
+        if getattr(focus, "session_id", None) or getattr(focus, "run_id", None):
+            return None
+
+        permission = self._focused_instance_permission_record(str(focus.instance_id))
+        if permission is None:
+            return None
+        return CommandEnvelope(
+            type=command.type,
+            source=command.source,
+            target=self._permission_record_target(permission),
+            payload=dict(command.payload),
+            command_id=command.command_id,
+            timestamp=command.timestamp,
+        )
+
+    @staticmethod
+    def _is_focused_permission_target(target: Any) -> bool:
+        if target == "focused_permission":
+            return True
+        if isinstance(target, dict):
+            for key in ("selector", "target", "target_selector"):
+                if target.get(key) == "focused_permission":
+                    return True
+        return False
+
+    def _resolved_command_focus(self, command: CommandEnvelope) -> Any:
+        keyboard_runtime = getattr(self.runtime, "keyboard_runtime", None)
+        if keyboard_runtime is None:
+            return None
+        device_id = self._command_device_id(command)
+        return keyboard_runtime._resolve_focus_from_state(device_id)
+
+    @staticmethod
+    def _command_device_id(command: CommandEnvelope) -> str:
+        target = command.target if isinstance(command.target, dict) else {}
+        return (
+            target.get("device_id")
+            or command.source.device_id
+            or command.source.client_id
+            or "default"
+        )
+
+    def _focused_instance_permission_record(self, instance_id: str) -> Optional[Dict[str, Any]]:
+        pending = [
+            record
+            for record in self.runtime.state_store.permissions.values()
+            if record.get("instance_id") == instance_id
+            and str(record.get("status", "pending")).lower() in {"pending", "waiting", "waiting_permission"}
+            and isinstance(record.get("request_id"), str)
+            and record.get("request_id")
+        ]
+        if not pending:
+            return None
+        return sorted(pending, key=self._permission_record_priority, reverse=True)[0]
+
+    @staticmethod
+    def _permission_record_priority(record: Dict[str, Any]) -> int:
+        try:
+            return int(record.get("priority", 0))
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _permission_record_target(permission: Dict[str, Any]) -> Dict[str, Any]:
+        target: Dict[str, Any] = {"permission_id": permission["request_id"]}
+        for field in ("provider_id", "agent", "instance_id", "session_id", "run_id"):
+            value = permission.get(field)
+            if isinstance(value, str) and value:
+                target[field] = value
+        return target
 
     async def _handle_permission_command(self, command: CommandEnvelope) -> Dict[str, Any]:
         target = command.target
@@ -615,26 +699,72 @@ class LocalCoreServiceMVP:
                     "state": session.state.value,
                 }
             sessions[session.session_id] = session_record
+        permissions: Dict[str, Dict[str, Any]] = {}
+        for request_id, pending in self.pending_permissions.items():
+            permission_record = self._pending_permission_record(pending, sessions)
+            self._ensure_permission_run_ancestry(runs, permission_record, sessions)
+            permissions[request_id] = permission_record
+
         store.sessions = sessions
         store.runs = runs
-        store.permissions = {
-            request_id: {
-                "request_id": pending.request_id,
-                "session_id": pending.session_id,
-                "provider_id": pending.agent.value,
-                "agent": pending.agent.value,
-                "timeout_sec": pending.timeout_sec,
-                "risk_level": pending.risk_level.value,
-                "tool": pending.tool,
-                "description": pending.description,
-                "run_id": self._pending_run_id(pending),
-            }
-            for request_id, pending in self.pending_permissions.items()
-        }
+        store.permissions = permissions
         store.devices = {
             device_id: record.to_dict()
             for device_id, record in self.runtime.device_manager.list_records().items()
         }
+
+    def _pending_permission_record(
+        self,
+        pending: PendingPermission,
+        sessions: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        provider_id = pending.agent.value
+        session_record = sessions.get(pending.session_id, {})
+        instance_id = self._pending_permission_instance_id(pending, session_record)
+        return {
+            "request_id": pending.request_id,
+            "session_id": pending.session_id,
+            "instance_id": instance_id,
+            "provider_id": provider_id,
+            "agent": provider_id,
+            "timeout_sec": pending.timeout_sec,
+            "risk_level": pending.risk_level.value,
+            "tool": pending.tool,
+            "description": pending.description,
+            "run_id": self._pending_run_id(pending),
+        }
+
+    def _pending_permission_instance_id(
+        self,
+        pending: PendingPermission,
+        session_record: Dict[str, Any],
+    ) -> str:
+        instance_id = session_record.get("instance_id")
+        if isinstance(instance_id, str) and instance_id:
+            return instance_id
+        return self._default_instance_id(pending.agent)
+
+    def _ensure_permission_run_ancestry(
+        self,
+        runs: Dict[str, Dict[str, Any]],
+        permission_record: Dict[str, Any],
+        sessions: Dict[str, Dict[str, Any]],
+    ) -> None:
+        run_id = permission_record.get("run_id")
+        if not isinstance(run_id, str) or not run_id:
+            return
+        session_id = permission_record.get("session_id")
+        session_record = sessions.get(session_id, {}) if isinstance(session_id, str) else {}
+        run_record = dict(runs.get(run_id, {}))
+        run_record.update({
+            "run_id": run_id,
+            "session_id": permission_record.get("session_id"),
+            "instance_id": permission_record.get("instance_id"),
+            "provider_id": permission_record.get("provider_id"),
+            "agent": permission_record.get("agent"),
+        })
+        run_record.setdefault("state", session_record.get("state", AgentState.WAITING_PERMISSION.value))
+        runs[run_id] = run_record
 
     def _default_instance_record(self, agent: AgentType, proxy: AgentProxy) -> Dict[str, Any]:
         status = "available"

@@ -194,6 +194,7 @@ def test_structured_snapshot_command_returns_snapshot_with_runtime_state():
             }
             assert snapshot["permissions"][0]["request_id"] == "req_snapshot"
             assert snapshot["permissions"][0]["session_id"] == session.session_id
+            assert snapshot["permissions"][0]["instance_id"] == "codex-default"
             assert snapshot["permissions"][0]["agent"] == "codex"
             assert snapshot["permissions"][0]["timeout_sec"] == 30
             assert set(snapshot.keys()) >= {
@@ -549,6 +550,73 @@ def test_permission_response_round_trip_over_local_api():
             assert "req_ws" not in service.pending_permissions
             assert service.agents[AgentType.CODEX].permission_responses == [
                 (session.session_id, "req_ws", True)
+            ]
+
+    asyncio.run(with_local_api(run_client))
+
+
+def test_focused_permission_response_resolves_instance_focus_without_permission_instance_id():
+    async def run_client(service, uri):
+        session = service.session_mgr.create(AgentType.CODEX)
+        async with websockets.connect(uri) as ws:
+            await ws.send(json.dumps({
+                "type": "command",
+                "command": {
+                    "command_id": "cmd_focus_codex_for_permission",
+                    "type": "agent.focus.set",
+                    "source": {
+                        "kind": "keyboard-device",
+                        "client_id": "kbd_01",
+                        "device_id": "kbd_01",
+                    },
+                    "target": {"device_id": "legacy-local-api"},
+                    "payload": {
+                        "mode": "instance",
+                        "instance_id": "codex-default",
+                    },
+                },
+            }))
+            focus_event = await recv_json(ws)
+            assert focus_event["type"] == "event"
+            assert focus_event["event"]["type"] == "agent.focus.changed"
+
+            service._on_agent_event(service.unifier.encode_device_message({
+                "type": "permission_request",
+                "request_id": "req_focused_instance",
+                "session_id": session.session_id,
+                "agent": "codex",
+                "tool": "shell",
+                "description": "Run command",
+                "timeout_sec": 30,
+                "risk_level": "low",
+            }))
+            request = await recv_json(ws)
+            assert request["type"] == "permission_request"
+            assert request["request_id"] == "req_focused_instance"
+            assert "instance_id" not in request
+
+            await ws.send(json.dumps({
+                "type": "command",
+                "command": {
+                    "command_id": "cmd_approve_focused_instance_permission",
+                    "type": "agent.permission.respond",
+                    "source": {
+                        "kind": "keyboard-device",
+                        "client_id": "kbd_01",
+                        "device_id": "kbd_01",
+                    },
+                    "target": "focused_permission",
+                    "payload": {"approved": True},
+                },
+            }))
+            ack = await recv_json(ws)
+
+            assert ack["type"] == "permission_ack"
+            assert ack["request_id"] == "req_focused_instance"
+            assert ack["session_id"] == session.session_id
+            assert ack["approved"] is True
+            assert service.agents[AgentType.CODEX].permission_responses == [
+                (session.session_id, "req_focused_instance", True)
             ]
 
     asyncio.run(with_local_api(run_client))
