@@ -97,8 +97,15 @@ def test_diagnostic_export_redacts_nested_tokens_and_api_keys():
             "token": "local-token",
             "nested": {
                 "api_key": "api-key-value",
+                "OPENAI_API_KEY": "openai-key-value",
                 "Authorization": "Bearer secret",
+                "session_token": "session-token-value",
+                "x-api-key": "header-api-key-value",
+                "clientSecret": "client-secret-value",
                 "safe": "visible",
+                "token_count": 123,
+                "secretariat": "visible-office",
+                "monkey": "visible-animal",
             },
             "items": [{"secret": "hidden"}, {"name": "kept"}],
         },
@@ -109,7 +116,14 @@ def test_diagnostic_export_redacts_nested_tokens_and_api_keys():
 
     assert check["details"]["token"] == "<redacted>"
     assert check["details"]["nested"]["api_key"] == "<redacted>"
+    assert check["details"]["nested"]["OPENAI_API_KEY"] == "<redacted>"
     assert check["details"]["nested"]["Authorization"] == "<redacted>"
+    assert check["details"]["nested"]["session_token"] == "<redacted>"
+    assert check["details"]["nested"]["x-api-key"] == "<redacted>"
+    assert check["details"]["nested"]["clientSecret"] == "<redacted>"
     assert check["details"]["nested"]["safe"] == "visible"
+    assert check["details"]["nested"]["token_count"] == 123
+    assert check["details"]["nested"]["secretariat"] == "visible-office"
+    assert check["details"]["nested"]["monkey"] == "visible-animal"
     assert check["details"]["items"][0]["secret"] == "<redacted>"
     assert check["details"]["items"][1]["name"] == "kept"

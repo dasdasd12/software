@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 from enum import Enum
+import re
 from typing import Any, Dict, List, Optional
 
 
@@ -168,6 +169,9 @@ SENSITIVE_DETAIL_KEYS = {
     "refresh_token",
 }
 
+_CAMEL_CASE_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+_NON_ALNUM = re.compile(r"[^a-z0-9]+")
+
 
 def _redact_sensitive(value: Any) -> Any:
     if isinstance(value, dict):
@@ -186,5 +190,22 @@ def _redact_sensitive(value: Any) -> Any:
 
 
 def _is_sensitive_key(key: Any) -> bool:
-    normalized = str(key).lower().replace("-", "_")
-    return normalized in SENSITIVE_DETAIL_KEYS
+    raw_key = str(key)
+    camel_split = _CAMEL_CASE_BOUNDARY.sub("_", raw_key)
+    tokens = [token for token in _NON_ALNUM.split(camel_split.lower()) if token]
+    normalized = "_".join(tokens)
+    compact = "".join(tokens)
+
+    if normalized in SENSITIVE_DETAIL_KEYS or compact in SENSITIVE_DETAIL_KEYS:
+        return True
+    if "authorization" in tokens:
+        return True
+    if "secret" in tokens or compact.endswith("secret"):
+        return True
+    if compact.endswith("apikey"):
+        return True
+    if len(tokens) >= 2 and tokens[-2:] == ["api", "key"]:
+        return True
+    if tokens and tokens[-1] == "token":
+        return True
+    return False
