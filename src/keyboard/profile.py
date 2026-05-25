@@ -16,7 +16,7 @@ OFFLINE_ACTION_PREFIXES = (
     "screen.",
     "device.",
 )
-SERVICE_REQUIRED_ACTION_PREFIXES = ("agent.",)
+SERVICE_REQUIRED_ACTION_PREFIXES = ("agent.", "keyboard.tool.")
 SUPPORTED_TRIGGER_SOURCES = {"key", "encoder", "screen_button", "system"}
 SUPPORTED_TRIGGER_EVENTS = {
     "press",
@@ -40,6 +40,10 @@ AGENT_ACTION_TARGETS = {
     "agent.session.close": {"focused_run", "focused_session"},
     "agent.session.launch_or_resume": SUPPORTED_AGENT_TARGETS - {"focused_permission"},
 }
+SUPPORTED_TOOL_ACTIONS = {
+    "keyboard.tool.switch",
+    "keyboard.tool.next",
+}
 REQUIRED_FEATURE_BY_ACTION_PREFIX = {
     "hid.": "hid",
     "layer.": "layers",
@@ -47,6 +51,7 @@ REQUIRED_FEATURE_BY_ACTION_PREFIX = {
     "profile.": "profiles",
     "screen.": "screen",
     "agent.": "agent_bindings",
+    "keyboard.tool.": "agent_bindings",
     "device.": "device",
 }
 
@@ -305,8 +310,10 @@ def profile_action_to_dict(action: KeyboardAction) -> Dict[str, Any]:
 
 def _validate_profile_action(action: KeyboardAction, device_capabilities: Optional[Any]) -> str:
     action_class = classify_profile_action(action)
-    if action_class == "service_required":
+    if action.type.startswith("agent."):
         _validate_agent_action_target(action)
+    elif action.type.startswith("keyboard.tool."):
+        _validate_tool_action(action)
     _validate_action_capability(action.type, device_capabilities)
     return action_class
 
@@ -322,6 +329,17 @@ def _validate_agent_action_target(action: KeyboardAction) -> None:
         raise ProfileValidationError(
             f"incompatible agent target for {action.type}: {action.target}"
         )
+
+
+def _validate_tool_action(action: KeyboardAction) -> None:
+    if action.type not in SUPPORTED_TOOL_ACTIONS:
+        raise ProfileValidationError(f"unsupported keyboard tool action type: {action.type}")
+    if action.type == "keyboard.tool.next":
+        return
+    target = action.target if isinstance(action.target, Mapping) else {}
+    tool_id = target.get("tool_id") or action.payload.get("tool_id")
+    if not isinstance(tool_id, str) or not tool_id:
+        raise ProfileValidationError("keyboard.tool.switch requires tool_id")
 
 
 def _action_target_selector(target: Optional[Union[Dict[str, Any], str]]) -> Optional[str]:

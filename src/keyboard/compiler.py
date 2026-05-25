@@ -80,7 +80,7 @@ def _compile_service_required_actions(profile: Profile) -> list:
             if is_service_required_profile_action(action):
                 service_required.append(_service_required_action(action, key_id=key_id, layer_id=layer_id))
     for binding in profile.agent_bindings:
-        if binding.action.type.startswith("agent."):
+        if is_service_required_profile_action(binding.action):
             service_required.append({
                 "binding_id": binding.id,
                 "action_type": binding.action.type,

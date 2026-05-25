@@ -115,6 +115,7 @@ macro.*
 profile.*
 screen.*
 agent.*
+keyboard.tool.*
 device.*
 ```
 
@@ -163,6 +164,21 @@ Examples:
 }
 ```
 
+```json
+{
+  "type": "keyboard.tool.switch",
+  "target": {
+    "tool_id": "permissions"
+  }
+}
+```
+
+```json
+{
+  "type": "keyboard.tool.next"
+}
+```
+
 ## Agent Actions
 
 Agent actions must pass through the command router and approval policy.
@@ -195,6 +211,28 @@ Examples:
   "type": "agent.focus.next_session"
 }
 ```
+
+## Tool Actions
+
+Tool actions are backend control-mode commands owned by the keyboard runtime,
+not screen widgets. They pass through the command router as service-required
+actions and never call agent providers or bridge adapters directly.
+
+Initial tools:
+
+```text
+agent_control
+session_list
+permissions
+profile_config
+device_status
+```
+
+`keyboard.tool.switch` selects a known tool for the input device. Bindings
+should normally put `tool_id` in the target or action payload; the command
+source supplies the originating `device_id`. `keyboard.tool.next` advances to
+the next configured tool for that device, selecting the first configured tool
+when none is active.
 
 ## Macro Model Boundary
 
@@ -250,6 +288,7 @@ When the Local Core Service is unavailable:
 
 - `hid.*`, safe `layer.*`, and safe local `macro.*` actions may run
 - `agent.*` actions become unavailable
+- `keyboard.tool.*` actions become unavailable
 - `screen.*` actions may navigate local fallback pages
 - high-risk macro steps are blocked
 

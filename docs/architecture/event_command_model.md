@@ -95,6 +95,7 @@ Snapshots give clients a complete current view.
   "runs": {},
   "devices": {},
   "profiles": {},
+  "active_tools": {},
   "notifications": [],
   "permissions": []
 }
@@ -185,6 +186,7 @@ agent.focus.*
 keyboard.profile.*
 keyboard.config.*
 keyboard.screen.*
+keyboard.tool.*
 device.transport.*
 device.config.*
 notification.*
@@ -200,10 +202,28 @@ agent.permission.respond
 agent.focus.set
 keyboard.profile.activate
 keyboard.config.update_key_binding
+keyboard.tool.switch
+keyboard.tool.next
 device.config.sync_profile
 notification.dismiss
 system.snapshot.request
 ```
+
+`keyboard.tool.*` commands select backend control modes per keyboard device;
+they are not UI widgets. The initial configured tool IDs are:
+
+```text
+agent_control
+session_list
+permissions
+profile_config
+device_status
+```
+
+`keyboard.tool.switch` accepts `device_id` and `tool_id` from the command
+target or payload, falling back to `source.device_id` for the device. Unknown
+tools are rejected without changing state. `keyboard.tool.next` cycles the
+configured tools in order for that device and wraps after the last tool.
 
 Current V1 compatibility mapping:
 
@@ -229,6 +249,7 @@ agent.output.*
 agent.permission.*
 agent.focus.*
 keyboard.profile.*
+keyboard.tool.*
 device.*
 notification.*
 system.*
@@ -243,6 +264,8 @@ agent.run.state_changed
 agent.output.delta
 agent.permission.requested
 agent.focus.changed
+keyboard.tool.changed
+keyboard.tool.rejected
 device.connected
 device.capabilities_updated
 notification.created

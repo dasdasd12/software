@@ -106,3 +106,47 @@ def test_action_command_factory_preserves_dict_target_from_layer_keymap_action()
 
 def test_profile_validation_accepts_dict_symbolic_agent_target():
     validate_profile(_profile())
+
+
+def test_virtual_input_binding_can_resolve_tool_switch_command_without_metadata_spoofing():
+    profile = Profile(
+        id="profile_tools",
+        name="Tools",
+        target_device_family="ai_keyboard_ch32h417",
+        keymap={
+            "bindings": {
+                "K_TOOL_1": {
+                    "type": "keyboard.tool.switch",
+                    "target": {"tool_id": "permissions"},
+                    "device_id": "spoofed_device",
+                    "profile_id": "spoofed_profile",
+                    "binding_id": "spoofed_binding",
+                },
+                "K_TOOL_2": {
+                    "type": "keyboard.tool.next",
+                    "target": {"device_id": "spoofed_target_device"},
+                },
+            },
+        },
+    )
+    validate_profile(profile)
+
+    switch_action = BindingResolver(profile).resolve(_event("K_TOOL_1"))[0]
+    next_action = BindingResolver(profile).resolve(_event("K_TOOL_2"))[0]
+
+    switch_command = command_from_resolved_action(switch_action, _event("K_TOOL_1"))
+    next_command = command_from_resolved_action(next_action, _event("K_TOOL_2"))
+
+    assert switch_command.type == "keyboard.tool.switch"
+    assert switch_command.source.kind == "device-transport"
+    assert switch_command.source.device_id == "kbd_01"
+    assert switch_command.target == {"tool_id": "permissions"}
+    assert switch_command.payload["profile_id"] == "profile_tools"
+    assert switch_command.payload["binding_id"] == "keymap:K_TOOL_1"
+    assert switch_command.payload["key_id"] == "K_TOOL_1"
+    assert "device_id" not in switch_command.payload
+
+    assert next_command.type == "keyboard.tool.next"
+    assert next_command.source.kind == "device-transport"
+    assert next_command.source.device_id == "kbd_01"
+    assert next_command.target == {"device_id": "spoofed_target_device"}

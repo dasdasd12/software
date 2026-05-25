@@ -78,7 +78,7 @@ class BindingResolver:
                 continue
             if trigger.layer and trigger.layer not in event.active_layers:
                 continue
-            if not self._is_agent_action(binding.action):
+            if not self._is_service_required_action(binding.action):
                 continue
             layer_id = trigger.layer
             candidates.append(_Candidate(
@@ -107,7 +107,7 @@ class BindingResolver:
         for offset, (key_id, action) in enumerate(iter_keymap_actions(self.profile.keymap)):
             if key_id != event.key_id:
                 continue
-            if not self._is_agent_action(action):
+            if not self._is_service_required_action(action):
                 continue
             candidates.append(_Candidate(
                 order=start_order + offset,
@@ -141,7 +141,7 @@ class BindingResolver:
                 order += 1
                 if key_id != event.key_id:
                     continue
-                if not self._is_agent_action(action):
+                if not self._is_service_required_action(action):
                     continue
                 candidates.append(_Candidate(
                     order=current_order,
@@ -157,8 +157,8 @@ class BindingResolver:
         return candidates
 
     @staticmethod
-    def _is_agent_action(action: KeyboardAction) -> bool:
-        return action.type.startswith("agent.")
+    def _is_service_required_action(action: KeyboardAction) -> bool:
+        return action.type.startswith(("agent.", "keyboard.tool."))
 
     @staticmethod
     def _build_layer_priorities(profile: Profile) -> Dict[str, int]:

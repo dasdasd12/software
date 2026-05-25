@@ -25,6 +25,7 @@ from .profile import (
 )
 from .profile_service import ProfileService
 from .runtime import KeyboardRuntime
+from .tool_state import DEFAULT_TOOL_IDS, ToolStateManager, ToolSwitchResult
 
 __all__ = [
     "AgentBinding",
@@ -32,6 +33,7 @@ __all__ = [
     "BindingTrigger",
     "BindingResolver",
     "DEFAULT_PHYSICAL_LAYOUT_ID",
+    "DEFAULT_TOOL_IDS",
     "FocusManager",
     "KeyboardAction",
     "KeyboardInputEvent",
@@ -48,6 +50,8 @@ __all__ = [
     "ProfileValidationError",
     "ResolvedKeyboardAction",
     "ScreenFocus",
+    "ToolStateManager",
+    "ToolSwitchResult",
     "app_config_from_dict",
     "command_from_resolved_action",
     "compile_profile_for_device",

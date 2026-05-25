@@ -6,9 +6,16 @@ from .envelopes import EventEnvelope, Snapshot
 
 
 class RuntimeSnapshot(Snapshot):
-    def __init__(self, *args: Any, focus: Dict[str, Any] = None, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *args: Any,
+        focus: Dict[str, Any] = None,
+        active_tools: Dict[str, str] = None,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(*args, **kwargs)
         object.__setattr__(self, "focus", dict(focus or {}))
+        object.__setattr__(self, "active_tools", dict(active_tools or {}))
 
     def to_dict(self) -> Dict[str, Any]:
         data = super().to_dict()
@@ -16,6 +23,7 @@ class RuntimeSnapshot(Snapshot):
             device_id: dict(focus)
             for device_id, focus in self.focus.items()
         }
+        data["active_tools"] = dict(self.active_tools)
         return data
 
 
@@ -31,6 +39,7 @@ class StateStore:
         self.notifications: Dict[str, Any] = {}
         self.permissions: Dict[str, Any] = {}
         self.focus: Dict[str, Any] = {}
+        self.active_tools: Dict[str, str] = {}
 
     def apply_event(self, event: EventEnvelope) -> None:
         """Apply event payloads that have a direct snapshot projection."""
@@ -69,6 +78,22 @@ class StateStore:
             if device_id:
                 focus["device_id"] = str(device_id)
                 self.focus[str(device_id)] = focus
+        elif event.type == "keyboard.tool.changed":
+            device_id = event.payload.get("device_id")
+            tool_id = event.payload.get("tool_id")
+            if not device_id and event.target:
+                device_id = event.target.get("device_id")
+            if device_id and tool_id:
+                device_key = str(device_id)
+                tool_key = str(tool_id)
+                self.active_tools[device_key] = tool_key
+                device = dict(self.devices.get(device_key, {}))
+                device["device_id"] = device_key
+                device["active_tool_id"] = tool_key
+                configured_tools = event.payload.get("configured_tools")
+                if isinstance(configured_tools, list):
+                    device["configured_tools"] = list(configured_tools)
+                self.devices[device_key] = device
 
     def snapshot(self, last_event_seq: int) -> Snapshot:
         return RuntimeSnapshot(
@@ -81,4 +106,5 @@ class StateStore:
             notifications=list(self.notifications.values()),
             permissions=list(self.permissions.values()),
             focus=dict(self.focus),
+            active_tools=dict(self.active_tools),
         )

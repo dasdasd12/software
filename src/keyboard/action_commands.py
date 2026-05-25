@@ -18,6 +18,10 @@ PROTECTED_PAYLOAD_FIELDS = {
     "modifiers",
     "sequence",
     "input_timestamp",
+    "device_id",
+    "source",
+    "command_id",
+    "timestamp",
 }
 
 

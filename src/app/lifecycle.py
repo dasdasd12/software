@@ -49,6 +49,7 @@ def build_runtime() -> LocalCoreRuntime:
     keyboard_runtime = KeyboardRuntime(state_store=state_store, event_bus=event_bus)
     _register_system_handlers(command_router)
     keyboard_runtime.register_focus_handlers(command_router)
+    keyboard_runtime.register_tool_handlers(command_router)
     return LocalCoreRuntime(
         event_bus=event_bus,
         state_store=state_store,

@@ -7,6 +7,7 @@ from core import CommandEnvelope, CommandRouter, EventBus, EventEnvelope, StateS
 from core.target_resolution import TargetResolution, TargetResolver, symbolic_selector
 
 from .focus import FocusManager, ScreenFocus
+from .tool_state import ToolStateManager, ToolSwitchResult
 
 
 CommandResult = Union[EventEnvelope, Awaitable[EventEnvelope]]
@@ -21,16 +22,22 @@ class KeyboardRuntime:
         state_store: StateStore,
         event_bus: Optional[EventBus] = None,
         focus_manager: Optional[FocusManager] = None,
+        tool_state: Optional[ToolStateManager] = None,
         target_resolver: Optional[TargetResolver] = None,
     ) -> None:
         self.state_store = state_store
         self.event_bus = event_bus
         self.focus_manager = focus_manager or FocusManager()
+        self.tool_state = tool_state or ToolStateManager()
         self.target_resolver = target_resolver or TargetResolver()
 
     def register_focus_handlers(self, router: CommandRouter) -> None:
         router.register("agent.focus.set", self.set_focus)
         router.register("agent.focus.next_session", self.next_session)
+
+    def register_tool_handlers(self, router: CommandRouter) -> None:
+        router.register("keyboard.tool.switch", self.switch_tool)
+        router.register("keyboard.tool.next", self.next_tool)
 
     def register_targeted_handlers(
         self,
@@ -60,6 +67,37 @@ class KeyboardRuntime:
                 TargetResolution.unresolved("focused_session", "no sessions are available"),
             )
         return self._focus_changed_event(focus)
+
+    def switch_tool(self, command: CommandEnvelope) -> EventEnvelope:
+        device_id = self._device_id(command)
+        tool_id = self._tool_id(command)
+        if tool_id is None:
+            return self._tool_rejected_event(
+                command,
+                device_id=device_id,
+                tool_id=None,
+                code="missing_tool",
+                message="keyboard.tool.switch requires a tool_id",
+            )
+        if tool_id not in self.tool_state.configured_tools(device_id):
+            return self._tool_rejected_event(
+                command,
+                device_id=device_id,
+                tool_id=tool_id,
+                code="unknown_tool",
+                message=f"unknown tool for device {device_id}: {tool_id}",
+            )
+        return self._tool_changed_event(
+            self.tool_state.switch(device_id, tool_id),
+            command=command,
+        )
+
+    def next_tool(self, command: CommandEnvelope) -> EventEnvelope:
+        device_id = self._device_id(command)
+        return self._tool_changed_event(
+            self.tool_state.next(device_id),
+            command=command,
+        )
 
     def _with_resolved_target(self, handler: CommandHandler) -> CommandHandler:
         def wrapped(command: CommandEnvelope) -> CommandResult:
@@ -147,6 +185,50 @@ class KeyboardRuntime:
             payload=focus.to_dict(),
         )
 
+    def _tool_changed_event(
+        self,
+        result: ToolSwitchResult,
+        *,
+        command: CommandEnvelope,
+    ) -> EventEnvelope:
+        return EventEnvelope(
+            seq=0,
+            type="keyboard.tool.changed",
+            target={"device_id": result.device_id},
+            payload={
+                "command_id": command.command_id,
+                "device_id": result.device_id,
+                "tool_id": result.tool_id,
+                "previous_tool_id": result.previous_tool_id,
+                "configured_tools": list(self.tool_state.configured_tools(result.device_id)),
+            },
+        )
+
+    def _tool_rejected_event(
+        self,
+        command: CommandEnvelope,
+        *,
+        device_id: str,
+        tool_id: Optional[str],
+        code: str,
+        message: str,
+    ) -> EventEnvelope:
+        payload = {
+            "code": code,
+            "command_id": command.command_id,
+            "command_type": command.type,
+            "device_id": device_id,
+            "message": message,
+        }
+        if tool_id is not None:
+            payload["tool_id"] = tool_id
+        return EventEnvelope(
+            seq=0,
+            type="keyboard.tool.rejected",
+            target={"device_id": device_id},
+            payload=payload,
+        )
+
     def _publish_focus_changed(self, focus: ScreenFocus) -> None:
         event = self._focus_changed_event(focus)
         self.state_store.apply_event(event)
@@ -182,6 +264,10 @@ class KeyboardRuntime:
             or command.source.client_id
             or "default"
         )
+
+    def _tool_id(self, command: CommandEnvelope) -> Optional[str]:
+        target = self._target_mapping(command)
+        return self._first_str(target, command.payload, key="tool_id")
 
     def _session_records(self) -> list:
         records = []
