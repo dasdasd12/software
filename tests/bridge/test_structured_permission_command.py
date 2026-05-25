@@ -197,6 +197,52 @@ def test_structured_permission_respond_uses_target_permission_id_and_optional_se
     assert f"{second.session_id}:req_shared" not in server.pending_permissions
 
 
+def test_focused_permission_uses_request_id_when_duplicate_session_scoped_ids_are_projected():
+    server = make_server()
+    proxy = FakeProxy()
+    server.agents[AgentType.CODEX] = proxy
+    first = server.session_mgr.create(AgentType.CODEX)
+    second = server.session_mgr.create(AgentType.CODEX)
+    track_permission(server, first, "req_shared", risk_level="low")
+    track_permission(server, second, "req_shared", risk_level="low")
+    queue = CaptureQueue()
+    server.register_client_identity(
+        queue,
+        "device-transport",
+        "keyboard-1",
+        {"permission:respond:low_risk"},
+    )
+    server.runtime.keyboard_runtime.focus_manager.set_focus(ScreenFocus(
+        device_id="keyboard-1",
+        mode="session",
+        session_id=second.session_id,
+    ))
+
+    server._sync_runtime_state()
+    second_key = f"{second.session_id}:req_shared"
+    assert second_key in server.runtime.state_store.permissions
+    assert server.runtime.state_store.permissions[second_key]["permission_id"] == "req_shared"
+    snapshot = server.runtime.snapshot().to_dict()
+    assert all(
+        permission.get("permission_id") != second_key
+        for permission in snapshot["permissions"]
+    )
+
+    asyncio.run(server._cmd_structured_command(
+        structured_focused_permission_message(
+            True,
+            command_id="cmd_focused_duplicate_session",
+        ),
+        queue,
+    ))
+
+    ack = read_payload(queue)
+    assert_permission_ack_shape(ack, "req_shared", second.session_id, True)
+    assert proxy.responses == [(second.session_id, "req_shared", True)]
+    assert "req_shared" in server.pending_permissions
+    assert second_key not in server.pending_permissions
+
+
 def test_desktop_structured_permission_approval_returns_legacy_permission_ack_shape():
     server = make_server()
     proxy = FakeProxy()

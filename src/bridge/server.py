@@ -653,6 +653,7 @@ class LocalCoreServiceMVP:
     ) -> Dict[str, Any]:
         provider_id = pending.agent.value
         record = {
+            "permission_id": pending.request_id,
             "request_id": pending.request_id,
             "provider_id": provider_id,
             "agent": provider_id,
