@@ -208,6 +208,101 @@ class UIPreferenceRepository:
         return cursor.rowcount > 0
 
 
+class AppSettingsRepository:
+    ACTIVE_PROFILE_ID_KEY = "active_profile_id"
+    ACTIVE_TOOL_PREFIX = "active_tool_by_device:"
+    GLOBAL_FLAG_PREFIX = "global_config:"
+
+    def __init__(self, conn: sqlite3.Connection):
+        self.conn = conn
+
+    def set_active_profile_id(self, profile_id: Optional[str]) -> None:
+        if profile_id is None:
+            self.delete(self.ACTIVE_PROFILE_ID_KEY)
+            return
+        row = self.conn.execute(
+            "SELECT 1 FROM profiles WHERE id = ?",
+            (profile_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"unknown profile: {profile_id}")
+        self._set_json(self.ACTIVE_PROFILE_ID_KEY, profile_id)
+
+    def get_active_profile_id(self) -> Optional[str]:
+        value = self._get_json(self.ACTIVE_PROFILE_ID_KEY)
+        return str(value) if value is not None else None
+
+    def set_active_tool_for_device(self, device_id: str, tool_id: Optional[str]) -> None:
+        if not device_id:
+            raise ValueError("device_id is required")
+        key = f"{self.ACTIVE_TOOL_PREFIX}{device_id}"
+        if tool_id is None:
+            self.delete(key)
+            return
+        self._set_json(key, str(tool_id))
+
+    def get_active_tool_for_device(self, device_id: str) -> Optional[str]:
+        if not device_id:
+            raise ValueError("device_id is required")
+        value = self._get_json(f"{self.ACTIVE_TOOL_PREFIX}{device_id}")
+        return str(value) if value is not None else None
+
+    def list_active_tools_by_device(self) -> Dict[str, str]:
+        rows = self.conn.execute(
+            "SELECT key, value FROM app_settings WHERE key LIKE ? ORDER BY key",
+            (f"{self.ACTIVE_TOOL_PREFIX}%",),
+        ).fetchall()
+        return {
+            row["key"][len(self.ACTIVE_TOOL_PREFIX):]: str(json.loads(row["value"]))
+            for row in rows
+        }
+
+    def set_global_flag(self, key: str, value: Any) -> None:
+        if not key:
+            raise ValueError("global flag key is required")
+        self._set_json(f"{self.GLOBAL_FLAG_PREFIX}{key}", value)
+
+    def get_global_flag(self, key: str, default: Any = None) -> Any:
+        if not key:
+            raise ValueError("global flag key is required")
+        value = self._get_json(f"{self.GLOBAL_FLAG_PREFIX}{key}")
+        return default if value is None else value
+
+    def list_global_flags(self) -> Dict[str, Any]:
+        rows = self.conn.execute(
+            "SELECT key, value FROM app_settings WHERE key LIKE ? ORDER BY key",
+            (f"{self.GLOBAL_FLAG_PREFIX}%",),
+        ).fetchall()
+        return {
+            row["key"][len(self.GLOBAL_FLAG_PREFIX):]: json.loads(row["value"])
+            for row in rows
+        }
+
+    def delete(self, key: str) -> bool:
+        cursor = self.conn.execute("DELETE FROM app_settings WHERE key = ?", (key,))
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    def _set_json(self, key: str, value: Any) -> None:
+        self.conn.execute(
+            """
+            INSERT OR REPLACE INTO app_settings(key, value, updated_at)
+            VALUES (?, ?, ?)
+            """,
+            (key, json.dumps(value, ensure_ascii=False, sort_keys=True), _now()),
+        )
+        self.conn.commit()
+
+    def _get_json(self, key: str) -> Any:
+        row = self.conn.execute(
+            "SELECT value FROM app_settings WHERE key = ?",
+            (key,),
+        ).fetchone()
+        if row is None:
+            return None
+        return json.loads(row["value"])
+
+
 class SQLiteAppStore:
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn
@@ -220,6 +315,7 @@ class SQLiteAppStore:
         self.permission_history = PermissionHistoryRepository(conn)
         self.approval_policies = JsonEntityRepository(conn, "approval_policies")
         self.ui_preferences = UIPreferenceRepository(conn)
+        self.settings = AppSettingsRepository(conn)
 
     @classmethod
     def open(cls, database_path: Path) -> "SQLiteAppStore":
@@ -237,6 +333,8 @@ class SQLiteAppStore:
         active_profile_id: Optional[str] = None,
         global_approval_policy_id: str = "policy_standard",
     ) -> str:
+        if active_profile_id is None:
+            active_profile_id = self.settings.get_active_profile_id()
         return export_app_config_json(AppConfig(
             active_profile_id=active_profile_id,
             profiles=self.profiles.list(),

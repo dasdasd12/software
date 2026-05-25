@@ -139,7 +139,18 @@ APP_STORE_MIGRATIONS = [
           updated_at INTEGER NOT NULL
         );
         """,
-    )
+    ),
+    Migration(
+        version=2,
+        description="create app settings table",
+        sql="""
+        CREATE TABLE app_settings (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        """,
+    ),
 ]
 
 

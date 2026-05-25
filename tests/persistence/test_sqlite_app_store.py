@@ -46,8 +46,12 @@ def test_empty_database_migration_creates_app_store_tables(tmpdir):
         "permission_history",
         "approval_policies",
         "ui_preferences",
+        "app_settings",
     }.issubset(tables)
-    assert versions == [(1, "create app store tables")]
+    assert versions == [
+        (1, "create app store tables"),
+        (2, "create app settings table"),
+    ]
 
 
 def test_profile_repository_crud_round_trip(tmpdir):
