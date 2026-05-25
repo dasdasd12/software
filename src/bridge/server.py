@@ -495,6 +495,9 @@ class LocalCoreServiceMVP:
         instance_id = target.get("instance_id") or command.payload.get("instance_id")
         if not isinstance(instance_id, str):
             instance_id = None
+        run_id = target.get("run_id") or command.payload.get("run_id")
+        if not isinstance(run_id, str):
+            run_id = None
         try:
             approved = self._parse_approved(command.payload.get("approved", False))
         except ValueError as exc:
@@ -502,7 +505,7 @@ class LocalCoreServiceMVP:
 
         self.logger.info(f"Permission {request_id}: {'APPROVED' if approved else 'DENIED'}")
 
-        pending_key, pending = self._find_pending_permission(request_id, session_id, instance_id)
+        pending_key, pending = self._find_pending_permission(request_id, session_id, instance_id, run_id)
         if not pending:
             raise AgentLifecycleError("REQUEST_NOT_FOUND", f"Permission request {request_id} not found")
 
@@ -629,7 +632,7 @@ class LocalCoreServiceMVP:
             sessions[session.session_id] = session_record
         permissions: Dict[str, Dict[str, Any]] = {}
         for request_id, pending in self.pending_permissions.items():
-            permission_record = self._pending_permission_record(pending, sessions)
+            permission_record = self._pending_permission_record(pending, sessions, runs)
             self._ensure_permission_run_ancestry(runs, permission_record, sessions)
             permissions[request_id] = permission_record
 
@@ -645,13 +648,11 @@ class LocalCoreServiceMVP:
         self,
         pending: PendingPermission,
         sessions: Dict[str, Dict[str, Any]],
+        runs: Dict[str, Dict[str, Any]],
     ) -> Dict[str, Any]:
         provider_id = pending.agent.value
-        session_record = sessions.get(pending.session_id, {}) if pending.session_id else {}
-        instance_id = self._pending_permission_instance_id(pending, session_record)
         record = {
             "request_id": pending.request_id,
-            "instance_id": instance_id,
             "provider_id": provider_id,
             "agent": provider_id,
             "timeout_sec": pending.timeout_sec,
@@ -659,24 +660,46 @@ class LocalCoreServiceMVP:
             "tool": pending.tool,
             "description": pending.description,
         }
-        if pending.session_id:
-            record["session_id"] = pending.session_id
         run_id = self._pending_run_id(pending)
         if run_id:
             record["run_id"] = run_id
+        run_record = runs.get(run_id, {}) if run_id else {}
+        session_id = self._pending_permission_session_id(pending, run_record)
+        if session_id:
+            record["session_id"] = session_id
+        session_record = sessions.get(session_id, {}) if session_id else {}
+        instance_id = self._pending_permission_instance_id(pending, session_record, run_record)
+        if instance_id:
+            record["instance_id"] = instance_id
         return record
+
+    @staticmethod
+    def _pending_permission_session_id(
+        pending: PendingPermission,
+        run_record: Dict[str, Any],
+    ) -> Optional[str]:
+        if pending.session_id:
+            return pending.session_id
+        session_id = run_record.get("session_id")
+        if isinstance(session_id, str) and session_id:
+            return session_id
+        return None
 
     def _pending_permission_instance_id(
         self,
         pending: PendingPermission,
         session_record: Dict[str, Any],
-    ) -> str:
+        run_record: Dict[str, Any],
+    ) -> Optional[str]:
         if pending.instance_id:
             return pending.instance_id
         instance_id = session_record.get("instance_id")
         if isinstance(instance_id, str) and instance_id:
             return instance_id
-        return self._default_instance_id(pending.agent)
+        instance_id = run_record.get("instance_id")
+        if isinstance(instance_id, str) and instance_id:
+            return instance_id
+        return None
 
     def _ensure_permission_run_ancestry(
         self,
@@ -823,11 +846,14 @@ class LocalCoreServiceMVP:
         instance_id = event.get("instance_id")
         if not isinstance(instance_id, str) or not instance_id:
             instance_id = None
+        run_id = event.get("run_id")
+        if not isinstance(run_id, str) or not run_id:
+            run_id = None
         agent = self._agent_from_string(event.get("agent", ""))
-        if not request_id or not agent or (not session_id and not instance_id):
+        if not request_id or not agent:
             return
 
-        permission_key = self._pending_permission_key(request_id, session_id, instance_id)
+        permission_key = self._pending_permission_key(request_id, session_id, instance_id, run_id)
         self.pending_permissions[permission_key] = PendingPermission(
             request_id=request_id,
             session_id=session_id,
@@ -838,7 +864,7 @@ class LocalCoreServiceMVP:
             risk_level=self._risk_from_event(event.get("risk_level")),
             tool=str(event.get("tool", "unknown")),
             description=str(event.get("description", "")),
-            run_id=event.get("run_id") if isinstance(event.get("run_id"), str) else None,
+            run_id=run_id,
             native=event.get("native") if isinstance(event.get("native"), dict) else None,
         )
         if session_id:
@@ -1060,13 +1086,20 @@ class LocalCoreServiceMVP:
         request_id: str,
         session_id: Optional[str] = None,
         instance_id: Optional[str] = None,
+        run_id: Optional[str] = None,
     ) -> str:
         existing = self.pending_permissions.get(request_id)
         if (
             existing is None
-            or (existing.session_id == session_id and existing.instance_id == instance_id)
+            or (
+                existing.session_id == session_id
+                and existing.instance_id == instance_id
+                and existing.run_id == run_id
+            )
         ):
             return request_id
+        if run_id:
+            return f"{run_id}:{request_id}"
         if session_id:
             return f"{session_id}:{request_id}"
         if instance_id:
@@ -1078,12 +1111,36 @@ class LocalCoreServiceMVP:
         request_id: str,
         session_id: Any = None,
         instance_id: Any = None,
+        run_id: Any = None,
     ) -> Tuple[str, Optional[PendingPermission]]:
-        if isinstance(session_id, str) and session_id:
+        if isinstance(run_id, str) and run_id:
             matches = [
                 (key, pending)
                 for key, pending in self.pending_permissions.items()
-                if pending.request_id == request_id and pending.session_id == session_id
+                if (
+                    pending.request_id == request_id
+                    and self._pending_run_id(pending) == run_id
+                    and (
+                        not isinstance(session_id, str)
+                        or not session_id
+                        or pending.session_id in {None, session_id}
+                    )
+                    and (
+                        not isinstance(instance_id, str)
+                        or not instance_id
+                        or pending.instance_id in {None, instance_id}
+                    )
+                )
+            ]
+        elif isinstance(session_id, str) and session_id:
+            matches = [
+                (key, pending)
+                for key, pending in self.pending_permissions.items()
+                if (
+                    pending.request_id == request_id
+                    and pending.session_id == session_id
+                    and not self._pending_run_id(pending)
+                )
             ]
         elif isinstance(instance_id, str) and instance_id:
             matches = [
@@ -1093,6 +1150,7 @@ class LocalCoreServiceMVP:
                     pending.request_id == request_id
                     and pending.instance_id == instance_id
                     and not pending.session_id
+                    and not self._pending_run_id(pending)
                 )
             ]
         else:
