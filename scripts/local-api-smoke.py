@@ -375,8 +375,8 @@ async def amain() -> None:
     parser.add_argument("--approved", default="true", help="Permission decision for the permission scenario")
     parser.add_argument("--decision", choices=("approve", "deny"), help="Permission decision alias for approval scenarios")
     parser.add_argument("--token", default="", help="Launch token for auth-enabled Local API")
-    parser.add_argument("--client-kind", default="desktop-ui", help="Local API client kind for hello")
-    parser.add_argument("--client-id", default="local-api-smoke", help="Local API client id for hello")
+    parser.add_argument("--client-kind", default=None, help="Local API client kind for hello")
+    parser.add_argument("--client-id", default=None, help="Local API client id for hello")
     parser.add_argument(
         "--capability",
         action="append",
@@ -391,14 +391,21 @@ async def amain() -> None:
     )
     args = parser.parse_args()
 
-    capabilities = args.capabilities or ["agent:launch", "permission:respond", "session:list"]
+    if args.scenario == "virtual-input":
+        client_kind = args.client_kind or "device-transport"
+        client_id = args.client_id or VIRTUAL_DEVICE_ID
+        capabilities = args.capabilities or ["agent:launch", "permission:respond:low_risk", "session:list"]
+    else:
+        client_kind = args.client_kind or "desktop-ui"
+        client_id = args.client_id or "local-api-smoke"
+        capabilities = args.capabilities or ["agent:launch", "permission:respond", "session:list"]
     client = LocalApiSmokeClient(
         args.url,
         args.timeout,
         args.json_log,
         args.token,
-        args.client_kind,
-        args.client_id,
+        client_kind,
+        client_id,
         capabilities,
     )
     context = args.context

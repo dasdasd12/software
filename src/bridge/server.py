@@ -489,6 +489,13 @@ class LocalCoreServiceMVP:
         if not isinstance(event_type, str) or not event_type:
             await self._send_error(queue, "INVALID_VIRTUAL_INPUT", "event_type is required")
             return
+        if client.kind == ClientKind.DEVICE_TRANSPORT and client.client_id != device_id:
+            await self._send_error(
+                queue,
+                "DEVICE_ID_MISMATCH",
+                "device-transport clients can send virtual input only for their own device_id",
+            )
+            return
 
         try:
             session = self._ensure_virtual_device_session(device_id, queue)
@@ -817,13 +824,12 @@ class LocalCoreServiceMVP:
         queue: asyncio.Queue,
     ):
         client = self._client_for_queue(queue)
-        if client.kind != ClientKind.DEVICE_TRANSPORT:
-            required_capability = self._capability_for_command(command.type)
-            if required_capability and not client.has_capability(required_capability):
-                raise AgentLifecycleError(
-                    "CAPABILITY_DENIED",
-                    f"client lacks capability: {required_capability}",
-                )
+        required_capability = self._capability_for_command(command.type)
+        if required_capability and not client.has_capability(required_capability):
+            raise AgentLifecycleError(
+                "CAPABILITY_DENIED",
+                f"client lacks capability: {required_capability}",
+            )
 
         self._sync_runtime_state()
         context_token = None

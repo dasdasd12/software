@@ -60,6 +60,7 @@ def make_service():
         "security": {
             "client_capabilities": {
                 "device-transport": [
+                    "agent:launch",
                     "permission:respond:low_risk",
                     "session:list",
                 ],
@@ -167,7 +168,7 @@ def test_virtual_input_local_api_routes_key_sequence_and_snapshot_state():
                 "type": "hello",
                 "client_kind": "device-transport",
                 "client_id": device_id,
-                "capabilities": ["permission:respond:low_risk", "session:list"],
+                "capabilities": ["agent:launch", "permission:respond:low_risk", "session:list"],
             }))
             assert (await recv_json(ws))["type"] == "hello_ack"
 
@@ -262,6 +263,140 @@ def test_virtual_input_local_api_routes_key_sequence_and_snapshot_state():
             assert final_snapshot["active_tools"][device_id] == "permissions"
             assert final_snapshot["devices"][device_id]["active_tool_id"] == "permissions"
             assert final_snapshot["devices"][device_id]["is_open"] is True
+
+    asyncio.run(with_local_api(run_client))
+
+
+def test_virtual_input_device_client_without_launch_capability_cannot_launch_session():
+    async def run_client(service, uri):
+        device_id = "kbd_virtual_11"
+        async with websockets.connect(uri) as ws:
+            await ws.send(json.dumps({
+                "type": "hello",
+                "client_kind": "device-transport",
+                "client_id": device_id,
+                "capabilities": [],
+            }))
+            assert (await recv_json(ws))["type"] == "hello_ack"
+
+            await ws.send(json.dumps({
+                "type": "virtual_device_configure",
+                "device_id": device_id,
+                "profile": virtual_profile(),
+            }))
+            assert (await wait_for(ws, "virtual_device_configured"))["active_profile_id"] == "profile_virtual_smoke"
+
+            await send_command(ws, {
+                "command_id": "cmd_focus_agent_no_launch_cap",
+                "type": "agent.focus.set",
+                "source": {"kind": "device-transport", "device_id": device_id},
+                "target": {"device_id": device_id},
+                "payload": {"instance_id": "codex-default"},
+            })
+            await wait_for(ws, "event")
+
+            await ws.send(json.dumps({
+                "type": "virtual_input",
+                "device_id": device_id,
+                "key_id": "K_LAUNCH",
+                "event_type": "press",
+            }))
+            error = await wait_for(ws, "error")
+
+            assert error["code"] == "CAPABILITY_DENIED"
+            assert service.session_mgr.list_all() == []
+            assert service.agents[AgentType.CODEX].launched == []
+
+    asyncio.run(with_local_api(run_client))
+
+
+def test_virtual_input_device_client_cannot_send_for_another_device_id():
+    async def run_client(service, uri):
+        device_id = "kbd_virtual_11"
+        client_id = "kbd_virtual_other"
+        async with websockets.connect(uri) as ws:
+            await ws.send(json.dumps({
+                "type": "hello",
+                "client_kind": "device-transport",
+                "client_id": client_id,
+                "capabilities": ["agent:launch", "permission:respond:low_risk", "session:list"],
+            }))
+            assert (await recv_json(ws))["type"] == "hello_ack"
+
+            await ws.send(json.dumps({
+                "type": "virtual_device_configure",
+                "device_id": device_id,
+                "profile": virtual_profile(),
+            }))
+            assert (await wait_for(ws, "virtual_device_configured"))["active_profile_id"] == "profile_virtual_smoke"
+
+            await ws.send(json.dumps({
+                "type": "virtual_input",
+                "device_id": device_id,
+                "key_id": "K_LAUNCH",
+                "event_type": "press",
+            }))
+            error = await wait_for(ws, "error")
+
+            assert error["code"] == "DEVICE_ID_MISMATCH"
+            assert service.session_mgr.list_all() == []
+            assert service.agents[AgentType.CODEX].launched == []
+
+    asyncio.run(with_local_api(run_client))
+
+
+def test_virtual_input_device_client_with_low_risk_capability_can_approve_low_risk_permission():
+    async def run_client(service, uri):
+        device_id = "kbd_virtual_11"
+        async with websockets.connect(uri) as ws:
+            await ws.send(json.dumps({
+                "type": "hello",
+                "client_kind": "device-transport",
+                "client_id": device_id,
+                "capabilities": ["permission:respond:low_risk"],
+            }))
+            assert (await recv_json(ws))["type"] == "hello_ack"
+
+            await ws.send(json.dumps({
+                "type": "virtual_device_configure",
+                "device_id": device_id,
+                "profile": virtual_profile(),
+            }))
+            assert (await wait_for(ws, "virtual_device_configured"))["active_profile_id"] == "profile_virtual_smoke"
+
+            session = service.session_mgr.create(AgentType.CODEX)
+            await send_command(ws, {
+                "command_id": "cmd_focus_session_low_risk",
+                "type": "agent.focus.set",
+                "source": {"kind": "device-transport", "device_id": device_id},
+                "target": {"device_id": device_id},
+                "payload": {"session_id": session.session_id},
+            })
+            await wait_for(ws, "event")
+
+            service._on_agent_event(service.unifier.encode_device_message({
+                "type": "permission_request",
+                "request_id": "perm_low_virtual_direct",
+                "session_id": session.session_id,
+                "agent": "codex",
+                "risk_level": "low",
+                "tool": "shell",
+                "description": "low risk virtual approval",
+                "timeout_sec": 30,
+            }))
+
+            permission_ack = await send_virtual_key(
+                ws,
+                device_id,
+                "K_ENTER",
+                active_layers=["layer_fn"],
+                modifiers=["fn"],
+            )
+
+            assert permission_ack["events"][0]["type"] == "agent.permission.resolved"
+            assert service.agents[AgentType.CODEX].permission_responses == [
+                (session.session_id, "perm_low_virtual_direct", True)
+            ]
 
     asyncio.run(with_local_api(run_client))
 
