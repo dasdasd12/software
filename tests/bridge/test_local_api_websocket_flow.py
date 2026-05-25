@@ -20,6 +20,8 @@ class FakeProxy:
         self.launched = []
         self.interrupted = []
         self.permission_responses = []
+        self.interrupt_result = True
+        self.permission_response_exc = None
 
     def is_available(self):
         return True
@@ -34,10 +36,12 @@ class FakeProxy:
 
     async def send_interrupt(self, session_id):
         self.interrupted.append(session_id)
-        return True
+        return self.interrupt_result
 
     async def handle_permission_response(self, session_id, request_id, approved):
         self.permission_responses.append((session_id, request_id, approved))
+        if self.permission_response_exc is not None:
+            raise self.permission_response_exc
         return {
             "accepted": True,
             "forwarded": False,
@@ -394,6 +398,74 @@ def test_structured_interrupt_broadcasts_focused_run_fallback_event():
             snapshot = await recv_json(ws)
             assert snapshot["type"] == "snapshot"
             assert snapshot["snapshot"]["focus"]["legacy-local-api"] == focus_event["payload"]
+
+    asyncio.run(with_local_api(run_client))
+
+
+def test_structured_interrupt_error_broadcasts_focused_run_fallback_event():
+    async def run_client(service, uri):
+        session = service.session_mgr.create(AgentType.CODEX)
+        service.session_mgr.update_state(session.session_id, AgentState.SUBMITTED)
+        service.agents[AgentType.CODEX].interrupt_result = False
+
+        async with websockets.connect(uri) as ws:
+            await ws.send(json.dumps({
+                "type": "command",
+                "command": {
+                    "command_id": "cmd_focus_missing_run_for_failed_interrupt",
+                    "type": "agent.focus.set",
+                    "source": {
+                        "kind": "keyboard-device",
+                        "client_id": "kbd_01",
+                        "device_id": "kbd_01",
+                    },
+                    "target": {"device_id": "legacy-local-api"},
+                    "payload": {
+                        "mode": "run",
+                        "instance_id": "codex-default",
+                        "session_id": session.session_id,
+                        "run_id": "run_missing",
+                    },
+                },
+            }))
+            initial_focus_event = await recv_json(ws)
+            assert initial_focus_event["type"] == "event"
+            assert initial_focus_event["event"]["type"] == "agent.focus.changed"
+
+            await ws.send(json.dumps({
+                "type": "command",
+                "command": {
+                    "command_id": "cmd_failed_interrupt_missing_focused_run",
+                    "type": "agent.run.interrupt",
+                    "source": {
+                        "kind": "keyboard-device",
+                        "client_id": "kbd_01",
+                        "device_id": "kbd_01",
+                    },
+                    "target": "focused_run",
+                    "payload": {},
+                },
+            }))
+            received = [await recv_json(ws), await recv_json(ws)]
+            errors = [payload for payload in received if payload["type"] == "error"]
+            events = [payload["event"] for payload in received if payload["type"] == "event"]
+
+            assert len(errors) == 1
+            assert errors[0]["code"] == "INTERRUPT_FAILED"
+            assert len(events) == 1
+            assert events[0]["type"] == "agent.focus.changed"
+            assert events[0]["payload"]["mode"] == "session"
+            assert events[0]["payload"]["target"] == {
+                "instance_id": "codex-default",
+                "session_id": session.session_id,
+                "run_id": None,
+            }
+            assert all(event["type"] != "command.target.unresolved" for event in events)
+            try:
+                extra = await recv_json(ws, timeout=0.1)
+            except asyncio.TimeoutError:
+                extra = None
+            assert extra is None
 
     asyncio.run(with_local_api(run_client))
 
@@ -756,6 +828,83 @@ def test_focused_permission_response_broadcasts_focus_fallback_before_resolved_e
             assert resolved["type"] == "event"
             assert resolved["event"]["type"] == "agent.permission.resolved"
             assert resolved["event"]["payload"]["request_id"] == "req_focused_fallback"
+
+    asyncio.run(with_local_api(run_client))
+
+
+def test_focused_permission_response_error_broadcasts_focus_fallback_event():
+    async def run_client(service, uri):
+        session = service.session_mgr.create(AgentType.CODEX)
+        service.agents[AgentType.CODEX].permission_response_exc = RuntimeError("forward failed")
+
+        async with websockets.connect(uri) as ws:
+            await ws.send(json.dumps({
+                "type": "command",
+                "command": {
+                    "command_id": "cmd_focus_missing_run_for_failed_permission",
+                    "type": "agent.focus.set",
+                    "source": {
+                        "kind": "keyboard-device",
+                        "client_id": "kbd_01",
+                        "device_id": "kbd_01",
+                    },
+                    "target": {"device_id": "legacy-local-api"},
+                    "payload": {
+                        "mode": "run",
+                        "instance_id": "codex-default",
+                        "session_id": session.session_id,
+                        "run_id": "run_missing",
+                    },
+                },
+            }))
+            initial_focus_event = await recv_json(ws)
+            assert initial_focus_event["type"] == "event"
+            assert initial_focus_event["event"]["type"] == "agent.focus.changed"
+
+            service._on_agent_event(service.unifier.encode_device_message({
+                "type": "permission_request",
+                "request_id": "req_focused_fallback_error",
+                "session_id": session.session_id,
+                "agent": "codex",
+                "tool": "shell",
+                "description": "Run command",
+                "timeout_sec": 30,
+                "risk_level": "low",
+            }))
+            request = await recv_json(ws)
+            assert request["type"] == "permission_request"
+            assert request["request_id"] == "req_focused_fallback_error"
+
+            await ws.send(json.dumps({
+                "type": "command",
+                "command": {
+                    "command_id": "cmd_approve_focused_fallback_permission_error",
+                    "type": "agent.permission.respond",
+                    "source": {
+                        "kind": "keyboard-device",
+                        "client_id": "kbd_01",
+                        "device_id": "kbd_01",
+                    },
+                    "target": "focused_permission",
+                    "payload": {"approved": True},
+                },
+            }))
+            received = [await recv_json(ws), await recv_json(ws)]
+            errors = [payload for payload in received if payload["type"] == "error"]
+            events = [payload["event"] for payload in received if payload["type"] == "event"]
+
+            assert len(errors) == 1
+            assert errors[0]["code"] == "PERMISSION_FORWARD_FAILED"
+            assert len(events) == 1
+            assert events[0]["type"] == "agent.focus.changed"
+            assert events[0]["payload"]["mode"] == "session"
+            assert all(event["type"] != "command.target.unresolved" for event in events)
+            assert "req_focused_fallback_error" in service.pending_permissions
+            try:
+                extra = await recv_json(ws, timeout=0.1)
+            except asyncio.TimeoutError:
+                extra = None
+            assert extra is None
 
     asyncio.run(with_local_api(run_client))
 

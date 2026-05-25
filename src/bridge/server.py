@@ -372,13 +372,16 @@ class LocalCoreServiceMVP:
             event = await self.runtime.command_router.dispatch_async(command)
         except KeyError as exc:
             await self._send_error(queue, "UNKNOWN_COMMAND", str(exc))
+            self._broadcast_incremental_events(start_seq)
             return
         except AgentLifecycleError as exc:
             await self._send_error(queue, exc.code, exc.message)
+            self._broadcast_incremental_events(start_seq)
             return
 
         if event.type == "command.target.unresolved":
             await self._send_unresolved_target_error(queue, event)
+            self._broadcast_incremental_events(start_seq, exclude_event=event)
             return
 
         if command.type == "system.snapshot.request":
@@ -452,15 +455,18 @@ class LocalCoreServiceMVP:
             event = await self.runtime.command_router.dispatch_async(command)
         except KeyError as exc:
             await self._send_error(queue, "UNKNOWN_COMMAND", str(exc))
+            self._broadcast_incremental_events(start_seq)
             return
         except AgentLifecycleError as exc:
             await self._send_error(queue, exc.code, exc.message)
+            self._broadcast_incremental_events(start_seq)
             return
         finally:
             _permission_client_context.reset(context_token)
 
         if event.type == "command.target.unresolved":
             await self._send_unresolved_target_error(queue, event)
+            self._broadcast_incremental_events(start_seq, exclude_event=event)
             return
 
         self._sync_runtime_state()
@@ -753,6 +759,16 @@ class LocalCoreServiceMVP:
     def _broadcast_core_events(self, events) -> None:
         for event in events:
             self._broadcast_core_event(event)
+
+    def _broadcast_incremental_events(self, start_seq: int, exclude_event=None) -> None:
+        events = self.runtime.event_bus.events_after(start_seq)
+        if exclude_event is not None:
+            events = [
+                event
+                for event in events
+                if not self._event_was_published(exclude_event, [event])
+            ]
+        self._broadcast_core_events(events)
 
     def _events_to_broadcast(self, start_seq: int, returned_event):
         published_events = self.runtime.event_bus.events_after(start_seq)
