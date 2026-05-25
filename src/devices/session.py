@@ -5,7 +5,7 @@ from typing import List, Optional
 
 from core import Snapshot
 
-from .command_adapter import VirtualDeviceCommandAdapter, VirtualDeviceCommandResult
+from .command_adapter import CommandDispatcher, VirtualDeviceCommandAdapter, VirtualDeviceCommandResult
 from .device_transport import DeviceFrame, DeviceTransport, DeviceTransportError
 from .manager import DeviceManager
 from .projection_runtime import DeviceProjectionRuntime
@@ -71,7 +71,11 @@ class VirtualDeviceSession:
         await self._send_frames(frames)
         return frames
 
-    async def handle_frame(self, frame: DeviceFrame) -> VirtualDeviceSessionResult:
+    async def handle_frame(
+        self,
+        frame: DeviceFrame,
+        command_dispatcher: Optional[CommandDispatcher] = None,
+    ) -> VirtualDeviceSessionResult:
         if frame.frame_type != INPUT_EVENT_FRAME_TYPE:
             error_frame = error_frame_for_exception(
                 unknown_frame_error(frame),
@@ -83,7 +87,10 @@ class VirtualDeviceSession:
             return VirtualDeviceSessionResult(response_frames=[error_frame])
 
         if self.command_adapter is not None:
-            command_result = await self.command_adapter.handle_frame(frame)
+            command_result = await self.command_adapter.handle_frame(
+                frame,
+                command_dispatcher=command_dispatcher,
+            )
             await self._send_frames(command_result.response_frames)
             return VirtualDeviceSessionResult(
                 response_frames=command_result.response_frames,

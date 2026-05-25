@@ -56,6 +56,10 @@ class DeviceManager:
         self._records[capabilities.device_id] = record
         return record
 
+    def unregister_transport(self, device_id: str) -> None:
+        self._transports.pop(device_id, None)
+        self._records.pop(device_id, None)
+
     async def negotiate_transport(self, transport: DeviceTransport) -> DeviceRecord:
         """Open a transport and record the capability snapshot it exposes."""
         await transport.open()

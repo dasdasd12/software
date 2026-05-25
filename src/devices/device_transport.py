@@ -195,6 +195,17 @@ class SimulatedTransport:
     async def close(self) -> None:
         self._is_open = False
 
+    def clear_queued_frames(self) -> int:
+        if self._queue is None:
+            return 0
+        cleared = 0
+        while True:
+            try:
+                self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return cleared
+            cleared += 1
+
     async def send_frame(self, frame: DeviceFrame) -> None:
         self._ensure_open(frame.frame_type)
         if len(frame.payload) > self._max_payload_size:

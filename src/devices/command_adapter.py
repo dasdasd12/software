@@ -52,7 +52,11 @@ class VirtualDeviceCommandAdapter:
     def set_slot_mapper(self, slot_mapper: DeviceSlotMapper) -> None:
         self._slot_mapper = slot_mapper
 
-    async def handle_frame(self, frame: DeviceFrame) -> VirtualDeviceCommandResult:
+    async def handle_frame(
+        self,
+        frame: DeviceFrame,
+        command_dispatcher: Optional[CommandDispatcher] = None,
+    ) -> VirtualDeviceCommandResult:
         try:
             if frame.frame_type != INPUT_EVENT_FRAME_TYPE:
                 raise DeviceTransportError(
@@ -84,9 +88,10 @@ class VirtualDeviceCommandAdapter:
             for action in resolved_actions
         ]
         events = []
+        dispatcher = command_dispatcher or self._command_dispatcher
         for command in commands:
-            if self._command_dispatcher is not None:
-                events.append(await self._command_dispatcher(command))
+            if dispatcher is not None:
+                events.append(await dispatcher(command))
             else:
                 events.append(await self._router.dispatch_async(command))
 

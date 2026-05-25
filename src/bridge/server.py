@@ -146,6 +146,7 @@ class LocalCoreServiceMVP:
         self._virtual_profiles: Dict[str, Profile] = {}
         self._virtual_sessions: Dict[str, VirtualDeviceSession] = {}
         self._virtual_transports: Dict[str, SimulatedTransport] = {}
+        self._virtual_session_owners: Dict[str, asyncio.Queue] = {}
         self._server = None
         self._shutdown_event: Optional[asyncio.Event] = None
 
@@ -254,6 +255,7 @@ class LocalCoreServiceMVP:
                 except asyncio.CancelledError:
                     pass
             self.connected_clients.discard(client_queue)
+            await self._cleanup_virtual_devices_for_queue(client_queue)
             self.client_identities.pop(client_queue, None)
             self.logger.info(f"Local API client disconnected: {peer}")
 
@@ -452,6 +454,7 @@ class LocalCoreServiceMVP:
 
         self._sync_runtime_state()
         frames = await session.connect(snapshot=self.runtime.snapshot())
+        self._drain_virtual_transport(device_id)
         self._sync_runtime_state()
         await queue.put(json.dumps({
             "type": "virtual_device_configured",
@@ -525,8 +528,12 @@ class LocalCoreServiceMVP:
         )
 
         start_seq = self.runtime.event_bus.last_seq
+        self._virtual_session_owners[device_id] = queue
         try:
-            result = await session.handle_frame(frame)
+            result = await session.handle_frame(
+                frame,
+                command_dispatcher=lambda command: self._dispatch_virtual_device_command(command, queue),
+            )
         except AgentLifecycleError as exc:
             await self._send_error(queue, exc.code, exc.message)
             self._broadcast_incremental_events(start_seq)
@@ -536,6 +543,7 @@ class LocalCoreServiceMVP:
             self._broadcast_incremental_events(start_seq)
             return
 
+        self._drain_virtual_transport(device_id)
         self._sync_runtime_state()
         command_result = result.command_result
         await queue.put(json.dumps({
@@ -783,7 +791,6 @@ class LocalCoreServiceMVP:
             router=self.runtime.command_router,
             codec=codec,
             slot_mapper=mapper,
-            command_dispatcher=lambda command: self._dispatch_virtual_device_command(command, queue),
         )
         projection_runtime = DeviceProjectionRuntime(
             device_id=device_id,
@@ -804,6 +811,7 @@ class LocalCoreServiceMVP:
         )
         self._virtual_sessions[device_id] = session
         self._virtual_transports[device_id] = transport
+        self._virtual_session_owners[device_id] = queue
         return session
 
     def _ensure_virtual_device_session(
@@ -830,6 +838,7 @@ class LocalCoreServiceMVP:
                 "CAPABILITY_DENIED",
                 f"client lacks capability: {required_capability}",
             )
+        command = self._command_from_virtual_input_sender(command, client)
 
         self._sync_runtime_state()
         context_token = None
@@ -840,6 +849,35 @@ class LocalCoreServiceMVP:
         finally:
             if context_token is not None:
                 _permission_client_context.reset(context_token)
+
+    async def _cleanup_virtual_devices_for_queue(self, queue: asyncio.Queue) -> None:
+        device_ids = [
+            device_id
+            for device_id, owner in self._virtual_session_owners.items()
+            if owner is queue
+        ]
+        for device_id in device_ids:
+            transport = self._virtual_transports.pop(device_id, None)
+            if transport is not None:
+                self._drain_virtual_transport(device_id, transport=transport)
+                await transport.close()
+            self._virtual_sessions.pop(device_id, None)
+            self._virtual_session_owners.pop(device_id, None)
+            self.runtime.device_manager.unregister_transport(device_id)
+            self.runtime.state_store.devices.pop(device_id, None)
+
+    def _drain_virtual_transport(
+        self,
+        device_id: str,
+        *,
+        transport: Optional[SimulatedTransport] = None,
+    ) -> None:
+        current = transport or self._virtual_transports.get(device_id)
+        if current is None:
+            return
+        clear = getattr(current, "clear_queued_frames", None)
+        if clear is not None:
+            clear()
 
     def _active_virtual_profile(self, device_id: str) -> Optional[Profile]:
         profile = self._virtual_profiles.get(device_id)
@@ -1624,6 +1662,27 @@ class LocalCoreServiceMVP:
         return CommandEnvelope(
             type=command.type,
             source=self._command_source_for_queue(queue),
+            payload=dict(command.payload),
+            target=command.target,
+            command_id=command.command_id,
+            timestamp=command.timestamp,
+        )
+
+    @staticmethod
+    def _command_from_virtual_input_sender(
+        command: CommandEnvelope,
+        client: ClientIdentity,
+    ) -> CommandEnvelope:
+        device_id = command.source.device_id
+        if device_id is None and client.kind == ClientKind.DEVICE_TRANSPORT:
+            device_id = client.client_id
+        return CommandEnvelope(
+            type=command.type,
+            source=CommandSource(
+                kind=client.kind.value,
+                client_id=client.client_id,
+                device_id=device_id,
+            ),
             payload=dict(command.payload),
             target=command.target,
             command_id=command.command_id,

@@ -310,6 +310,91 @@ def test_virtual_input_device_client_without_launch_capability_cannot_launch_ses
     asyncio.run(with_local_api(run_client))
 
 
+def test_virtual_input_uses_current_sender_capabilities_for_cached_device_session():
+    async def run_client(service, uri):
+        device_id = "kbd_virtual_11"
+        async with websockets.connect(uri) as client_a:
+            await client_a.send(json.dumps({
+                "type": "hello",
+                "client_kind": "device-transport",
+                "client_id": device_id,
+                "capabilities": ["agent:launch"],
+            }))
+            assert (await recv_json(client_a))["type"] == "hello_ack"
+
+            await client_a.send(json.dumps({
+                "type": "virtual_device_configure",
+                "device_id": device_id,
+                "profile": virtual_profile(),
+            }))
+            assert (await wait_for(client_a, "virtual_device_configured"))["active_profile_id"] == "profile_virtual_smoke"
+
+            await send_command(client_a, {
+                "command_id": "cmd_focus_agent_current_sender",
+                "type": "agent.focus.set",
+                "source": {"kind": "device-transport", "device_id": device_id},
+                "target": {"device_id": device_id},
+                "payload": {"instance_id": "codex-default"},
+            })
+            await wait_for(client_a, "event")
+
+            async with websockets.connect(uri) as client_b:
+                await client_b.send(json.dumps({
+                    "type": "hello",
+                    "client_kind": "device-transport",
+                    "client_id": device_id,
+                    "capabilities": [],
+                }))
+                assert (await recv_json(client_b))["type"] == "hello_ack"
+
+                await client_b.send(json.dumps({
+                    "type": "virtual_input",
+                    "device_id": device_id,
+                    "key_id": "K_LAUNCH",
+                    "event_type": "press",
+                }))
+                error = await wait_for(client_b, "error")
+
+        assert error["code"] == "CAPABILITY_DENIED"
+        assert service.session_mgr.list_all() == []
+        assert service.agents[AgentType.CODEX].launched == []
+
+    asyncio.run(with_local_api(run_client))
+
+
+def test_virtual_input_disconnect_releases_virtual_session_transport_and_queued_frames():
+    async def run_client(service, uri):
+        device_id = "kbd_virtual_disconnect"
+        async with websockets.connect(uri) as ws:
+            await ws.send(json.dumps({
+                "type": "hello",
+                "client_kind": "device-transport",
+                "client_id": device_id,
+                "capabilities": ["agent:launch"],
+            }))
+            assert (await recv_json(ws))["type"] == "hello_ack"
+
+            await ws.send(json.dumps({
+                "type": "virtual_device_configure",
+                "device_id": device_id,
+                "profile": virtual_profile(),
+            }))
+            assert (await wait_for(ws, "virtual_device_configured"))["active_profile_id"] == "profile_virtual_smoke"
+            assert device_id in service._virtual_sessions
+            assert device_id in service._virtual_transports
+
+        for _ in range(20):
+            if device_id not in service._virtual_sessions and device_id not in service._virtual_transports:
+                break
+            await asyncio.sleep(0.01)
+
+        assert device_id not in service._virtual_sessions
+        assert device_id not in service._virtual_transports
+        assert service.runtime.device_manager.get(device_id) is None
+
+    asyncio.run(with_local_api(run_client))
+
+
 def test_virtual_input_device_client_cannot_send_for_another_device_id():
     async def run_client(service, uri):
         device_id = "kbd_virtual_11"
