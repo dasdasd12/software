@@ -23,9 +23,15 @@ class ImportConflictPolicy(str, Enum):
 @dataclass(frozen=True)
 class ProfileImportConflict:
     profile_id: str
-    existing_name: str
-    incoming_name: str
+    existing_name: str = ""
+    incoming_name: str = ""
     reason: str = "profile_id_exists"
+    entity_type: str = "profiles"
+    entity_id: str = ""
+
+    def __post_init__(self):
+        if not self.entity_id:
+            object.__setattr__(self, "entity_id", self.profile_id)
 
 
 @dataclass(frozen=True)
@@ -58,34 +64,55 @@ def import_store_config_json(
     renamed_profile_ids: Dict[str, str] = {}
     conflicts: List[ProfileImportConflict] = []
 
-    for profile in parsed.profiles:
-        existing = store.profiles.get(profile.id)
-        if existing is not None and policy == ImportConflictPolicy.SKIP:
-            conflicts.append(ProfileImportConflict(
-                profile_id=profile.id,
-                existing_name=existing.name,
-                incoming_name=profile.name,
-            ))
-            continue
-        if existing is not None and policy == ImportConflictPolicy.RENAME_ON_CONFLICT:
-            original_id = profile.id
-            profile = _renamed_profile(store, profile)
-            renamed_profile_ids[original_id] = profile.id
-        store.profiles.upsert(profile)
-        imported_profile_ids.append(profile.id)
+    with store.transaction():
+        for profile in parsed.profiles:
+            existing = store.profiles.get(profile.id)
+            if existing is not None and policy == ImportConflictPolicy.SKIP:
+                conflicts.append(ProfileImportConflict(
+                    profile_id=profile.id,
+                    existing_name=existing.name,
+                    incoming_name=profile.name,
+                ))
+                continue
+            if existing is not None and policy == ImportConflictPolicy.RENAME_ON_CONFLICT:
+                original_id = profile.id
+                profile = _renamed_profile(store, profile)
+                renamed_profile_ids[original_id] = profile.id
+            store.profiles.upsert(profile)
+            imported_profile_ids.append(profile.id)
 
-    for item in parsed.known_devices:
-        store.known_devices.upsert(item)
-    for item in parsed.agent_instance_presets:
-        store.agent_instance_presets.upsert(item)
-    for item in parsed.workspace_bindings:
-        store.workspace_bindings.upsert(item)
-    for item in parsed.approval_policies:
-        store.approval_policies.upsert(item)
-    for key, value in parsed.ui_preferences.items():
-        store.ui_preferences.set(key, value)
+        _import_id_based_entities(
+            store.known_devices,
+            "known_devices",
+            parsed.known_devices,
+            policy,
+            conflicts,
+        )
+        _import_id_based_entities(
+            store.agent_instance_presets,
+            "agent_instance_presets",
+            parsed.agent_instance_presets,
+            policy,
+            conflicts,
+        )
+        _import_id_based_entities(
+            store.workspace_bindings,
+            "workspace_bindings",
+            parsed.workspace_bindings,
+            policy,
+            conflicts,
+        )
+        _import_id_based_entities(
+            store.approval_policies,
+            "approval_policies",
+            parsed.approval_policies,
+            policy,
+            conflicts,
+        )
+        for key, value in parsed.ui_preferences.items():
+            store.ui_preferences.set(key, value)
 
-    _import_settings(store, payload, parsed, renamed_profile_ids)
+        _import_settings(store, payload, parsed, renamed_profile_ids)
     return ConfigImportResult(
         imported_profile_ids=imported_profile_ids,
         conflicts=conflicts,
@@ -105,6 +132,34 @@ def _renamed_profile(store, profile: Profile) -> Profile:
     data["id"] = candidate
     data["name"] = f"{profile.name} (imported)"
     return profile_from_dict(data)
+
+
+def _import_id_based_entities(
+    repository,
+    entity_type: str,
+    items: List[dict],
+    policy: ImportConflictPolicy,
+    conflicts: List[ProfileImportConflict],
+) -> None:
+    for item in items:
+        entity_id = item.get("id")
+        existing = repository.get(str(entity_id)) if entity_id else None
+        if existing is not None and policy != ImportConflictPolicy.REPLACE:
+            conflicts.append(_entity_conflict(entity_type, item, existing))
+            continue
+        repository.upsert(item)
+
+
+def _entity_conflict(entity_type: str, incoming: dict, existing: dict) -> ProfileImportConflict:
+    entity_id = str(incoming.get("id", ""))
+    return ProfileImportConflict(
+        profile_id=entity_id,
+        existing_name=str(existing.get("name") or existing.get("display_name") or ""),
+        incoming_name=str(incoming.get("name") or incoming.get("display_name") or ""),
+        reason=f"{entity_type}_id_exists",
+        entity_type=entity_type,
+        entity_id=entity_id,
+    )
 
 
 def _import_settings(

@@ -148,6 +148,85 @@ def test_import_replace_policy_overwrites_existing_profile(tmpdir):
     target.close()
 
 
+def test_import_conflict_does_not_overwrite_approval_policy_by_default(tmpdir):
+    source = SQLiteAppStore.open(Path(str(tmpdir)) / "source.db")
+    source.approval_policies.upsert({
+        "id": "policy_standard",
+        "mode": "approve_low_risk",
+        "name": "Imported Policy",
+    })
+    exported = export_store_config_json(source)
+
+    target = SQLiteAppStore.open(Path(str(tmpdir)) / "target.db")
+    target.approval_policies.upsert({
+        "id": "policy_standard",
+        "mode": "manual",
+        "name": "Existing Policy",
+    })
+
+    result = import_store_config_json(target, exported)
+
+    assert [conflict.entity_type for conflict in result.conflicts] == ["approval_policies"]
+    assert [conflict.entity_id for conflict in result.conflicts] == ["policy_standard"]
+    assert target.approval_policies.get("policy_standard")["mode"] == "manual"
+    source.close()
+    target.close()
+
+
+def test_import_replace_policy_overwrites_existing_approval_policy(tmpdir):
+    source = SQLiteAppStore.open(Path(str(tmpdir)) / "source.db")
+    source.approval_policies.upsert({
+        "id": "policy_standard",
+        "mode": "approve_low_risk",
+        "name": "Imported Policy",
+    })
+    exported = export_store_config_json(source)
+
+    target = SQLiteAppStore.open(Path(str(tmpdir)) / "target.db")
+    target.approval_policies.upsert({
+        "id": "policy_standard",
+        "mode": "manual",
+        "name": "Existing Policy",
+    })
+
+    result = import_store_config_json(
+        target,
+        exported,
+        conflict_policy=ImportConflictPolicy.REPLACE,
+    )
+
+    assert result.conflicts == []
+    assert target.approval_policies.get("policy_standard")["mode"] == "approve_low_risk"
+    source.close()
+    target.close()
+
+
+def test_import_rolls_back_profile_policy_and_settings_when_settings_validation_fails(tmpdir):
+    source = SQLiteAppStore.open(Path(str(tmpdir)) / "source.db")
+    source.profiles.upsert(_profile())
+    source.approval_policies.upsert({
+        "id": "policy_standard",
+        "mode": "approve_low_risk",
+    })
+    payload = json.loads(export_store_config_json(source))
+    payload["app_settings"] = {
+        "active_tool_by_device": {"": "tool_terminal"},
+        "global_flags": {"feature.virtual_input": True},
+    }
+
+    target = SQLiteAppStore.open(Path(str(tmpdir)) / "target.db")
+
+    with pytest.raises(ValueError, match="device_id is required"):
+        import_store_config_json(target, json.dumps(payload))
+
+    assert target.profiles.get("profile_dev") is None
+    assert target.approval_policies.get("policy_standard") is None
+    assert target.settings.list_active_tools_by_device() == {}
+    assert target.settings.list_global_flags() == {}
+    source.close()
+    target.close()
+
+
 def test_import_rename_on_conflict_creates_new_identifiable_profile(tmpdir):
     source = SQLiteAppStore.open(Path(str(tmpdir)) / "source.db")
     source.profiles.upsert(_profile(name="Imported Developer"))

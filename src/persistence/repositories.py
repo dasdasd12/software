@@ -3,6 +3,7 @@
 import json
 import sqlite3
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -24,10 +25,30 @@ def _loads(raw: str) -> Dict[str, Any]:
     return json.loads(raw)
 
 
+class _TransactionState:
+    def __init__(self):
+        self.depth = 0
+
+    @property
+    def in_transaction(self) -> bool:
+        return self.depth > 0
+
+
+def _commit_unless_transaction(conn: sqlite3.Connection, transaction_state: _TransactionState) -> None:
+    if not transaction_state.in_transaction:
+        conn.commit()
+
+
 class JsonEntityRepository:
-    def __init__(self, conn: sqlite3.Connection, table: str):
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        table: str,
+        transaction_state: Optional[_TransactionState] = None,
+    ):
         self.conn = conn
         self.table = table
+        self._transaction_state = transaction_state or _TransactionState()
 
     def upsert(self, data: Dict[str, Any]) -> None:
         entity_id = data.get("id")
@@ -46,7 +67,7 @@ class JsonEntityRepository:
             """,
             (entity_id, _dumps(data), created_at, current),
         )
-        self.conn.commit()
+        _commit_unless_transaction(self.conn, self._transaction_state)
 
     def get(self, entity_id: str) -> Optional[Dict[str, Any]]:
         row = self.conn.execute(
@@ -65,13 +86,18 @@ class JsonEntityRepository:
 
     def delete(self, entity_id: str) -> bool:
         cursor = self.conn.execute(f"DELETE FROM {self.table} WHERE id = ?", (entity_id,))
-        self.conn.commit()
+        _commit_unless_transaction(self.conn, self._transaction_state)
         return cursor.rowcount > 0
 
 
 class ProfileRepository:
-    def __init__(self, conn: sqlite3.Connection):
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        transaction_state: Optional[_TransactionState] = None,
+    ):
         self.conn = conn
+        self._transaction_state = transaction_state or _TransactionState()
 
     def upsert(self, profile: Profile) -> None:
         validate_profile(profile)
@@ -95,7 +121,7 @@ class ProfileRepository:
                 current,
             ),
         )
-        self.conn.commit()
+        _commit_unless_transaction(self.conn, self._transaction_state)
 
     def get(self, profile_id: str) -> Optional[Profile]:
         row = self.conn.execute(
@@ -112,7 +138,7 @@ class ProfileRepository:
 
     def delete(self, profile_id: str) -> bool:
         cursor = self.conn.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
-        self.conn.commit()
+        _commit_unless_transaction(self.conn, self._transaction_state)
         return cursor.rowcount > 0
 
 
@@ -127,8 +153,13 @@ class PermissionHistoryRepository:
         "summary",
     )
 
-    def __init__(self, conn: sqlite3.Connection):
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        transaction_state: Optional[_TransactionState] = None,
+    ):
         self.conn = conn
+        self._transaction_state = transaction_state or _TransactionState()
 
     def append(self, data: Dict[str, Any]) -> int:
         missing = [field for field in self.REQUIRED_FIELDS if field not in data]
@@ -155,7 +186,7 @@ class PermissionHistoryRepository:
                 _dumps(data),
             ),
         )
-        self.conn.commit()
+        _commit_unless_transaction(self.conn, self._transaction_state)
         return int(cursor.lastrowid)
 
     def list(self, session_id: Optional[str] = None, run_id: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -176,8 +207,13 @@ class PermissionHistoryRepository:
 
 
 class UIPreferenceRepository:
-    def __init__(self, conn: sqlite3.Connection):
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        transaction_state: Optional[_TransactionState] = None,
+    ):
         self.conn = conn
+        self._transaction_state = transaction_state or _TransactionState()
 
     def set(self, key: str, value: Dict[str, Any]) -> None:
         self.conn.execute(
@@ -187,7 +223,7 @@ class UIPreferenceRepository:
             """,
             (key, json.dumps(value, ensure_ascii=False, sort_keys=True), _now()),
         )
-        self.conn.commit()
+        _commit_unless_transaction(self.conn, self._transaction_state)
 
     def get(self, key: str) -> Optional[Dict[str, Any]]:
         row = self.conn.execute(
@@ -204,7 +240,7 @@ class UIPreferenceRepository:
 
     def delete(self, key: str) -> bool:
         cursor = self.conn.execute("DELETE FROM ui_preferences WHERE key = ?", (key,))
-        self.conn.commit()
+        _commit_unless_transaction(self.conn, self._transaction_state)
         return cursor.rowcount > 0
 
 
@@ -213,8 +249,13 @@ class AppSettingsRepository:
     ACTIVE_TOOL_PREFIX = "active_tool_by_device:"
     GLOBAL_FLAG_PREFIX = "global_config:"
 
-    def __init__(self, conn: sqlite3.Connection):
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        transaction_state: Optional[_TransactionState] = None,
+    ):
         self.conn = conn
+        self._transaction_state = transaction_state or _TransactionState()
 
     def set_active_profile_id(self, profile_id: Optional[str]) -> None:
         if profile_id is None:
@@ -280,7 +321,7 @@ class AppSettingsRepository:
 
     def delete(self, key: str) -> bool:
         cursor = self.conn.execute("DELETE FROM app_settings WHERE key = ?", (key,))
-        self.conn.commit()
+        _commit_unless_transaction(self.conn, self._transaction_state)
         return cursor.rowcount > 0
 
     def _set_json(self, key: str, value: Any) -> None:
@@ -291,7 +332,7 @@ class AppSettingsRepository:
             """,
             (key, json.dumps(value, ensure_ascii=False, sort_keys=True), _now()),
         )
-        self.conn.commit()
+        _commit_unless_transaction(self.conn, self._transaction_state)
 
     def _get_json(self, key: str) -> Any:
         row = self.conn.execute(
@@ -306,16 +347,17 @@ class AppSettingsRepository:
 class SQLiteAppStore:
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn
-        self.profiles = ProfileRepository(conn)
-        self.known_devices = JsonEntityRepository(conn, "known_devices")
-        self.agent_instance_presets = JsonEntityRepository(conn, "agent_instance_presets")
-        self.workspace_bindings = JsonEntityRepository(conn, "workspace_bindings")
-        self.sessions = JsonEntityRepository(conn, "sessions")
-        self.runs = JsonEntityRepository(conn, "runs")
-        self.permission_history = PermissionHistoryRepository(conn)
-        self.approval_policies = JsonEntityRepository(conn, "approval_policies")
-        self.ui_preferences = UIPreferenceRepository(conn)
-        self.settings = AppSettingsRepository(conn)
+        self._transaction_state = _TransactionState()
+        self.profiles = ProfileRepository(conn, self._transaction_state)
+        self.known_devices = JsonEntityRepository(conn, "known_devices", self._transaction_state)
+        self.agent_instance_presets = JsonEntityRepository(conn, "agent_instance_presets", self._transaction_state)
+        self.workspace_bindings = JsonEntityRepository(conn, "workspace_bindings", self._transaction_state)
+        self.sessions = JsonEntityRepository(conn, "sessions", self._transaction_state)
+        self.runs = JsonEntityRepository(conn, "runs", self._transaction_state)
+        self.permission_history = PermissionHistoryRepository(conn, self._transaction_state)
+        self.approval_policies = JsonEntityRepository(conn, "approval_policies", self._transaction_state)
+        self.ui_preferences = UIPreferenceRepository(conn, self._transaction_state)
+        self.settings = AppSettingsRepository(conn, self._transaction_state)
 
     @classmethod
     def open(cls, database_path: Path) -> "SQLiteAppStore":
@@ -327,6 +369,24 @@ class SQLiteAppStore:
 
     def close(self) -> None:
         self.conn.close()
+
+    @contextmanager
+    def transaction(self):
+        is_outermost = self._transaction_state.depth == 0
+        if is_outermost:
+            self.conn.execute("BEGIN")
+        self._transaction_state.depth += 1
+        try:
+            yield
+        except Exception:
+            self._transaction_state.depth -= 1
+            if is_outermost:
+                self.conn.rollback()
+            raise
+        else:
+            self._transaction_state.depth -= 1
+            if is_outermost:
+                self.conn.commit()
 
     def export_config_json(
         self,
@@ -352,15 +412,16 @@ class SQLiteAppStore:
 
     def import_config(self, config: AppConfig) -> None:
         parsed = app_config_from_dict(config.to_dict())
-        for profile in parsed.profiles:
-            self.profiles.upsert(profile)
-        for item in parsed.known_devices:
-            self.known_devices.upsert(item)
-        for item in parsed.agent_instance_presets:
-            self.agent_instance_presets.upsert(item)
-        for item in parsed.workspace_bindings:
-            self.workspace_bindings.upsert(item)
-        for item in parsed.approval_policies:
-            self.approval_policies.upsert(item)
-        for key, value in parsed.ui_preferences.items():
-            self.ui_preferences.set(key, value)
+        with self.transaction():
+            for profile in parsed.profiles:
+                self.profiles.upsert(profile)
+            for item in parsed.known_devices:
+                self.known_devices.upsert(item)
+            for item in parsed.agent_instance_presets:
+                self.agent_instance_presets.upsert(item)
+            for item in parsed.workspace_bindings:
+                self.workspace_bindings.upsert(item)
+            for item in parsed.approval_policies:
+                self.approval_policies.upsert(item)
+            for key, value in parsed.ui_preferences.items():
+                self.ui_preferences.set(key, value)
