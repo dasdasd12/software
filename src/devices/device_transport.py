@@ -154,6 +154,8 @@ class SimulatedTransport:
         self._supported_message_types = set(supported_message_types or {
             "HELLO_REQ",
             "HELLO_RESP",
+            "INPUT_EVENT",
+            "ACK_RESP",
             "CAPABILITIES_RESP",
             "SLOT_MAP_BEGIN",
             "SLOT_MAP_ITEM",
