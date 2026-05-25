@@ -180,6 +180,9 @@ SENSITIVE_TOKEN_GROUPS = (
     ("api", "key"),
     ("access", "token"),
     ("refresh", "token"),
+    ("session", "token"),
+    ("id", "token"),
+    ("bearer", "token"),
 )
 
 _CAMEL_CASE_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")

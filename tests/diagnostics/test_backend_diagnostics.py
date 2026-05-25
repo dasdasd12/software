@@ -105,6 +105,9 @@ def test_diagnostic_export_redacts_nested_tokens_and_api_keys():
                 "apiKeyValue": "api-key-suffix-value",
                 "accessTokenValue": "access-token-suffix-value",
                 "refreshTokenValue": "refresh-token-suffix-value",
+                "sessionTokenValue": "session-token-suffix-value",
+                "idTokenValue": "id-token-suffix-value",
+                "bearerTokenValue": "bearer-token-suffix-value",
                 "authorizationHeader": "Bearer header-secret",
                 "safe": "visible",
                 "token_count": 123,
@@ -128,6 +131,9 @@ def test_diagnostic_export_redacts_nested_tokens_and_api_keys():
     assert check["details"]["nested"]["apiKeyValue"] == "<redacted>"
     assert check["details"]["nested"]["accessTokenValue"] == "<redacted>"
     assert check["details"]["nested"]["refreshTokenValue"] == "<redacted>"
+    assert check["details"]["nested"]["sessionTokenValue"] == "<redacted>"
+    assert check["details"]["nested"]["idTokenValue"] == "<redacted>"
+    assert check["details"]["nested"]["bearerTokenValue"] == "<redacted>"
     assert check["details"]["nested"]["authorizationHeader"] == "<redacted>"
     assert check["details"]["nested"]["safe"] == "visible"
     assert check["details"]["nested"]["token_count"] == 123

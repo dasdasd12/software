@@ -35,20 +35,44 @@ def test_devices_and_keyboard_do_not_import_bridge_or_agent_proxy():
 
 def test_project_sources_do_not_contain_machine_specific_absolute_paths():
     violations = []
-    windows_drive = re.compile(r"(?<![A-Za-z0-9_])[A-Za-z]:[\\/](?![\\/])[^\"'`\s]+")
-    posix_home = re.compile(r"/" + "Users" + r"/[^\"'`\s]+")
 
     for path in _guarded_text_files():
         text = path.read_text(encoding="utf-8")
-        for pattern in (windows_drive, posix_home):
-            for match in pattern.finditer(text):
-                violations.append((path.relative_to(REPO_ROOT).as_posix(), match.group(0)))
+        for match in _machine_specific_absolute_path_matches(text):
+            violations.append((path.relative_to(REPO_ROOT).as_posix(), match))
 
     assert violations == []
 
 
+def test_import_boundary_forbids_top_level_agent_proxy_imports():
+    assert _is_forbidden_import("agent_proxy")
+    assert _is_forbidden_import("agent_proxy.client")
+
+
+def test_machine_specific_absolute_path_guard_catches_json_escaped_windows_paths():
+    text = r'{"secret_path": "C:\\Users\\DDDD\\secret.json"}'
+
+    assert _machine_specific_absolute_path_matches(text) == [r"C:\\Users\\DDDD\\secret.json"]
+
+
 def _is_forbidden_import(name):
-    return name == "bridge" or name.startswith("bridge.") or name == "AgentProxy"
+    return (
+        name == "bridge"
+        or name.startswith("bridge.")
+        or name == "agent_proxy"
+        or name.startswith("agent_proxy.")
+        or name == "AgentProxy"
+    )
+
+
+def _machine_specific_absolute_path_matches(text):
+    windows_drive = re.compile(r"(?<![A-Za-z0-9_])[A-Za-z]:[\\/]+[^\"'`\s]+")
+    posix_home = re.compile(r"/" + "Users" + r"/[^\"'`\s]+")
+
+    matches = []
+    for pattern in (windows_drive, posix_home):
+        matches.extend(match.group(0) for match in pattern.finditer(text))
+    return matches
 
 
 def _guarded_text_files():
