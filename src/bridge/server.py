@@ -367,6 +367,7 @@ class LocalCoreServiceMVP:
             return
 
         self._sync_runtime_state()
+        start_seq = self.runtime.event_bus.last_seq
         try:
             event = await self.runtime.command_router.dispatch_async(command)
         except KeyError as exc:
@@ -389,11 +390,11 @@ class LocalCoreServiceMVP:
                 "timestamp": int(time.time()),
             }
             await queue.put(json.dumps(payload, ensure_ascii=False))
-            self._broadcast_core_event(event)
+            self._broadcast_core_events(self._events_to_broadcast(start_seq, event))
             return
 
         self._sync_runtime_state()
-        self._broadcast_core_event(event)
+        self._broadcast_core_events(self._events_to_broadcast(start_seq, event))
 
     async def _cmd_agent_launch(self, msg: Dict[str, Any], queue: asyncio.Queue) -> None:
         if not await self._require_capability(queue, CAP_AGENT_LAUNCH):
@@ -700,6 +701,26 @@ class LocalCoreServiceMVP:
                 queue.put_nowait(payload)
             except Exception:
                 pass
+
+    def _broadcast_core_events(self, events) -> None:
+        for event in events:
+            self._broadcast_core_event(event)
+
+    def _events_to_broadcast(self, start_seq: int, returned_event):
+        published_events = self.runtime.event_bus.events_after(start_seq)
+        if self._event_was_published(returned_event, published_events):
+            return published_events
+        return [*published_events, returned_event]
+
+    @staticmethod
+    def _event_was_published(returned_event, published_events) -> bool:
+        returned_seq = getattr(returned_event, "seq", None)
+        if returned_seq:
+            return any(getattr(event, "seq", None) == returned_seq for event in published_events)
+        returned_id = getattr(returned_event, "event_id", None)
+        if returned_id:
+            return any(getattr(event, "event_id", None) == returned_id for event in published_events)
+        return any(event is returned_event for event in published_events)
 
     def _on_agent_event(self, json_line: str) -> None:
         """Called by AgentProxy whenever a unified event is produced."""

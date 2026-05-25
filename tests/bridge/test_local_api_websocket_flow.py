@@ -316,6 +316,87 @@ def test_structured_interrupt_resolves_focused_run_from_synced_session_state():
     asyncio.run(with_local_api(run_client))
 
 
+def test_structured_interrupt_broadcasts_focused_run_fallback_event():
+    async def run_client(service, uri):
+        session = service.session_mgr.create(AgentType.CODEX)
+        service.session_mgr.update_state(session.session_id, AgentState.SUBMITTED)
+
+        async with websockets.connect(uri) as ws:
+            await ws.send(json.dumps({
+                "type": "command",
+                "command": {
+                    "command_id": "cmd_focus_missing_run",
+                    "type": "agent.focus.set",
+                    "source": {
+                        "kind": "keyboard-device",
+                        "client_id": "kbd_01",
+                        "device_id": "kbd_01",
+                    },
+                    "target": {"device_id": "legacy-local-api"},
+                    "payload": {
+                        "mode": "run",
+                        "instance_id": "codex-default",
+                        "session_id": session.session_id,
+                        "run_id": "run_missing",
+                    },
+                },
+            }))
+            initial_focus_event = await recv_json(ws)
+            assert initial_focus_event["type"] == "event"
+            assert initial_focus_event["event"]["type"] == "agent.focus.changed"
+
+            await ws.send(json.dumps({
+                "type": "command",
+                "command": {
+                    "command_id": "cmd_interrupt_missing_focused_run",
+                    "type": "agent.run.interrupt",
+                    "source": {
+                        "kind": "keyboard-device",
+                        "client_id": "kbd_01",
+                        "device_id": "kbd_01",
+                    },
+                    "target": "focused_run",
+                    "payload": {},
+                },
+            }))
+            received = [await recv_json(ws), await recv_json(ws)]
+            event_types = [payload["event"]["type"] for payload in received]
+
+            assert event_types == ["agent.focus.changed", "agent.run.interrupted"]
+            assert event_types.count("agent.focus.changed") == 1
+            assert event_types.count("agent.run.interrupted") == 1
+            try:
+                extra = await recv_json(ws, timeout=0.1)
+            except asyncio.TimeoutError:
+                extra = None
+            assert extra is None
+
+            focus_event = received[0]["event"]
+            assert focus_event["payload"]["mode"] == "session"
+            assert focus_event["payload"]["target"] == {
+                "instance_id": "codex-default",
+                "session_id": session.session_id,
+                "run_id": None,
+            }
+            assert received[1]["event"]["payload"]["session_id"] == session.session_id
+            assert service.agents[AgentType.CODEX].interrupted == [session.session_id]
+
+            await ws.send(json.dumps({
+                "type": "command",
+                "command": {
+                    "command_id": "cmd_snapshot_after_fallback",
+                    "type": "system.snapshot.request",
+                    "source": {"kind": "test-client", "client_id": "pytest"},
+                    "payload": {},
+                },
+            }))
+            snapshot = await recv_json(ws)
+            assert snapshot["type"] == "snapshot"
+            assert snapshot["snapshot"]["focus"]["legacy-local-api"] == focus_event["payload"]
+
+    asyncio.run(with_local_api(run_client))
+
+
 def test_structured_launch_resolves_active_agent_to_synced_default_instance():
     async def run_client(service, uri):
         async with websockets.connect(uri) as ws:
