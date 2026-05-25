@@ -28,6 +28,7 @@ DEFAULT_CODEX_APPROVAL_CONTEXT = (
     "Run this exact harmless command and report its output: "
     "python -c \"print('codex approval smoke')\""
 )
+VIRTUAL_DEVICE_ID = "kbd_virtual_smoke"
 
 
 def now_ts() -> int:
@@ -210,11 +211,162 @@ class LocalApiSmokeClient:
                 if payload_type in {"task_failed", "error"}:
                     raise RuntimeError(f"Approval scenario ended with failure: {payload}")
 
+    async def run_virtual_input(self, agent: str, context: str) -> None:
+        async with websockets.connect(self.url) as ws:
+            await self.hello(ws)
+            await self.send(ws, {
+                "type": "virtual_device_configure",
+                "device_id": VIRTUAL_DEVICE_ID,
+                "profile": self._virtual_input_profile(agent, context),
+                "timestamp": now_ts(),
+            })
+            configured = await self.wait_for_type(ws, "virtual_device_configured")
+            if configured.get("active_profile_id") != "profile_virtual_smoke":
+                raise RuntimeError(f"Virtual device did not activate profile: {configured}")
+
+            await self.send(ws, self._focus_command("cmd_virtual_focus_agent", {
+                "instance_id": f"{agent}-default",
+            }))
+            await self.wait_for_type(ws, "event")
+
+            launch_ack = await self._send_virtual_key(ws, "K_LAUNCH")
+            session_id = self._single_event_payload(launch_ack, "agent.session.created").get("session_id")
+            if not isinstance(session_id, str) or not session_id:
+                raise RuntimeError(f"Virtual launch did not create a session: {launch_ack}")
+
+            await self.send(ws, self._focus_command("cmd_virtual_focus_session", {
+                "session_id": session_id,
+            }))
+            await self.wait_for_type(ws, "event")
+
+            tool_ack = await self._send_virtual_key(ws, "K_TOOL_1")
+            self._single_event_payload(tool_ack, "keyboard.tool.changed")
+
+            interrupt_ack = await self._send_virtual_key(ws, "K_ESC")
+            self._single_event_payload(interrupt_ack, "agent.run.interrupted")
+
+            close_ack = await self._send_virtual_key(ws, "K_DELETE")
+            self._single_event_payload(close_ack, "agent.session.closed")
+
+            await self.send(ws, {
+                "type": "command",
+                "command": {
+                    "command_id": "cmd_virtual_snapshot",
+                    "type": "system.snapshot.request",
+                    "source": {"kind": self.client_kind, "client_id": self.client_id},
+                    "payload": {},
+                },
+                "timestamp": now_ts(),
+            })
+            snapshot_payload = await self.wait_for_type(ws, "snapshot")
+            snapshot = snapshot_payload.get("snapshot") or {}
+            self._assert_virtual_snapshot(snapshot, session_id)
+
+    async def _send_virtual_key(self, ws, key_id: str, **extra: Any) -> Dict[str, Any]:
+        payload = {
+            "type": "virtual_input",
+            "device_id": VIRTUAL_DEVICE_ID,
+            "key_id": key_id,
+            "event_type": "press",
+            "timestamp": now_ts(),
+        }
+        payload.update(extra)
+        await self.send(ws, payload)
+        return await self.wait_for_type(ws, "virtual_input_ack")
+
+    def _focus_command(self, command_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "type": "command",
+            "command": {
+                "command_id": command_id,
+                "type": "agent.focus.set",
+                "source": {"kind": self.client_kind, "client_id": self.client_id},
+                "target": {"device_id": VIRTUAL_DEVICE_ID},
+                "payload": payload,
+            },
+            "timestamp": now_ts(),
+        }
+
+    @staticmethod
+    def _single_event_payload(payload: Dict[str, Any], expected_type: str) -> Dict[str, Any]:
+        events = payload.get("events") or []
+        if len(events) != 1 or events[0].get("type") != expected_type:
+            raise RuntimeError(f"Expected {expected_type} from virtual input, got: {payload}")
+        return events[0].get("payload") or {}
+
+    @staticmethod
+    def _virtual_input_profile(agent: str, context: str) -> Dict[str, Any]:
+        return {
+            "schema_version": "1.0",
+            "id": "profile_virtual_smoke",
+            "name": "Virtual Smoke",
+            "target_device_family": "simulated",
+            "layers": [
+                {
+                    "id": "layer_fn",
+                    "priority": 10,
+                    "activation": {"type": "hold_key", "key": "K_FN"},
+                    "keymap": {
+                        "K_ENTER": {
+                            "type": "agent.permission.respond",
+                            "target": "focused_permission",
+                            "approved": True,
+                        }
+                    },
+                }
+            ],
+            "keymap": {
+                "bindings": {
+                    "K_LAUNCH": {
+                        "type": "agent.session.launch_or_resume",
+                        "target": "focused_agent",
+                        "agent": agent,
+                        "context": context,
+                    },
+                    "K_ESC": {
+                        "type": "agent.run.interrupt",
+                        "target": "focused_run",
+                    },
+                    "K_DELETE": {
+                        "type": "agent.session.close",
+                        "target": "focused_session",
+                    },
+                    "K_TOOL_1": {
+                        "type": "keyboard.tool.switch",
+                        "target": {"tool_id": "permissions"},
+                    },
+                }
+            },
+        }
+
+    @staticmethod
+    def _assert_virtual_snapshot(snapshot: Dict[str, Any], session_id: str) -> None:
+        profiles = snapshot.get("profiles") or {}
+        focus = snapshot.get("focus") or {}
+        active_tools = snapshot.get("active_tools") or {}
+        sessions = snapshot.get("sessions") or {}
+        devices = snapshot.get("devices") or {}
+        device = devices.get(VIRTUAL_DEVICE_ID) or {}
+        if profiles.get("active_profile_id") != "profile_virtual_smoke":
+            raise RuntimeError(f"Snapshot missing active virtual profile: {snapshot}")
+        if focus.get(VIRTUAL_DEVICE_ID, {}).get("target", {}).get("session_id") != session_id:
+            raise RuntimeError(f"Snapshot missing virtual focus: {snapshot}")
+        if active_tools.get(VIRTUAL_DEVICE_ID) != "permissions":
+            raise RuntimeError(f"Snapshot missing virtual active tool: {snapshot}")
+        if session_id not in sessions:
+            raise RuntimeError(f"Snapshot missing launched session: {snapshot}")
+        if not device.get("supports_agent_slots") or not device.get("supports_config_sync"):
+            raise RuntimeError(f"Snapshot missing virtual device state: {snapshot}")
+
 
 async def amain() -> None:
     parser = argparse.ArgumentParser(description="Smoke-test the Local Core Service MVP WebSocket API")
     parser.add_argument("--url", default="ws://127.0.0.1:8765", help="Local Core Service WebSocket URL")
-    parser.add_argument("--scenario", choices=("basic", "permission", "real-agent", "approval-real"), default="basic")
+    parser.add_argument(
+        "--scenario",
+        choices=("basic", "permission", "real-agent", "approval-real", "virtual-input"),
+        default="basic",
+    )
     parser.add_argument("--agent", choices=("codex", "claude"), default="codex")
     parser.add_argument("--context", default=DEFAULT_CONTEXT, help="Prompt used by the real-agent smoke scenario")
     parser.add_argument("--timeout", type=float, default=10.0, help="Receive timeout in seconds")
@@ -270,6 +422,8 @@ async def amain() -> None:
             approved,
             args.require_forwarded,
         )
+    elif args.scenario == "virtual-input":
+        await client.run_virtual_input(args.agent, context)
     else:
         await client.run_real_agent(args.agent, context)
 

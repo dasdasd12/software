@@ -1,7 +1,7 @@
 """Adapt virtual device input frames to keyboard commands."""
 
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional
+from typing import Awaitable, Callable, List, Optional
 
 from core import CommandEnvelope, CommandRouter, EventEnvelope
 from keyboard import BindingResolver, KeyboardInputEvent, Profile, command_from_resolved_action
@@ -16,6 +16,7 @@ from .virtual_input import (
 )
 
 ActiveProfileProvider = Callable[[str], Optional[Profile]]
+CommandDispatcher = Callable[[CommandEnvelope], Awaitable[EventEnvelope]]
 
 
 @dataclass(frozen=True)
@@ -40,11 +41,13 @@ class VirtualDeviceCommandAdapter:
         router: CommandRouter,
         codec: Optional[DeviceProtocolCodec] = None,
         slot_mapper: Optional[DeviceSlotMapper] = None,
+        command_dispatcher: Optional[CommandDispatcher] = None,
     ) -> None:
         self._active_profile_provider = active_profile_provider
         self._router = router
         self._codec = codec or DeviceProtocolCodec()
         self._slot_mapper = slot_mapper
+        self._command_dispatcher = command_dispatcher
 
     def set_slot_mapper(self, slot_mapper: DeviceSlotMapper) -> None:
         self._slot_mapper = slot_mapper
@@ -82,7 +85,10 @@ class VirtualDeviceCommandAdapter:
         ]
         events = []
         for command in commands:
-            events.append(await self._router.dispatch_async(command))
+            if self._command_dispatcher is not None:
+                events.append(await self._command_dispatcher(command))
+            else:
+                events.append(await self._router.dispatch_async(command))
 
         return VirtualDeviceCommandResult(
             input_event=event,

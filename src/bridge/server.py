@@ -33,6 +33,15 @@ from agents.commands import AgentCommandService
 from agents.runtime import AgentLifecycleError, AgentRuntime
 from app import build_runtime
 from core import CommandEnvelope, CommandSource
+from devices import (
+    DeviceProtocolCodec,
+    DeviceProjectionRuntime,
+    DeviceSlotMapper,
+    SimulatedTransport,
+    VirtualDeviceCommandAdapter,
+    VirtualDeviceSession,
+)
+from keyboard import Profile, ProfileValidationError, profile_from_dict, validate_profile
 from persistence import SQLiteAppStore
 from protocol_unifier import ProtocolUnifier
 from session_manager import AgentType, AgentState, Session, SessionManager
@@ -134,6 +143,9 @@ class LocalCoreServiceMVP:
         )
         self.approval_policy_engine = ApprovalPolicyEngine()
         self.pending_permissions: Dict[str, PendingPermission] = {}
+        self._virtual_profiles: Dict[str, Profile] = {}
+        self._virtual_sessions: Dict[str, VirtualDeviceSession] = {}
+        self._virtual_transports: Dict[str, SimulatedTransport] = {}
         self._server = None
         self._shutdown_event: Optional[asyncio.Event] = None
 
@@ -275,6 +287,10 @@ class LocalCoreServiceMVP:
             await self._cmd_agent_launch(msg, client_queue)
         elif msg_type == "command":
             await self._cmd_structured_command(msg, client_queue)
+        elif msg_type == "virtual_device_configure":
+            await self._cmd_virtual_device_configure(msg, client_queue)
+        elif msg_type == "virtual_input":
+            await self._cmd_virtual_input(msg, client_queue)
         elif msg_type == "permission_response":
             await self._cmd_permission_response(msg, client_queue)
         elif msg_type == "interrupt":
@@ -401,6 +417,142 @@ class LocalCoreServiceMVP:
 
         self._sync_runtime_state()
         self._broadcast_core_events(self._events_to_broadcast(start_seq, event))
+
+    async def _cmd_virtual_device_configure(self, msg: Dict[str, Any], queue: asyncio.Queue) -> None:
+        device_id = msg.get("device_id")
+        if not isinstance(device_id, str) or not device_id:
+            await self._send_error(queue, "INVALID_VIRTUAL_DEVICE", "device_id is required")
+            return
+        profile_data = msg.get("profile")
+        if not isinstance(profile_data, dict):
+            await self._send_error(queue, "INVALID_PROFILE", "profile must be an object")
+            return
+
+        try:
+            profile = profile_from_dict(profile_data)
+        except (ProfileValidationError, ValueError) as exc:
+            await self._send_error(queue, "INVALID_PROFILE", str(exc))
+            return
+
+        try:
+            session = self._build_virtual_device_session(device_id, profile=profile, queue=queue)
+            validate_profile(profile, device_capabilities=session.transport.get_capabilities())
+        except (ProfileValidationError, ValueError) as exc:
+            await self._send_error(queue, "INVALID_PROFILE", str(exc))
+            return
+
+        self._virtual_profiles[device_id] = profile
+        if self.app_store is not None:
+            try:
+                self.app_store.profiles.upsert(profile)
+                self.app_store.settings.set_active_profile_id(profile.id)
+            except Exception as exc:
+                await self._send_error(queue, "PROFILE_PERSIST_FAILED", str(exc))
+                return
+
+        self._sync_runtime_state()
+        frames = await session.connect(snapshot=self.runtime.snapshot())
+        self._sync_runtime_state()
+        await queue.put(json.dumps({
+            "type": "virtual_device_configured",
+            "device_id": device_id,
+            "active_profile_id": profile.id,
+            "profile": self._profile_summary(profile),
+            "response_frames": [self._device_frame_summary(frame) for frame in frames],
+            "timestamp": int(time.time()),
+        }, ensure_ascii=False))
+
+    async def _cmd_virtual_input(self, msg: Dict[str, Any], queue: asyncio.Queue) -> None:
+        client = self._client_for_queue(queue)
+        if (
+            client.kind != ClientKind.DEVICE_TRANSPORT
+            and not client.has_capability(CAP_AGENT_LAUNCH)
+            and not client.has_capability(CAP_PERMISSION_RESPOND)
+            and not client.has_capability(CAP_SESSION_LIST)
+        ):
+            await self._send_error(
+                queue,
+                "CAPABILITY_DENIED",
+                "virtual input requires a device-transport client identity or command capabilities",
+            )
+            return
+
+        device_id = msg.get("device_id")
+        key_id = msg.get("key_id")
+        event_type = msg.get("event_type", "press")
+        if not isinstance(device_id, str) or not device_id:
+            await self._send_error(queue, "INVALID_VIRTUAL_INPUT", "device_id is required")
+            return
+        if not isinstance(key_id, str) or not key_id:
+            await self._send_error(queue, "INVALID_VIRTUAL_INPUT", "key_id is required")
+            return
+        if not isinstance(event_type, str) or not event_type:
+            await self._send_error(queue, "INVALID_VIRTUAL_INPUT", "event_type is required")
+            return
+
+        try:
+            session = self._ensure_virtual_device_session(device_id, queue)
+        except ValueError as exc:
+            await self._send_error(queue, "VIRTUAL_DEVICE_NOT_CONFIGURED", str(exc))
+            return
+
+        try:
+            payload = {
+                "key_id": key_id,
+                "event_type": event_type,
+                "active_layers": self._string_list(msg.get("active_layers", [])),
+                "modifiers": self._string_list(msg.get("modifiers", [])),
+            }
+        except ValueError as exc:
+            await self._send_error(queue, "INVALID_VIRTUAL_INPUT", str(exc))
+            return
+        for optional_int in ("timestamp", "sequence"):
+            if optional_int in msg:
+                payload[optional_int] = msg[optional_int]
+        generation = int(msg.get("generation", session.slot_mapper.generation))
+        frame = session.codec.encode_message(
+            frame_type="INPUT_EVENT",
+            payload=payload,
+            device_id=device_id,
+            generation=generation,
+        )
+
+        start_seq = self.runtime.event_bus.last_seq
+        try:
+            result = await session.handle_frame(frame)
+        except AgentLifecycleError as exc:
+            await self._send_error(queue, exc.code, exc.message)
+            self._broadcast_incremental_events(start_seq)
+            return
+        except ValueError as exc:
+            await self._send_error(queue, "INVALID_VIRTUAL_INPUT", str(exc))
+            self._broadcast_incremental_events(start_seq)
+            return
+
+        self._sync_runtime_state()
+        command_result = result.command_result
+        await queue.put(json.dumps({
+            "type": "virtual_input_ack",
+            "device_id": device_id,
+            "key_id": key_id,
+            "event_type": event_type,
+            "input_event": (
+                self._input_event_summary(command_result.input_event)
+                if command_result and command_result.input_event
+                else None
+            ),
+            "commands": [
+                command.to_dict()
+                for command in (command_result.commands if command_result else [])
+            ],
+            "events": [
+                event.to_dict()
+                for event in (command_result.events if command_result else [])
+            ],
+            "response_frames": [self._device_frame_summary(frame) for frame in result.response_frames],
+            "timestamp": int(time.time()),
+        }, ensure_ascii=False))
+        self._broadcast_incremental_events(start_seq)
 
     async def _cmd_agent_launch(self, msg: Dict[str, Any], queue: asyncio.Queue) -> None:
         if not await self._require_capability(queue, CAP_AGENT_LAUNCH):
@@ -600,6 +752,176 @@ class LocalCoreServiceMVP:
         # Optional: track device liveness, respond with server heartbeat
         pass
 
+    def _build_virtual_device_session(
+        self,
+        device_id: str,
+        *,
+        profile: Optional[Profile] = None,
+        queue: asyncio.Queue,
+    ) -> VirtualDeviceSession:
+        active_profile = profile or self._active_virtual_profile(device_id)
+        device_family = active_profile.target_device_family if active_profile else "simulated"
+        codec = DeviceProtocolCodec()
+        mapper = DeviceSlotMapper(device_id=device_id)
+        transport = SimulatedTransport(
+            device_id=device_id,
+            device_family=device_family,
+            supported_profile_features={"agent_bindings", "layers", "screen", "device"},
+            supported_screen_widgets={"permission_list", "session_list", "tool_status"},
+            supports_agent_slots=True,
+            supports_config_sync=True,
+        )
+        adapter = VirtualDeviceCommandAdapter(
+            active_profile_provider=self._active_virtual_profile,
+            router=self.runtime.command_router,
+            codec=codec,
+            slot_mapper=mapper,
+            command_dispatcher=lambda command: self._dispatch_virtual_device_command(command, queue),
+        )
+        projection_runtime = DeviceProjectionRuntime(
+            device_id=device_id,
+            codec=codec,
+            slot_mapper=mapper,
+            active_profile_provider=lambda current_device_id: self._profile_summary(
+                self._active_virtual_profile(current_device_id)
+            ),
+        )
+        session = VirtualDeviceSession(
+            device_id=device_id,
+            transport=transport,
+            codec=codec,
+            slot_mapper=mapper,
+            command_adapter=adapter,
+            projection_runtime=projection_runtime,
+            device_manager=self.runtime.device_manager,
+        )
+        self._virtual_sessions[device_id] = session
+        self._virtual_transports[device_id] = transport
+        return session
+
+    def _ensure_virtual_device_session(
+        self,
+        device_id: str,
+        queue: asyncio.Queue,
+    ) -> VirtualDeviceSession:
+        session = self._virtual_sessions.get(device_id)
+        if session is not None:
+            return session
+        if self._active_virtual_profile(device_id) is None:
+            raise ValueError(f"virtual device is not configured: {device_id}")
+        return self._build_virtual_device_session(device_id, queue=queue)
+
+    async def _dispatch_virtual_device_command(
+        self,
+        command: CommandEnvelope,
+        queue: asyncio.Queue,
+    ):
+        client = self._client_for_queue(queue)
+        if client.kind != ClientKind.DEVICE_TRANSPORT:
+            required_capability = self._capability_for_command(command.type)
+            if required_capability and not client.has_capability(required_capability):
+                raise AgentLifecycleError(
+                    "CAPABILITY_DENIED",
+                    f"client lacks capability: {required_capability}",
+                )
+
+        self._sync_runtime_state()
+        context_token = None
+        if command.type == "agent.permission.respond":
+            context_token = _permission_client_context.set(client)
+        try:
+            return await self.runtime.command_router.dispatch_async(command)
+        finally:
+            if context_token is not None:
+                _permission_client_context.reset(context_token)
+
+    def _active_virtual_profile(self, device_id: str) -> Optional[Profile]:
+        profile = self._virtual_profiles.get(device_id)
+        if profile is not None:
+            return profile
+        if self.app_store is None:
+            return None
+        active_profile_id = self.app_store.settings.get_active_profile_id()
+        if not active_profile_id:
+            return None
+        return self.app_store.profiles.get(active_profile_id)
+
+    def _profiles_snapshot(self) -> Dict[str, Any]:
+        active_by_device = {
+            device_id: profile.id
+            for device_id, profile in self._virtual_profiles.items()
+        }
+        active_profile = None
+        if self.app_store is not None:
+            active_profile_id = self.app_store.settings.get_active_profile_id()
+            if active_profile_id:
+                active_profile = self.app_store.profiles.get(active_profile_id)
+        if active_profile is None and self._virtual_profiles:
+            active_profile = next(iter(self._virtual_profiles.values()))
+        active_profile_id = active_profile.id if active_profile else None
+        profiles = {
+            profile.id: self._profile_summary(profile)
+            for profile in self._virtual_profiles.values()
+        }
+        if self.app_store is not None:
+            for profile in self.app_store.profiles.list():
+                profiles[profile.id] = self._profile_summary(profile)
+        return {
+            "active_profile_id": active_profile_id,
+            "active_profile": self._profile_summary(active_profile),
+            "active_profile_by_device": active_by_device,
+            "profiles": profiles,
+        }
+
+    @staticmethod
+    def _profile_summary(profile: Optional[Profile]) -> Optional[Dict[str, Any]]:
+        if profile is None:
+            return None
+        return {
+            "id": profile.id,
+            "name": profile.name,
+            "version": profile.version,
+            "target_device_family": profile.target_device_family,
+        }
+
+    def _device_frame_summary(self, frame) -> Dict[str, Any]:
+        payload = {}
+        try:
+            payload = DeviceProtocolCodec().decode_message(frame)
+        except Exception:
+            payload = {"payload_size": len(frame.payload)}
+        return {
+            "frame_type": frame.frame_type,
+            "device_id": frame.device_id,
+            "generation": frame.generation,
+            "payload": payload,
+        }
+
+    @staticmethod
+    def _input_event_summary(event) -> Dict[str, Any]:
+        return {
+            "device_id": event.device_id,
+            "key_id": event.key_id,
+            "event_type": event.event_type,
+            "active_layers": list(event.active_layers),
+            "modifiers": list(event.modifiers),
+            "timestamp": event.timestamp,
+            "sequence": event.sequence,
+        }
+
+    @staticmethod
+    def _string_list(value: Any) -> List[str]:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise ValueError("active_layers and modifiers must be arrays")
+        result = []
+        for item in value:
+            if not isinstance(item, str) or not item:
+                raise ValueError("active_layers and modifiers must contain only strings")
+            result.append(item)
+        return result
+
     # ------------------------------------------------------------------ #
     #  Agent event forwarder
     # ------------------------------------------------------------------ #
@@ -654,10 +976,21 @@ class LocalCoreServiceMVP:
         store.sessions = sessions
         store.runs = runs
         store.permissions = permissions
-        store.devices = {
-            device_id: record.to_dict()
-            for device_id, record in self.runtime.device_manager.list_records().items()
+        devices = {
+            device_id: dict(record)
+            for device_id, record in store.devices.items()
         }
+        for device_id in list(self.runtime.device_manager.list_records()):
+            self.runtime.device_manager.refresh_status(device_id)
+        for device_id, record in self.runtime.device_manager.list_records().items():
+            current = dict(devices.get(device_id, {}))
+            current.update(record.to_dict())
+            active_tool_id = store.active_tools.get(device_id)
+            if active_tool_id:
+                current["active_tool_id"] = active_tool_id
+            devices[device_id] = current
+        store.devices = devices
+        store.profiles = self._profiles_snapshot()
 
     def _pending_permission_record(
         self,
