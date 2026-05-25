@@ -183,6 +183,9 @@ class SimulatedTransport:
         self._supports_firmware_update = supports_firmware_update
         self._queue: Optional[asyncio.Queue[DeviceFrame]] = None
         self._is_open = False
+        self.active_synced_profile_id: Optional[str] = None
+        self.active_synced_profile_version: Optional[int] = None
+        self.active_synced_profile_checksum: Optional[str] = None
 
     async def open(self) -> None:
         if self._queue is None:
@@ -237,6 +240,11 @@ class SimulatedTransport:
             is_open=self._is_open,
             queued_frames=self._queue.qsize() if self._queue is not None else 0,
         )
+
+    def mark_profile_synced(self, profile_id: str, version: int, checksum: str) -> None:
+        self.active_synced_profile_id = profile_id
+        self.active_synced_profile_version = version
+        self.active_synced_profile_checksum = checksum
 
     def _ensure_open(self, frame_type: Optional[str] = None) -> None:
         if self._is_open:
