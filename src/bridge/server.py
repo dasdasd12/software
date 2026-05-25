@@ -1135,22 +1135,12 @@ class LocalCoreServiceMVP:
         instance_id: Optional[str] = None,
         run_id: Optional[str] = None,
     ) -> str:
-        existing = self.pending_permissions.get(request_id)
-        if (
-            existing is None
-            or (
-                existing.session_id == session_id
-                and existing.instance_id == instance_id
-                and existing.run_id == run_id
-            )
-        ):
-            return request_id
         if run_id:
-            return f"{run_id}:{request_id}"
+            return f"run:{run_id}:{request_id}"
         if session_id:
-            return f"{session_id}:{request_id}"
+            return f"session:{session_id}:{request_id}"
         if instance_id:
-            return f"{instance_id}:{request_id}"
+            return f"instance:{instance_id}:{request_id}"
         return f"global:{request_id}"
 
     def _find_pending_permission(

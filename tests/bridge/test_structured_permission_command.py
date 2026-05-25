@@ -118,6 +118,11 @@ def track_permission(server, session, request_id, *, risk_level="medium", native
     server._on_agent_event(server.unifier.encode_device_message(payload))
 
 
+def pending_for(server, request_id, *, session_id=None, instance_id=None, run_id=None):
+    _key, pending = server._find_pending_permission(request_id, session_id, instance_id, run_id)
+    return pending
+
+
 def structured_permission_message(permission_id, approved, *, session_id=None, command_id="cmd_permission"):
     target = {"permission_id": permission_id}
     if session_id is not None:
@@ -193,8 +198,8 @@ def test_structured_permission_respond_uses_target_permission_id_and_optional_se
     ack = read_payload(queue)
     assert_permission_ack_shape(ack, "req_shared", second.session_id, True)
     assert proxy.responses == [(second.session_id, "req_shared", True)]
-    assert "req_shared" in server.pending_permissions
-    assert f"{second.session_id}:req_shared" not in server.pending_permissions
+    assert pending_for(server, "req_shared", session_id=first.session_id) is not None
+    assert pending_for(server, "req_shared", session_id=second.session_id) is None
 
 
 def test_focused_permission_uses_request_id_when_duplicate_session_scoped_ids_are_projected():
@@ -219,7 +224,7 @@ def test_focused_permission_uses_request_id_when_duplicate_session_scoped_ids_ar
     ))
 
     server._sync_runtime_state()
-    second_key = f"{second.session_id}:req_shared"
+    second_key = f"session:{second.session_id}:req_shared"
     assert second_key in server.runtime.state_store.permissions
     assert server.runtime.state_store.permissions[second_key]["permission_id"] == "req_shared"
     snapshot = server.runtime.snapshot().to_dict()
@@ -239,8 +244,8 @@ def test_focused_permission_uses_request_id_when_duplicate_session_scoped_ids_ar
     ack = read_payload(queue)
     assert_permission_ack_shape(ack, "req_shared", second.session_id, True)
     assert proxy.responses == [(second.session_id, "req_shared", True)]
-    assert "req_shared" in server.pending_permissions
-    assert second_key not in server.pending_permissions
+    assert pending_for(server, "req_shared", session_id=first.session_id) is not None
+    assert pending_for(server, "req_shared", session_id=second.session_id) is None
 
 
 def test_desktop_structured_permission_approval_returns_legacy_permission_ack_shape():
@@ -264,7 +269,7 @@ def test_desktop_structured_permission_approval_returns_legacy_permission_ack_sh
         "request_id": "req_desktop",
         "approved": True,
     }
-    assert "req_desktop" not in server.pending_permissions
+    assert pending_for(server, "req_desktop", session_id=session.session_id) is None
     assert proxy.responses == [(session.session_id, "req_desktop", True)]
     assert server.session_mgr.get(session.session_id).state == AgentState.WORKING
     assert server.runtime.event_bus.events_after(0)[-1].type == "agent.permission.resolved"
@@ -291,7 +296,7 @@ def test_device_structured_permission_can_approve_low_risk_with_low_risk_capabil
 
     ack = read_payload(queue)
     assert_permission_ack_shape(ack, "req_low", session.session_id, True)
-    assert "req_low" not in server.pending_permissions
+    assert pending_for(server, "req_low", session_id=session.session_id) is None
     assert proxy.responses == [(session.session_id, "req_low", True)]
 
 
@@ -328,7 +333,7 @@ def test_same_client_id_unprivileged_queue_cannot_borrow_permission_capability()
     error = read_payload(unprivileged_queue)
     assert error["type"] == "error"
     assert error["code"] == "CAPABILITY_DENIED"
-    assert "req_same_client" in server.pending_permissions
+    assert pending_for(server, "req_same_client", session_id=session.session_id) is not None
     assert proxy.responses == []
 
 
@@ -353,7 +358,7 @@ def test_direct_structured_permission_dispatch_with_unregistered_source_fails_cl
         asyncio.run(server.runtime.command_router.dispatch_async(command))
 
     assert exc_info.value.code in {"AUTH_REQUIRED", "CAPABILITY_DENIED"}
-    assert "req_direct" in server.pending_permissions
+    assert pending_for(server, "req_direct", session_id=session.session_id) is not None
     assert proxy.responses == []
 
 
@@ -382,7 +387,7 @@ def test_handler_path_uses_current_queue_identity_for_structured_permission_appr
 
     ack = read_payload(queue)
     assert_permission_ack_shape(ack, "req_current_queue", session.session_id, True)
-    assert "req_current_queue" not in server.pending_permissions
+    assert pending_for(server, "req_current_queue", session_id=session.session_id) is None
     assert proxy.responses == [(session.session_id, "req_current_queue", True)]
 
 
@@ -415,7 +420,7 @@ def test_focused_permission_structured_command_sees_pending_permission_on_first_
 
     ack = read_payload(queue)
     assert_permission_ack_shape(ack, "req_focused_first", session.session_id, True)
-    assert "req_focused_first" not in server.pending_permissions
+    assert pending_for(server, "req_focused_first", session_id=session.session_id) is None
     assert proxy.responses == [(session.session_id, "req_focused_first", True)]
 
 
@@ -471,7 +476,7 @@ def test_device_structured_permission_cannot_approve_high_risk_permission():
     error = read_payload(queue)
     assert error["type"] == "error"
     assert error["code"] == "REQUIRE_DESKTOP_CONFIRM"
-    assert "req_high" in server.pending_permissions
+    assert pending_for(server, "req_high", session_id=session.session_id) is not None
     assert proxy.responses == []
 
 
@@ -496,7 +501,7 @@ def test_structured_permission_forward_failure_keeps_request_pending():
     error = read_payload(queue)
     assert error["type"] == "error"
     assert error["code"] == "PERMISSION_FORWARD_FAILED"
-    assert "req_forward_fail" in server.pending_permissions
+    assert pending_for(server, "req_forward_fail", session_id=session.session_id) is not None
     assert proxy.responses == [(session.session_id, "req_forward_fail", True)]
 
 

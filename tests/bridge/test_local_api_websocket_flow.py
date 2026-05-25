@@ -109,6 +109,11 @@ async def wait_until(predicate, timeout=1.0):
     raise AssertionError("Timed out waiting for condition")
 
 
+def pending_for(service, request_id, *, session_id=None, instance_id=None, run_id=None):
+    _key, pending = service._find_pending_permission(request_id, session_id, instance_id, run_id)
+    return pending
+
+
 def test_invalid_json_returns_error():
     async def run_client(service, uri):
         async with websockets.connect(uri) as ws:
@@ -338,7 +343,7 @@ def test_global_permission_snapshot_and_focused_permission_scope_boundaries():
                 error = await recv_json(ws)
                 assert error["type"] == "error"
                 assert error["code"] == "UNRESOLVED_TARGET"
-                assert "req_global_snapshot" in service.pending_permissions
+                assert pending_for(service, "req_global_snapshot") is not None
 
             await ws.send(json.dumps({
                 "type": "command",
@@ -380,7 +385,7 @@ def test_global_permission_snapshot_and_focused_permission_scope_boundaries():
             assert ack["session_id"] is None
             assert resolved["type"] == "event"
             assert resolved["event"]["type"] == "agent.permission.resolved"
-            assert "req_global_snapshot" not in service.pending_permissions
+            assert pending_for(service, "req_global_snapshot") is None
             assert service.agents[AgentType.CODEX].permission_responses == [
                 (None, "req_global_snapshot", True)
             ]
@@ -476,8 +481,8 @@ def test_focused_permission_priority_selects_highest_global_request():
             assert ack["request_id"] == "req_global_high_priority"
             assert resolved["type"] == "event"
             assert resolved["event"]["type"] == "agent.permission.resolved"
-            assert "req_global_high_priority" not in service.pending_permissions
-            assert "req_global_low_priority" in service.pending_permissions
+            assert pending_for(service, "req_global_high_priority") is None
+            assert pending_for(service, "req_global_low_priority") is not None
             assert service.agents[AgentType.CODEX].permission_responses == [
                 (None, "req_global_high_priority", True)
             ]
@@ -567,7 +572,7 @@ def test_run_only_permission_snapshot_and_run_focus_approval():
             assert ack["session_id"] is None
             assert resolved["type"] == "event"
             assert resolved["event"]["type"] == "agent.permission.resolved"
-            assert "req_run_only_snapshot" not in service.pending_permissions
+            assert pending_for(service, "req_run_only_snapshot", run_id="run_detached") is None
             assert service.agents[AgentType.CODEX].permission_responses == [
                 (None, "req_run_only_snapshot", True)
             ]
@@ -663,7 +668,12 @@ def test_existing_run_ancestry_conflict_keeps_permission_unresolved():
 
             assert error["type"] == "error"
             assert error["code"] == "UNRESOLVED_TARGET"
-            assert "req_conflicting_parent" in service.pending_permissions
+            assert pending_for(
+                service,
+                "req_conflicting_parent",
+                session_id="wrong_session",
+                run_id="run_conflict",
+            ) is not None
             assert service.agents[AgentType.CODEX].permission_responses == []
 
     asyncio.run(with_local_api(run_client))
@@ -1080,7 +1090,7 @@ def test_permission_response_round_trip_over_local_api():
             assert ack["session_id"] == session.session_id
             assert ack["approved"] is True
             assert ack["evidence"]["adapter"] == "fake"
-            assert "req_ws" not in service.pending_permissions
+            assert pending_for(service, "req_ws", session_id=session.session_id) is None
             assert service.agents[AgentType.CODEX].permission_responses == [
                 (session.session_id, "req_ws", True)
             ]
@@ -1215,7 +1225,11 @@ def test_focused_permission_response_resolves_instance_scoped_permission_from_in
             assert resolved["type"] == "event"
             assert resolved["event"]["type"] == "agent.permission.resolved"
             assert resolved["event"]["payload"]["request_id"] == "req_focused_instance_scope"
-            assert "req_focused_instance_scope" not in service.pending_permissions
+            assert pending_for(
+                service,
+                "req_focused_instance_scope",
+                instance_id="codex-default",
+            ) is None
             assert service.agents[AgentType.CODEX].permission_responses == [
                 (None, "req_focused_instance_scope", True)
             ]
@@ -1432,7 +1446,11 @@ def test_focused_permission_response_error_broadcasts_focus_fallback_event():
             assert events[0]["type"] == "agent.focus.changed"
             assert events[0]["payload"]["mode"] == "session"
             assert all(event["type"] != "command.target.unresolved" for event in events)
-            assert "req_focused_fallback_error" in service.pending_permissions
+            assert pending_for(
+                service,
+                "req_focused_fallback_error",
+                session_id=session.session_id,
+            ) is not None
             try:
                 extra = await recv_json(ws, timeout=0.1)
             except asyncio.TimeoutError:

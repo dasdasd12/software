@@ -128,6 +128,24 @@ def make_server_with_persistence(db_path):
     return BridgeServer(config)
 
 
+def pending_for(server, request_id, *, session_id=None, instance_id=None, run_id=None):
+    _key, pending = server._find_pending_permission(request_id, session_id, instance_id, run_id)
+    return pending
+
+
+def pending_count(server, request_id, *, session_id=None, instance_id=None, run_id=None):
+    return sum(
+        1
+        for pending in server.pending_permissions.values()
+        if (
+            pending.request_id == request_id
+            and (session_id is None or pending.session_id == session_id)
+            and (instance_id is None or pending.instance_id == instance_id)
+            and (run_id is None or pending.run_id == run_id)
+        )
+    )
+
+
 def test_permission_request_event_registers_pending_request():
     server = make_server()
     session = server.session_mgr.create(AgentType.CODEX)
@@ -143,10 +161,66 @@ def test_permission_request_event_registers_pending_request():
 
     server._on_agent_event(event)
 
-    pending = server.pending_permissions["req_1"]
+    pending = pending_for(server, "req_1", session_id=session.session_id)
+    assert pending is not None
     assert pending.session_id == session.session_id
     assert pending.agent == AgentType.CODEX
     assert server.session_mgr.get(session.session_id).state == AgentState.WAITING_PERMISSION
+
+
+def test_repeated_session_scoped_request_replaces_pending_after_other_scope_resolves():
+    server = make_server()
+    proxy = FakeProxy()
+    server.agents[AgentType.CODEX] = proxy
+    first = server.session_mgr.create(AgentType.CODEX)
+    second = server.session_mgr.create(AgentType.CODEX)
+
+    for session in (first, second):
+        server._on_agent_event(server.unifier.encode_device_message({
+            "type": "permission_request",
+            "request_id": "req_shared",
+            "session_id": session.session_id,
+            "agent": "codex",
+            "timeout_sec": 30,
+        }))
+
+    first_queue = CaptureQueue()
+    asyncio.run(server._cmd_permission_response({
+        "type": "permission_response",
+        "request_id": "req_shared",
+        "session_id": first.session_id,
+        "approved": True,
+    }, first_queue))
+
+    server._on_agent_event(server.unifier.encode_device_message({
+        "type": "permission_request",
+        "request_id": "req_shared",
+        "session_id": second.session_id,
+        "agent": "codex",
+        "timeout_sec": 30,
+    }))
+
+    assert pending_count(server, "req_shared", session_id=second.session_id) == 1
+    pending = pending_for(server, "req_shared", session_id=second.session_id)
+    assert pending is not None
+    assert pending.session_id == second.session_id
+
+    second_queue = CaptureQueue()
+    asyncio.run(server._cmd_permission_response({
+        "type": "permission_response",
+        "request_id": "req_shared",
+        "session_id": second.session_id,
+        "approved": True,
+    }, second_queue))
+
+    ack = json.loads(second_queue.get_nowait())
+    assert ack["type"] == "permission_ack"
+    assert ack["request_id"] == "req_shared"
+    assert ack["session_id"] == second.session_id
+    assert proxy.responses == [
+        (first.session_id, "req_shared", True),
+        (second.session_id, "req_shared", True),
+    ]
 
 
 def test_known_permission_response_returns_ack_and_clears_pending():
@@ -181,7 +255,7 @@ def test_known_permission_response_returns_ack_and_clears_pending():
         "request_id": "req_2",
         "approved": True,
     }
-    assert "req_2" not in server.pending_permissions
+    assert pending_for(server, "req_2", session_id=session.session_id) is None
     assert proxy.responses == [(session.session_id, "req_2", True)]
     assert server.session_mgr.get(session.session_id).state == AgentState.WORKING
 
@@ -222,7 +296,7 @@ def test_permission_response_rejects_ambiguous_string_bool():
     error = json.loads(queue.get_nowait())
     assert error["type"] == "error"
     assert error["code"] == "INVALID_PERMISSION_RESPONSE"
-    assert "req_bool" in server.pending_permissions
+    assert pending_for(server, "req_bool", session_id=session.session_id) is not None
 
 
 def test_claude_forward_failure_keeps_pending_request():
@@ -248,7 +322,7 @@ def test_claude_forward_failure_keeps_pending_request():
     error = json.loads(queue.get_nowait())
     assert error["type"] == "error"
     assert error["code"] == "PERMISSION_FORWARD_FAILED"
-    assert "req_forward_fail" in server.pending_permissions
+    assert pending_for(server, "req_forward_fail", session_id=session.session_id) is not None
 
 
 def test_codex_app_server_forward_failure_keeps_pending_request():
@@ -274,7 +348,7 @@ def test_codex_app_server_forward_failure_keeps_pending_request():
     error = json.loads(queue.get_nowait())
     assert error["type"] == "error"
     assert error["code"] == "PERMISSION_FORWARD_FAILED"
-    assert "req_codex_forward_fail" in server.pending_permissions
+    assert pending_for(server, "req_codex_forward_fail", session_id=session.session_id) is not None
 
 
 def test_expired_permission_request_is_pruned():
@@ -287,11 +361,13 @@ def test_expired_permission_request_is_pruned():
         "agent": "claude",
         "timeout_sec": 1,
     }))
-    server.pending_permissions["req_old"].created_at -= 10
+    pending = pending_for(server, "req_old", session_id=session.session_id)
+    assert pending is not None
+    pending.created_at -= 10
 
     server._prune_expired_permissions()
 
-    assert "req_old" not in server.pending_permissions
+    assert pending_for(server, "req_old", session_id=session.session_id) is None
 
 
 def test_permission_response_persists_session_and_history_to_sqlite(tmpdir):
@@ -366,7 +442,7 @@ def test_expired_codex_app_server_permission_is_declined_natively():
 
     asyncio.run(server._prune_expired_permissions_async())
 
-    assert "req_expire_native" not in server.pending_permissions
+    assert pending_for(server, "req_expire_native", session_id=session.session_id) is None
     assert proxy.expired == [(session.session_id, "req_expire_native")]
 
 
