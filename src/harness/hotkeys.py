@@ -10,7 +10,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
 
 
 DEFAULT_URL = "ws://127.0.0.1:8765"
-DEFAULT_CLIENT_ID = "local-hotkey-harness"
+DEFAULT_CLIENT_ID = "test-harness"
 DEFAULT_DEVICE_ID = "kbd_hotkey_harness"
 DEFAULT_CAPABILITIES = ("agent:launch", "permission:respond", "session:list")
 DEFAULT_CODEX_CONTEXT = (
@@ -372,4 +372,3 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

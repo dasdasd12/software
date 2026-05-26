@@ -63,6 +63,7 @@ def test_hello_payload_uses_desktop_ui_identity_and_capabilities():
 
     assert payload["type"] == "hello"
     assert payload["client_kind"] == "desktop-ui"
+    assert payload["client_id"] == "test-harness"
     assert payload["client_id"] == DEFAULT_CLIENT_ID
     assert payload["token"] == "token-1"
     assert set(payload["capabilities"]) == set(DEFAULT_CAPABILITIES)
