@@ -15,7 +15,10 @@ Examples:
 import argparse
 import asyncio
 import json
+import subprocess
+import sys
 import time
+from pathlib import Path
 from typing import Any, Dict, List
 
 import websockets
@@ -23,12 +26,17 @@ import websockets
 
 TERMINAL_TYPES = {"task_completed", "task_failed", "error"}
 DEFAULT_CONTEXT = "say hello"
-DEFAULT_CLAUDE_APPROVAL_CONTEXT = "Use WebFetch to fetch https://example.com and report the title."
+DEFAULT_CLAUDE_APPROVAL_CONTEXT = (
+    "Run this exact harmless command and report its output: "
+    "python -c \"print('claude approval smoke')\""
+)
 DEFAULT_CODEX_APPROVAL_CONTEXT = (
     "Run this exact harmless command and report its output: "
     "python -c \"print('codex approval smoke')\""
 )
 VIRTUAL_DEVICE_ID = "kbd_virtual_smoke"
+ROOT_DIR = Path(__file__).resolve().parents[1]
+DEFAULT_CONFIG = "src/bridge/config.yaml"
 
 
 def now_ts() -> int:
@@ -37,6 +45,31 @@ def now_ts() -> int:
 
 def parse_bool(value: str) -> bool:
     return value.lower() in {"1", "true", "yes", "y", "approve", "approved"}
+
+
+def build_service_start_command(config: Any, workspace: Any = None) -> List[str]:
+    config_path = Path(config)
+    if not config_path.is_absolute():
+        config_path = ROOT_DIR / config_path
+    command = [
+        sys.executable,
+        str(ROOT_DIR / "src" / "bridge" / "server.py"),
+        "--config",
+        str(config_path),
+    ]
+    if workspace:
+        command.extend(["--workspace", str(workspace)])
+    return command
+
+
+def start_local_core_service(config: Any, workspace: Any = None) -> subprocess.Popen:
+    kwargs: Dict[str, Any] = {
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+    }
+    if hasattr(subprocess, "CREATE_NO_WINDOW"):
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    return subprocess.Popen(build_service_start_command(config, workspace), **kwargs)
 
 
 class LocalApiSmokeClient:
@@ -49,6 +82,7 @@ class LocalApiSmokeClient:
         client_kind: str,
         client_id: str,
         capabilities: List[str],
+        workspace: str = None,
     ):
         self.url = url
         self.timeout = timeout
@@ -57,6 +91,7 @@ class LocalApiSmokeClient:
         self.client_kind = client_kind
         self.client_id = client_id
         self.capabilities = capabilities
+        self.workspace = workspace
 
     def log(self, direction: str, payload: Dict[str, Any]) -> None:
         record = {
@@ -115,6 +150,18 @@ class LocalApiSmokeClient:
         })
         await self.wait_for_type(ws, "hello_ack")
 
+    def agent_launch_payload(self, agent: str, context: str) -> Dict[str, Any]:
+        payload = {
+            "type": "agent_launch",
+            "agent": agent,
+            "session_id": "new",
+            "context": context,
+            "timestamp": now_ts(),
+        }
+        if self.workspace:
+            payload["workspace"] = self.workspace
+        return payload
+
     async def run_basic(self) -> None:
         async with websockets.connect(self.url) as ws:
             await self.hello(ws)
@@ -138,16 +185,12 @@ class LocalApiSmokeClient:
     async def run_real_agent(self, agent: str, context: str) -> None:
         async with websockets.connect(self.url) as ws:
             await self.hello(ws)
-            await self.send(ws, {
-                "type": "agent_launch",
-                "agent": agent,
-                "session_id": "new",
-                "context": context,
-                "timestamp": now_ts(),
-            })
+            await self.send(ws, self.agent_launch_payload(agent, context))
             while True:
                 payload = await self.recv_json(ws)
                 if payload.get("type") in TERMINAL_TYPES:
+                    if payload.get("type") in {"task_failed", "error"}:
+                        raise RuntimeError(f"Real-agent scenario ended with failure: {payload}")
                     return
 
     async def run_approval_real(
@@ -156,16 +199,11 @@ class LocalApiSmokeClient:
         context: str,
         approved: bool,
         require_forwarded: bool,
+        wait_for_hotkey_approval: bool = False,
     ) -> None:
         async with websockets.connect(self.url) as ws:
             await self.hello(ws)
-            await self.send(ws, {
-                "type": "agent_launch",
-                "agent": agent,
-                "session_id": "new",
-                "context": context,
-                "timestamp": now_ts(),
-            })
+            await self.send(ws, self.agent_launch_payload(agent, context))
 
             launch_ack = await self.wait_for_type(ws, "task_update")
             session_id = launch_ack.get("session_id")
@@ -174,13 +212,14 @@ class LocalApiSmokeClient:
 
             permission_request = await self.wait_for_type_for_session(ws, "permission_request", session_id)
             request_id = permission_request["request_id"]
-            await self.send(ws, {
-                "type": "permission_response",
-                "request_id": request_id,
-                "session_id": session_id,
-                "approved": approved,
-                "timestamp": now_ts(),
-            })
+            if not wait_for_hotkey_approval:
+                await self.send(ws, {
+                    "type": "permission_response",
+                    "request_id": request_id,
+                    "session_id": session_id,
+                    "approved": approved,
+                    "timestamp": now_ts(),
+                })
 
             ack = await self.wait_for_type_for_session(ws, "permission_ack", session_id)
             if ack.get("request_id") != request_id or ack.get("session_id") != session_id:
@@ -359,6 +398,66 @@ class LocalApiSmokeClient:
             raise RuntimeError(f"Snapshot missing virtual device state: {snapshot}")
 
 
+async def wait_for_service_hello(client: LocalApiSmokeClient, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    last_error = None
+    while time.monotonic() < deadline:
+        try:
+            async with websockets.connect(client.url) as ws:
+                await client.hello(ws)
+                return True
+        except Exception as exc:
+            last_error = exc
+            await asyncio.sleep(0.2)
+    if last_error:
+        raise RuntimeError(f"Local Core service did not accept hello before timeout: {last_error}")
+    raise RuntimeError("Local Core service did not accept hello before timeout")
+
+
+async def ensure_local_core_service(
+    client: LocalApiSmokeClient,
+    auto_start: bool,
+    config: str,
+    workspace: str,
+    service_start_timeout: float,
+) -> subprocess.Popen:
+    if not auto_start:
+        return None
+    try:
+        await wait_for_service_hello(client, min(1.0, service_start_timeout))
+        if not client.json_log:
+            print("Local Core service is already running")
+        return None
+    except Exception:
+        pass
+
+    process = start_local_core_service(config, workspace)
+    try:
+        await wait_for_service_hello(client, service_start_timeout)
+        if not client.json_log:
+            print(f"Started Local Core service with config {config}")
+        return process
+    except Exception:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+        raise
+
+
+def stop_spawned_service(process: subprocess.Popen) -> None:
+    if process is None or process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
 async def amain() -> None:
     parser = argparse.ArgumentParser(description="Smoke-test the Local Core Service MVP WebSocket API")
     parser.add_argument("--url", default="ws://127.0.0.1:8765", help="Local Core Service WebSocket URL")
@@ -371,6 +470,19 @@ async def amain() -> None:
     parser.add_argument("--context", default=DEFAULT_CONTEXT, help="Prompt used by the real-agent smoke scenario")
     parser.add_argument("--timeout", type=float, default=10.0, help="Receive timeout in seconds")
     parser.add_argument("--json-log", action="store_true", help="Print each send/receive as JSON")
+    parser.add_argument("--workspace", default=None, help="Workspace path to include in agent launch payloads")
+    parser.add_argument(
+        "--auto-start-service",
+        action="store_true",
+        help="Start Local Core service when the URL is not already accepting hello",
+    )
+    parser.add_argument("--config", default=DEFAULT_CONFIG, help="Config path for auto-started Local Core service")
+    parser.add_argument(
+        "--service-start-timeout",
+        type=float,
+        default=15.0,
+        help="Seconds to wait for an auto-started Local Core service to accept hello",
+    )
     parser.add_argument("--request-id", default="req_1", help="Permission request id to approve or reject")
     parser.add_argument("--approved", default="true", help="Permission decision for the permission scenario")
     parser.add_argument("--decision", choices=("approve", "deny"), help="Permission decision alias for approval scenarios")
@@ -388,6 +500,11 @@ async def amain() -> None:
         "--require-forwarded",
         action="store_true",
         help="Fail approval-real unless permission_ack.forwarded is true",
+    )
+    parser.add_argument(
+        "--wait-for-hotkey-approval",
+        action="store_true",
+        help="In approval-real, wait for another client or hotkey to submit the permission response",
     )
     args = parser.parse_args()
 
@@ -407,6 +524,7 @@ async def amain() -> None:
         client_kind,
         client_id,
         capabilities,
+        workspace=args.workspace,
     )
     context = args.context
     if args.scenario == "approval-real" and context == DEFAULT_CONTEXT:
@@ -416,23 +534,36 @@ async def amain() -> None:
             else DEFAULT_CLAUDE_APPROVAL_CONTEXT
         )
 
-    if args.scenario == "basic":
-        await client.run_basic()
-    elif args.scenario == "permission":
-        approved = args.decision == "approve" if args.decision else parse_bool(args.approved)
-        await client.run_permission(args.request_id, approved)
-    elif args.scenario == "approval-real":
-        approved = args.decision == "approve" if args.decision else parse_bool(args.approved)
-        await client.run_approval_real(
-            args.agent,
-            context,
-            approved,
-            args.require_forwarded,
-        )
-    elif args.scenario == "virtual-input":
-        await client.run_virtual_input(args.agent, context)
-    else:
-        await client.run_real_agent(args.agent, context)
+    service_process = await ensure_local_core_service(
+        client,
+        args.auto_start_service,
+        args.config,
+        args.workspace,
+        args.service_start_timeout,
+    )
+    try:
+        if args.scenario == "basic":
+            await client.run_basic()
+        elif args.scenario == "permission":
+            approved = args.decision == "approve" if args.decision else parse_bool(args.approved)
+            await client.run_permission(args.request_id, approved)
+        elif args.scenario == "approval-real":
+            approved = args.decision == "approve" if args.decision else parse_bool(args.approved)
+            await client.run_approval_real(
+                args.agent,
+                context,
+                approved,
+                args.require_forwarded,
+                wait_for_hotkey_approval=args.wait_for_hotkey_approval,
+            )
+        elif args.scenario == "virtual-input":
+            await client.run_virtual_input(args.agent, context)
+        else:
+            await client.run_real_agent(args.agent, context)
+        if not args.json_log:
+            print(f"Smoke scenario completed: {args.scenario}")
+    finally:
+        stop_spawned_service(service_process)
 
 
 def main() -> None:
