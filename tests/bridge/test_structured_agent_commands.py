@@ -33,7 +33,9 @@ class FakeController:
         self.service = service
         self.agent_type = agent_type
         self.launches = []
+        self.launch_workspaces = []
         self.resumes = []
+        self.resume_workspaces = []
         self.interrupts = []
         self.terminations = []
         self.interrupt_error = None
@@ -43,12 +45,14 @@ class FakeController:
     def is_available(self):
         return True
 
-    async def launch(self, session_id, context=""):
+    async def launch(self, session_id, context="", workspace=None):
         self.launches.append((session_id, context))
+        self.launch_workspaces.append(workspace)
         return self.service.session_mgr.get(session_id)
 
-    async def resume(self, session_id):
+    async def resume(self, session_id, workspace=None):
         self.resumes.append(session_id)
+        self.resume_workspaces.append(workspace)
         return self.service.session_mgr.get(session_id)
 
     async def send_interrupt(self, session_id):
@@ -121,7 +125,27 @@ def test_structured_launch_or_resume_new_session_creates_session_and_calls_launc
     assert session_id != "new"
     assert event["payload"]["agent"] == "codex"
     assert server.agents[AgentType.CODEX].launches == [(session_id, "hello")]
+    assert server.agents[AgentType.CODEX].launch_workspaces == [None]
     assert server.session_mgr.get(session_id).agent == AgentType.CODEX
+
+
+def test_structured_launch_or_resume_passes_payload_workspace_to_controller(tmpdir):
+    workspace = Path(str(tmpdir))
+    server = make_server()
+    queue = CaptureQueue()
+    server.connected_clients.add(queue)
+
+    asyncio.run(server._cmd_structured_command(command_message(
+        "agent.session.launch_or_resume",
+        target={"session_id": "new"},
+        payload={"agent": "codex", "context": "hello", "workspace": str(workspace)},
+        command_id="cmd_launch_workspace",
+    ), queue))
+
+    event = read_event(queue)
+    session_id = event["payload"]["session_id"]
+    assert server.agents[AgentType.CODEX].launches == [(session_id, "hello")]
+    assert server.agents[AgentType.CODEX].launch_workspaces == [str(workspace)]
 
 
 def test_structured_launch_or_resume_existing_session_calls_resume():
@@ -142,6 +166,27 @@ def test_structured_launch_or_resume_existing_session_calls_resume():
     assert event["payload"]["session_id"] == session.session_id
     assert event["payload"]["agent"] == "codex"
     assert server.agents[AgentType.CODEX].resumes == [session.session_id]
+    assert server.agents[AgentType.CODEX].resume_workspaces == [None]
+
+
+def test_structured_launch_or_resume_existing_session_passes_payload_workspace(tmpdir):
+    workspace = Path(str(tmpdir))
+    server = make_server()
+    session = server.session_mgr.create(AgentType.CODEX)
+    queue = CaptureQueue()
+    server.connected_clients.add(queue)
+
+    asyncio.run(server._cmd_structured_command(command_message(
+        "agent.session.launch_or_resume",
+        target={"session_id": session.session_id},
+        payload={"workspace": str(workspace)},
+        command_id="cmd_resume_workspace",
+    ), queue))
+
+    event = read_event(queue)
+    assert event["type"] == "agent.session.state_changed"
+    assert server.agents[AgentType.CODEX].resumes == [session.session_id]
+    assert server.agents[AgentType.CODEX].resume_workspaces == [str(workspace)]
 
 
 def test_structured_interrupt_calls_controller_and_marks_session_cancelled():

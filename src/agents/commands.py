@@ -24,6 +24,7 @@ class AgentCommandService:
     async def launch_or_resume(self, command: CommandEnvelope) -> EventEnvelope:
         session_id = self._session_id(command) or "new"
         context = str(command.payload.get("context", ""))
+        workspace = self._workspace(command)
 
         if session_id == "new":
             agent_key = self.runtime.resolve_agent_key(self._agent(command))
@@ -33,7 +34,10 @@ class AgentCommandService:
             self.runtime.update_state(session_id, "SUBMITTED")
             self.runtime.persist(session_id)
             try:
-                await controller.launch(session_id, context)
+                if workspace is None:
+                    await controller.launch(session_id, context)
+                else:
+                    await controller.launch(session_id, context, workspace=workspace)
             except Exception as exc:
                 self.runtime.update_state(session_id, "FAILED")
                 self.runtime.persist(session_id)
@@ -46,7 +50,10 @@ class AgentCommandService:
         self.runtime.update_state(session_id, "SUBMITTED")
         self.runtime.persist(session_id)
         try:
-            await controller.resume(session_id)
+            if workspace is None:
+                await controller.resume(session_id)
+            else:
+                await controller.resume(session_id, workspace=workspace)
         except Exception as exc:
             self.runtime.update_state(session_id, "FAILED")
             self.runtime.persist(session_id)
@@ -126,6 +133,13 @@ class AgentCommandService:
             value = container.get("session_id")
             if isinstance(value, str) and value:
                 return value
+        return None
+
+    @staticmethod
+    def _workspace(command: CommandEnvelope) -> Optional[str]:
+        value = command.payload.get("workspace")
+        if isinstance(value, str) and value:
+            return value
         return None
 
     @staticmethod

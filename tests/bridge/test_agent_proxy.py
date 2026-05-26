@@ -18,13 +18,14 @@ from protocol_unifier import ProtocolUnifier  # noqa: E402
 from session_manager import AgentState, AgentType, SessionManager  # noqa: E402
 
 
-def make_proxy(agent_type, args=None):
+def make_proxy(agent_type, args=None, workspace=None):
     return AgentProxy(
         agent_type=agent_type,
         session_manager=SessionManager(),
         unifier=ProtocolUnifier(),
         executable="agent.exe",
         args=args or [],
+        workspace=workspace,
     )
 
 
@@ -54,7 +55,8 @@ def test_claude_command_dedupes_user_output_format_and_verbose_args():
     assert "sonnet" in cmd
 
 
-def test_launch_creates_process_with_stdin_pipe(monkeypatch):
+def test_launch_creates_process_with_stdin_pipe_and_workspace_cwd(monkeypatch, tmpdir):
+    workspace = Path(str(tmpdir))
     calls = []
 
     async def fake_create_subprocess_exec(*cmd, **kwargs):
@@ -66,13 +68,14 @@ def test_launch_creates_process_with_stdin_pipe(monkeypatch):
         )
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
-    proxy = make_proxy(AgentType.CODEX)
+    proxy = make_proxy(AgentType.CODEX, workspace=workspace)
     monkeypatch.setattr(proxy, "is_available", lambda: True)
     session = proxy._sm.create(AgentType.CODEX)
 
     asyncio.run(proxy.launch(session.session_id, "hello"))
 
     assert calls[0][1]["stdin"] == asyncio.subprocess.PIPE
+    assert calls[0][1]["cwd"] == str(workspace.resolve())
 
 
 def test_codex_app_server_command_uses_stdio_listener():
@@ -149,8 +152,10 @@ def test_codex_app_server_retry_error_is_not_terminal_failure():
     assert event["state"] == AgentState.WORKING.value
 
 
-def test_codex_app_server_task_stops_after_turn_completed(monkeypatch):
+def test_codex_app_server_task_stops_after_turn_completed(monkeypatch, tmpdir):
+    workspace = Path(str(tmpdir))
     terminated = []
+    cwd_calls = []
     monkeypatch.setattr(agent_proxy_module.sys, "platform", "linux")
 
     class FakeClient:
@@ -164,9 +169,11 @@ def test_codex_app_server_task_stops_after_turn_completed(monkeypatch):
             return {"ok": True}
 
         async def start_thread(self, cwd):
+            cwd_calls.append(("thread", cwd))
             return {"thread": {"id": "thread_1"}}
 
         async def start_turn(self, thread_id, prompt, cwd):
+            cwd_calls.append(("turn", cwd))
             self._on_notification({
                 "method": "turn/completed",
                 "params": {"threadId": thread_id, "turnId": "turn_1"},
@@ -197,6 +204,7 @@ def test_codex_app_server_task_stops_after_turn_completed(monkeypatch):
         unifier=ProtocolUnifier(),
         executable="codex.exe",
         mode="app_server",
+        workspace=workspace,
     )
     session = proxy._sm.create(AgentType.CODEX)
 
@@ -208,6 +216,10 @@ def test_codex_app_server_task_stops_after_turn_completed(monkeypatch):
     asyncio.run(run())
 
     assert terminated == ["terminate"]
+    assert cwd_calls == [
+        ("thread", str(workspace.resolve())),
+        ("turn", str(workspace.resolve())),
+    ]
     assert session.session_id not in proxy._processes
     assert session.session_id not in proxy._read_tasks
     assert proxy._sm.get(session.session_id).state == AgentState.COMPLETED
@@ -316,3 +328,42 @@ def test_claude_agent_sdk_permission_adapter_resolves_callback():
     assert result["evidence"]["adapter"] == "claude_agent_sdk"
     assert result["evidence"]["native_channel"] == "claude_agent_sdk.can_use_tool"
     assert permission.__class__.__name__ == "PermissionResultAllow"
+
+
+def test_claude_agent_sdk_options_use_workspace(monkeypatch, tmpdir):
+    workspace = Path(str(tmpdir))
+    captured = {}
+
+    class ClaudeAgentOptions:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class ResultMessage:
+        is_error = False
+        result = "done"
+
+    async def query(prompt, options):
+        captured["options"] = options
+        yield ResultMessage()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "claude_agent_sdk",
+        SimpleNamespace(ClaudeAgentOptions=ClaudeAgentOptions, query=query),
+    )
+    proxy = AgentProxy(
+        agent_type=AgentType.CLAUDE,
+        session_manager=SessionManager(),
+        unifier=ProtocolUnifier(),
+        executable="claude.exe",
+        mode="agent_sdk",
+        workspace=workspace,
+    )
+    session = proxy._sm.create(AgentType.CLAUDE)
+
+    async def run():
+        await proxy._run_claude_agent_sdk(session.session_id, "hello", asyncio.Event())
+
+    asyncio.run(run())
+
+    assert captured["options"].kwargs["cwd"] == workspace.resolve()

@@ -43,6 +43,7 @@ class AgentProxy:
         api_key: Optional[str] = None,
         session_timeout_sec: int = 3600,
         permission_adapter: Optional[Any] = None,
+        workspace: Optional[Any] = None,
     ):
         self.agent_type = agent_type
         self._sm = session_manager
@@ -57,6 +58,7 @@ class AgentProxy:
             self._env[key_env] = api_key
             self._extra_env[key_env] = api_key
         self._session_timeout_sec = session_timeout_sec
+        self._workspace = Path(workspace or Path.cwd()).resolve()
         self._permission_adapter = permission_adapter or self._make_permission_adapter()
 
         self._processes: Dict[str, asyncio.subprocess.Process] = {}
@@ -127,13 +129,19 @@ class AgentProxy:
     #  Lifecycle
     # ------------------------------------------------------------------ #
 
-    async def launch(self, session_id: str, context: str = "") -> Optional[Session]:
+    async def launch(
+        self,
+        session_id: str,
+        context: str = "",
+        workspace: Optional[Any] = None,
+    ) -> Optional[Session]:
         """Start a new session subprocess for this agent."""
         if not self.is_available():
             raise RuntimeError(f"{self.agent_type.value} executable not found")
 
+        launch_workspace = self._resolve_launch_workspace(workspace)
         if self._uses_claude_agent_sdk():
-            return await self._launch_claude_agent_sdk(session_id, context)
+            return await self._launch_claude_agent_sdk(session_id, context, launch_workspace)
 
         # Build command line based on mode
         cmd = self._build_command(session_id, context)
@@ -145,7 +153,7 @@ class AgentProxy:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=self._env,
-                cwd=str(Path.home()),
+                cwd=str(launch_workspace),
             )
         except Exception as exc:
             self._sm.update_state(session_id, AgentState.FAILED)
@@ -157,14 +165,18 @@ class AgentProxy:
 
         # Start stdout / stderr readers
         self._read_tasks[session_id] = asyncio.create_task(
-            self._read_codex_app_server(session_id, proc, context)
+            self._read_codex_app_server(session_id, proc, context, launch_workspace)
             if self._uses_codex_app_server()
             else self._read_stream(session_id, proc.stdout, proc.stderr)
         )
 
         return self._sm.get(session_id)
 
-    async def resume(self, session_id: str) -> Optional[Session]:
+    async def resume(
+        self,
+        session_id: str,
+        workspace: Optional[Any] = None,
+    ) -> Optional[Session]:
         """Resume an existing session. For CLI-based agents, this typically means
         launching a new process with the previous context (if persisted).
         """
@@ -173,7 +185,7 @@ class AgentProxy:
             return None
         # For MVP: treat resume as launch with empty context
         # Future: load conversation history and inject as context
-        return await self.launch(session_id, context="")
+        return await self.launch(session_id, context="", workspace=workspace)
 
     async def terminate(self, session_id: str) -> bool:
         """Gracefully terminate a session subprocess."""
@@ -276,12 +288,13 @@ class AgentProxy:
         self,
         session_id: str,
         context: str,
+        workspace: Path,
     ) -> Optional[Session]:
         self._sm.update_state(session_id, AgentState.WORKING)
         done_event = asyncio.Event()
         self._sdk_input_done[session_id] = done_event
         self._sdk_tasks[session_id] = asyncio.create_task(
-            self._run_claude_agent_sdk(session_id, context, done_event)
+            self._run_claude_agent_sdk(session_id, context, done_event, workspace)
         )
         return self._sm.get(session_id)
 
@@ -290,7 +303,9 @@ class AgentProxy:
         session_id: str,
         context: str,
         done_event: asyncio.Event,
+        workspace: Optional[Any] = None,
     ) -> None:
+        launch_workspace = self._resolve_launch_workspace(workspace)
         try:
             from claude_agent_sdk import ClaudeAgentOptions, query
 
@@ -299,7 +314,7 @@ class AgentProxy:
                 options=ClaudeAgentOptions(
                     can_use_tool=self._claude_sdk_can_use_tool(session_id),
                     permission_mode="default",
-                    cwd=Path.home(),
+                    cwd=launch_workspace,
                     cli_path=self._executable,
                     env=self._extra_env,
                     max_turns=3,
@@ -336,7 +351,9 @@ class AgentProxy:
         session_id: str,
         proc: asyncio.subprocess.Process,
         context: str,
+        workspace: Optional[Any] = None,
     ) -> None:
+        launch_workspace = self._resolve_launch_workspace(workspace)
         done_event = asyncio.Event()
         self._codex_turn_done_events[session_id] = done_event
         client = CodexAppServerClient(
@@ -351,7 +368,7 @@ class AgentProxy:
         self._codex_stderr_tasks[session_id] = stderr_task
         try:
             await client.initialize()
-            cwd = str(Path.cwd())
+            cwd = str(launch_workspace)
             thread = await client.start_thread(cwd=cwd)
             thread_id = self._extract_codex_thread_id(thread)
             if not thread_id:
@@ -794,6 +811,11 @@ class AgentProxy:
                 self._on_unified_event(json_line)
             except Exception:
                 pass
+
+    def _resolve_launch_workspace(self, workspace: Optional[Any] = None) -> Path:
+        if workspace:
+            return Path(workspace).resolve()
+        return self._workspace
 
     # ------------------------------------------------------------------ #
     #  Callback registration

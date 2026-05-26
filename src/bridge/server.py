@@ -31,7 +31,7 @@ if str(SRC_DIR) not in sys.path:
 from agent_proxy import AgentProxy
 from agents.commands import AgentCommandService
 from agents.runtime import AgentLifecycleError, AgentRuntime
-from app import build_runtime
+from app import build_runtime, resolve_workspace
 from core import CommandEnvelope, CommandSource
 from devices import (
     DeviceProtocolCodec,
@@ -102,6 +102,7 @@ class LocalCoreServiceMVP:
     }
 
     def __init__(self, config: Dict[str, Any]):
+        self._ensure_workspace_config(config)
         self.cfg = config
         self._setup_logging()
 
@@ -184,6 +185,7 @@ class LocalCoreServiceMVP:
                 env=acfg.get("env"),
                 api_key=acfg.get("api_key") or None,
                 session_timeout_sec=acfg.get("session_timeout_sec", 3600),
+                workspace=self.cfg.get("workspace", {}).get("resolved"),
             )
             proxy.set_event_callback(self._on_agent_event)
             self.agents[agent_type] = proxy
@@ -199,6 +201,16 @@ class LocalCoreServiceMVP:
         store = SQLiteAppStore.open(db_path)
         self.logger.info(f"SQLite app store opened at {db_path}")
         return store
+
+    @staticmethod
+    def _ensure_workspace_config(config: Dict[str, Any]) -> None:
+        workspace_cfg = config.setdefault("workspace", {})
+        if workspace_cfg.get("resolved"):
+            return
+        workspace_cfg["resolved"] = str(resolve_workspace(
+            config_default=str(workspace_cfg.get("default", ".")),
+            start=Path.cwd(),
+        ))
 
     def _restore_sessions_from_app_store(self) -> None:
         if not self.app_store:
@@ -1796,6 +1808,7 @@ class LocalCoreServiceMVP:
 def main():
     parser = argparse.ArgumentParser(description="AI Keyboard Local Core Service MVP")
     parser.add_argument("--config", "-c", default="config.yaml", help="Path to YAML config file")
+    parser.add_argument("--workspace", default=None, help="Project workspace for Codex/Claude launches")
     args = parser.parse_args()
 
     config_path = Path(args.config)
@@ -1804,6 +1817,13 @@ def main():
 
     with open(config_path, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
+
+    workspace_cfg = config.setdefault("workspace", {})
+    workspace_cfg["resolved"] = str(resolve_workspace(
+        cli_workspace=args.workspace,
+        config_default=str(workspace_cfg.get("default", ".")),
+        start=Path.cwd(),
+    ))
 
     server = LocalCoreServiceMVP(config)
     asyncio.run(server.start())

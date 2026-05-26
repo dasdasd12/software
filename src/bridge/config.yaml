@@ -13,6 +13,9 @@ server:
     cert_file: ""
     key_file: ""
 
+workspace:
+  default: "."
+
 # Heartbeat settings
 device:
   heartbeat_interval_sec: 30
