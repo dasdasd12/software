@@ -249,6 +249,7 @@ def test_legacy_launch_and_interrupt_share_structured_lifecycle_path_without_res
     assert ack["agent"] == "codex"
     assert ack["state"] == AgentState.SUBMITTED.value
     assert server.agents[AgentType.CODEX].launches == [(session_id, "legacy hello")]
+    assert server.agents[AgentType.CODEX].launch_workspaces == [None]
     assert queue.items == []
 
     launch_events = server.runtime.event_bus.events_after(0)
@@ -269,6 +270,27 @@ def test_legacy_launch_and_interrupt_share_structured_lifecycle_path_without_res
     ]
     assert events[-1].payload["session_id"] == session_id
     assert queue.items == []
+
+
+def test_legacy_launch_passes_workspace_through_structured_lifecycle_path(tmpdir):
+    workspace = Path(str(tmpdir))
+    server = make_server()
+    queue = CaptureQueue()
+
+    asyncio.run(server._cmd_agent_launch({
+        "type": "agent_launch",
+        "agent": "codex",
+        "session_id": "new",
+        "context": "legacy workspace",
+        "workspace": str(workspace),
+    }, queue))
+
+    ack = json.loads(queue.get_nowait())
+    session_id = ack["session_id"]
+
+    assert ack["type"] == "task_update"
+    assert server.agents[AgentType.CODEX].launches == [(session_id, "legacy workspace")]
+    assert server.agents[AgentType.CODEX].launch_workspaces == [str(workspace)]
 
 
 def test_legacy_interrupt_returns_error_when_controller_fails():

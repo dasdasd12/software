@@ -588,10 +588,14 @@ class LocalCoreServiceMVP:
         agent_str = "claude" if msg.get("agent", "claude") == "claude" else "codex"
         session_id = msg.get("session_id", "new")
         context = msg.get("context", "")
+        payload = {"agent": agent_str, "context": context}
+        workspace = msg.get("workspace")
+        if isinstance(workspace, str) and workspace:
+            payload["workspace"] = workspace
         command = self._legacy_agent_command(
             "agent.session.launch_or_resume",
             target={"session_id": session_id},
-            payload={"agent": agent_str, "context": context},
+            payload=payload,
         )
         try:
             event = await self.runtime.command_router.dispatch_async(command)
