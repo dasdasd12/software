@@ -39,6 +39,7 @@ AGENT_ACTION_TARGETS = {
     "agent.run.interrupt": {"focused_run", "focused_session"},
     "agent.session.close": {"focused_run", "focused_session"},
     "agent.session.launch_or_resume": SUPPORTED_AGENT_TARGETS - {"focused_permission"},
+    "agent.focus.next_session": {None},
 }
 SUPPORTED_TOOL_ACTIONS = {
     "keyboard.tool.switch",
@@ -323,6 +324,8 @@ def _validate_agent_action_target(action: KeyboardAction) -> None:
     if allowed_targets is None:
         raise ProfileValidationError(f"unsupported agent action type: {action.type}")
     target_selector = _action_target_selector(action.target)
+    if target_selector is None and None in allowed_targets:
+        return
     if target_selector not in SUPPORTED_AGENT_TARGETS:
         raise ProfileValidationError(f"unsupported agent target: {action.target}")
     if target_selector not in allowed_targets:

@@ -47,7 +47,21 @@ def _default_key_ids() -> FrozenSet[str]:
         "K_SCROLL_LOCK",
         "K_PAUSE",
     ]
-    agent_keys = ["K_LAUNCH", "K_TOOL_1", "K_TOOL_2", "K_TOOL_3", "K_TOOL_4"]
+    agent_keys = [
+        "K_LAUNCH",
+        "K_TOOL_1",
+        "K_TOOL_2",
+        "K_TOOL_3",
+        "K_TOOL_4",
+        "K_CODEX_LAUNCH",
+        "K_CLAUDE_LAUNCH",
+        "K_APPROVE",
+        "K_DENY",
+        "K_INTERRUPT",
+        "K_CLOSE",
+        "K_FOCUS_NEXT",
+        "K_TOOL_NEXT",
+    ]
     macro_keys = [f"K_MACRO_{number}" for number in range(1, 7)]
     punctuation = [
         "K_MINUS",
