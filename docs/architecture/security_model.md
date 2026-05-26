@@ -18,7 +18,7 @@ Development may use browser UI over localhost. Product builds should prefer a
 desktop shell with a private local channel or launch-token protected localhost
 API.
 
-Current V1 status:
+Current V2 status:
 
 - Local API binds to loopback by default.
 - `hello` carries launch token, client kind, client id, and capabilities.
@@ -30,6 +30,14 @@ Current V1 status:
   requests; high-risk requests require desktop confirmation.
 - Real Codex and Claude permission responses must be delivered through their
   native provider channels before `forwarded=true` is returned.
+- Agent launch workspaces are explicit inputs to the security model. Resolution
+  prefers CLI `--workspace`, then `AI_KEYB_WORKSPACE`, then a configured
+  non-dot default, then the detected project root containing `software`, then
+  the service start directory.
+- The local hotkey harness is authorized as `desktop-ui` with client id
+  `test-harness` only for current real loopback approval testing. It is not a
+  product device transport, and its high-risk approval role must not be used as
+  precedent for `device-transport` capabilities.
 
 ## Network Binding
 
@@ -78,6 +86,11 @@ test-client:
 automation-client:
   disabled by default; explicit user opt-in required
 ```
+
+The local hotkey harness deliberately uses `desktop-ui` identity for temporary
+high-risk real approval testing because formal device-transport security is
+still limited to low-risk direct approval. Product transports must continue to
+use `device-transport` identity and policy-limited capabilities.
 
 ## Browser Development UI
 
@@ -142,6 +155,10 @@ The core should track:
 - command summary
 - risk level
 
+Workspace values may come from a launch payload or the service default
+workspace resolver. Tracked docs and config should use placeholders or relative
+examples rather than machine-specific absolute paths.
+
 ## Device Trust
 
 Connected keyboards are trusted only as bounded input devices.
@@ -155,6 +172,11 @@ Device-originated commands must still pass:
 - approval policy
 
 A keyboard device cannot silently bypass policy.
+
+The temporary local hotkey harness can submit high-risk approvals only because
+it is a desktop-ui/test-harness loopback client for manual testing. This does
+not change the product rule that formal device transports remain low-risk only
+until a stronger physical confirmation design exists.
 
 ## Automation Clients
 

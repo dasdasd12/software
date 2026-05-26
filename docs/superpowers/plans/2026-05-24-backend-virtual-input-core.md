@@ -29,12 +29,24 @@ Implemented backend scope:
 - Virtual device ingress, simulated transport session loop, device projection,
   active tool switching, and device config sync.
 - Local API virtual-input path and smoke scenario.
+- Workspace-aware real agent launch/resume payloads and default workspace
+  resolution. Resolution prefers CLI `--workspace`, then `AI_KEYB_WORKSPACE`,
+  then configured non-dot default workspace, then the nearest parent project
+  root containing `software`, then the service start directory.
+- Local hotkey harness for temporary external real loopback input. It connects
+  as `desktop-ui` with client id `test-harness` and is not the formal product
+  device transport.
+- Smoke controls for real loopback testing: `--workspace`,
+  `--auto-start-service`, `--config`, `--service-start-timeout`, and
+  `--wait-for-hotkey-approval`.
 - Diagnostics, redaction, import-boundary guards, and machine-path guards.
 
 Maintained boundaries:
 
 - Backend-only scope; no formal frontend or desktop shell was added.
 - Device interaction remains simulator/virtual-input based.
+- High-risk real approval testing currently uses the desktop-ui/test-harness
+  loopback path. Formal device-transport security remains low-risk only.
 - Physical USB HID, CDC, BLE, and 2.4G transports remain deferred.
 - Legacy Local API compatibility remains.
 - `permission_ack.forwarded=true` remains limited to provider-native delivery.
@@ -51,7 +63,9 @@ scripts/local-api-smoke.py help includes --scenario {basic,permission,real-agent
 The final backend virtual-input verification pass did not rerun external real
 Codex or Claude CLI approval smoke. Earlier Codex native approval smoke is
 separate evidence from the approval-forwarding work and should not be described
-as rerun in the final virtual-input pass.
+as rerun in the final virtual-input pass. Claude real loopback also requires
+the Python Claude Agent SDK dependency and local provider authentication before
+native callback evidence can be produced.
 
 ## Baseline
 
@@ -702,6 +716,7 @@ pytest tests/bridge/test_virtual_input_local_api.py -q -> 8 passed
 
 ```text
 scripts/local-api-smoke.py help includes --scenario {basic,permission,real-agent,approval-real,virtual-input}
+scripts/local-api-smoke.py help includes --workspace, --auto-start-service, --config, --service-start-timeout, --wait-for-hotkey-approval
 ```
 
 - [ ] Real Codex approval smoke regression was not rerun in the final
@@ -709,6 +724,14 @@ scripts/local-api-smoke.py help includes --scenario {basic,permission,real-agent
 
 ```text
 python scripts/local-api-smoke.py --scenario approval-real --agent codex --decision approve --require-forwarded --timeout 120 --json-log
+```
+
+Current V2 loopback form when a separate hotkey harness should submit the
+approval:
+
+```text
+python scripts/local-api-smoke.py --scenario approval-real --agent codex --decision approve --require-forwarded --workspace <workspace> --auto-start-service --wait-for-hotkey-approval --timeout 120 --json-log
+python scripts/local-hotkey-harness.py --workspace <workspace> --json-log
 ```
 
 - [ ] Real Codex denial smoke regression was not rerun in the final backend
@@ -719,7 +742,9 @@ python scripts/local-api-smoke.py --scenario approval-real --agent codex --decis
 ```
 
 - [ ] Claude approval regression was not rerun in the final backend
-  virtual-input verification pass.
+  virtual-input verification pass. The current V2 loopback form mirrors the
+  Codex shape with `--agent claude`, but requires the Python Claude Agent SDK
+  dependency and local provider authentication.
 - [x] Verify no new hardcoded machine paths in architecture and plan docs:
 
 Result: no machine-specific path matches in architecture and plan docs.

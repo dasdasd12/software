@@ -30,11 +30,13 @@ Product shape:
 The architecture must support both shapes without tying core behavior to a
 browser-only implementation.
 
-## Current V1 Backend Status
+## Current V2 Backend Status
 
 The backend currently implements the Local Core Service path without a formal
 frontend or desktop shell. The supported development/test surface is the Local
-API WebSocket plus smoke scripts.
+API WebSocket plus smoke scripts. A local hotkey harness is available for
+external real loopback testing, but it is a temporary test input surface rather
+than a product device transport.
 
 Implemented backend capabilities:
 
@@ -44,6 +46,10 @@ Implemented backend capabilities:
   store, and event bus.
 - Async command routing and structured agent lifecycle commands for
   launch/resume, interrupt, close, and permission response.
+- Workspace-aware agent launch/resume payloads. Default project workspace
+  resolution prefers explicit `--workspace`, then `AI_KEYB_WORKSPACE`, then a
+  configured non-dot default, then the nearest parent project root containing
+  `software`, and finally the service start directory.
 - Unified permission command handling with capability and policy gates.
 - Legacy Local API compatibility for `agent_launch`, `permission_response`,
   `interrupt`, and `list_sessions`.
@@ -59,15 +65,20 @@ Implemented backend capabilities:
 - Claude Code native approval forwarding through the Python Agent SDK.
 - Codex native approval forwarding through `codex app-server` JSON-RPC over the
   stdio listen transport.
+- Smoke support for real loopback controls: `--workspace`,
+  `--auto-start-service`, `--config`, `--service-start-timeout`, and
+  `--wait-for-hotkey-approval`.
 - Earlier real Codex approval and denial smoke tests produced
   `permission_ack.forwarded=true` evidence. The final backend virtual-input
-  verification pass did not rerun external real Codex or Claude CLI smoke.
+  verification pass did not rerun external real Codex or Claude CLI smoke, and
+  current docs must not claim final real external smoke coverage without fresh
+  same-session evidence.
 
 Final backend virtual-input verification recorded `pytest tests -q` as
 `265 passed, 1 skipped in 3.49s`, with focused import-boundary and virtual-input
 Local API checks passing.
 
-Deferred from V1:
+Deferred from V2:
 
 - formal frontend and desktop shell
 - physical USB HID, CDC, BLE, and 2.4G device transports
@@ -220,6 +231,10 @@ Current implementation note:
 - `src/bridge/agent_proxy.py` still orchestrates process lifecycle and legacy
   stream paths. It should be split further when provider/instance management is
   promoted out of the bridge compatibility layer.
+- `scripts/local-hotkey-harness.py` connects to the Local API as
+  `desktop-ui`/`test-harness` and injects virtual input for high-risk real
+  approval loopback testing. It is outside the formal device transport
+  boundary.
 
 ## Keyboard Configuration and Agent Control
 
@@ -346,6 +361,12 @@ permission_ack.forwarded=true
 Codex app-server evidence includes JSON-RPC id and response write status.
 Claude SDK evidence includes callback delivery and return status.
 
+Real loopback acceptance currently uses the Local API smoke client plus the
+temporary hotkey harness. Codex approval smoke launches through
+`codex app-server`. Claude approval smoke launches through the Python Claude
+Agent SDK path and requires the SDK dependency and provider authentication to be
+available locally before native callback evidence can be produced.
+
 ## Snapshot and Event Model
 
 The system should support both snapshots and live events.
@@ -399,6 +420,8 @@ Baseline rules:
 - keyboard shortcuts should not silently approve high-risk operations
 - remote web pages must not be able to control the local bridge
 - secrets and external service tokens must not be stored in plain text config
+- temporary test harnesses must be clearly separated from product device
+  transports
 
 ## Deferred Topics
 

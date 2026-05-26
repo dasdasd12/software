@@ -20,7 +20,7 @@ Product:
 The current Python bridge should evolve into this service. It is not a throwaway
 script; it is the MVP form of the local runtime.
 
-## Current V1 Status
+## Current V2 Status
 
 The current backend has moved beyond the original bridge-only MVP:
 
@@ -36,6 +36,11 @@ The current backend has moved beyond the original bridge-only MVP:
   `agent_launch`, `permission_response`, `interrupt`, and `list_sessions`.
 - Structured agent lifecycle and permission commands cover launch/resume,
   interrupt, close, and permission responses behind capability/policy checks.
+- Agent lifecycle commands are workspace-aware. The Local API can carry
+  `workspace` in launch/resume payloads, service startup accepts `--workspace`,
+  and default project workspace resolution prefers CLI workspace, then
+  `AI_KEYB_WORKSPACE`, then a configured non-dot default, then a parent project
+  root containing `software`, then the service start directory.
 - SQLite is the primary app store for product state and permission history.
 - The keyboard/device side has simulator transport, virtual input ingress,
   capability negotiation, slot mapping, projected snapshots, per-device focus,
@@ -46,6 +51,12 @@ The current backend has moved beyond the original bridge-only MVP:
   JSON-RPC over the stdio listen transport.
 - Claude Code native approval forwarding is implemented through the Python Agent
   SDK permission callback path.
+- The local hotkey harness connects as `desktop-ui` with client id
+  `test-harness` for current high-risk real approval loopback testing. It is a
+  temporary external input surface, not the product device transport.
+- The smoke client supports `--workspace`, `--auto-start-service`, `--config`,
+  `--service-start-timeout`, and `--wait-for-hotkey-approval` for real loopback
+  control.
 - Final backend virtual-input verification used the full pytest suite and
   focused import-boundary/Local API virtual-input checks. It did not rerun
   external real Codex or Claude CLI approval smoke.
@@ -175,6 +186,8 @@ Development:
 - service starts from CLI or dev script
 - binds to `127.0.0.1`
 - browser UI connects with a launch token
+- smoke can auto-start the service with an explicit config and workspace for
+  local loopback tests
 
 Product:
 
@@ -185,6 +198,10 @@ Product:
 
 The desktop shell may be Tauri, Electron, or another native shell. The Local
 Core Service boundary should not depend on that choice.
+
+Agent launch workspace resolution is deterministic and should remain independent
+from machine-specific absolute paths in tracked configuration. Product builds
+should make workspace selection explicit through UI or private shell state.
 
 ## State Flow
 
@@ -238,6 +255,9 @@ The existing bridge can be migrated in phases:
 8. Move persistence from session JSON toward SQLite. Done for app store,
    active profile, import/export, and permission history; legacy JSON remains
    import/export/scratch only.
+9. Make launch workspace selection explicit. Done for CLI/env/config/default
+   resolution and Local API launch payload propagation; product UX for
+   workspace selection is still deferred.
 
 Large file moves are not required at the beginning. The important part is to
 move behavior toward the module responsibilities above.

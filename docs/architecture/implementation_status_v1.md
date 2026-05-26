@@ -1,4 +1,4 @@
-# Software Backend V1 Implementation Status
+# Software Backend V2 Implementation Status
 
 This document records what the current backend implementation actually supports.
 It is a status companion to the architecture documents, not a replacement for
@@ -8,6 +8,14 @@ the target architecture.
 
 - Local Core Service runs as the software-side state owner for tests and local
   automation.
+- Agent launches are workspace-aware. Launch payloads may carry `workspace`,
+  the service can be started with `--workspace`, and default project workspace
+  resolution uses this priority:
+  1. CLI `--workspace`
+  2. `AI_KEYB_WORKSPACE`
+  3. configured non-dot default workspace
+  4. nearest parent project root containing `software`
+  5. service start directory
 - Local API WebSocket supports `hello`, structured `command`, `snapshot`,
   `event`, and legacy compatibility messages:
   - `agent_launch`
@@ -36,12 +44,15 @@ the target architecture.
   negotiation, slot mapping, slot generation mismatch handling, projected device
   snapshots, focus manager, active tool state, config sync, notification queue,
   and profile validation.
+- Local hotkey harness exists as a temporary external test input surface for
+  real loopback testing. It is not the product device transport and is not the
+  firmware protocol contract.
 - Local API includes the backend virtual-input path and the smoke script exposes
   the `virtual-input` scenario.
 - Diagnostics cover local API, database, device transport, profile validation,
   config sync, redaction, and import-boundary/path guards.
 
-## Agent Adapters
+## Agent Adapters and Loopback
 
 ### Codex
 
@@ -79,6 +90,17 @@ Codex `exec --json` remains a fallback/legacy read-only path. It does not
 support native approval forwarding and therefore must not be used for hard
 approval acceptance tests.
 
+Current real loopback smoke shape:
+
+```text
+python scripts/local-api-smoke.py --scenario approval-real --agent codex --decision approve --require-forwarded --workspace <workspace> --auto-start-service --wait-for-hotkey-approval
+python scripts/local-hotkey-harness.py --workspace <workspace> --json-log
+```
+
+The smoke client launches Codex through the Local Core Service and waits for the
+hotkey harness or another authorized client to submit the approval response when
+`--wait-for-hotkey-approval` is set.
+
 ### Claude Code
 
 Claude Code uses the Python Agent SDK mode for native permission callbacks.
@@ -87,6 +109,18 @@ streaming compatibility, but it is not the approval-forwarding path.
 
 `permission_ack.forwarded=true` for Claude is returned only after the SDK
 permission callback has received and returned the decision.
+
+Current real loopback smoke shape:
+
+```text
+python scripts/local-api-smoke.py --scenario approval-real --agent claude --decision approve --require-forwarded --workspace <workspace> --auto-start-service --wait-for-hotkey-approval
+python scripts/local-hotkey-harness.py --workspace <workspace> --json-log
+```
+
+Claude real loopback requires the Python Claude Agent SDK dependency to be
+installed and provider authentication to be available in the local environment.
+If either is missing, the real Claude loopback path is expected to fail before
+native permission forwarding evidence can be produced.
 
 ## Permission Semantics
 
@@ -148,6 +182,16 @@ approval-real
 virtual-input
 ```
 
+The smoke script also supports real loopback controls:
+
+```text
+--workspace
+--auto-start-service
+--config
+--service-start-timeout
+--wait-for-hotkey-approval
+```
+
 Focused final backend virtual-input checks:
 
 ```text
@@ -187,18 +231,23 @@ local Codex CLI:
 - app-server child processes are cleaned up after turn completion
 
 The final backend virtual-input verification pass did not rerun real external
-Codex or Claude CLI approval smoke. It relied on the final full pytest suite,
-focused import-boundary checks, focused virtual-input Local API checks, and
-smoke help coverage for the `virtual-input` scenario.
+Codex or Claude CLI approval smoke. Current repository evidence from that pass
+is limited to the final full pytest suite, focused import-boundary checks,
+focused virtual-input Local API checks, and smoke help coverage for the
+`virtual-input` scenario. Do not describe Codex or Claude real loopback smoke as
+having been run in final integration unless new evidence is produced in the
+same session.
 
 ## Known Gaps
 
 - There is no formal frontend or desktop shell yet.
 - The service is still started manually or by scripts.
-- Runtime paths are partly relative to the service working directory.
+- Runtime paths now have explicit workspace resolution for agent launches, but
+  packaging still needs a product-owned workspace/config selection flow.
 - POSIX process-tree cleanup should be revisited before Linux/macOS packaging.
 - USB HID, CDC, BLE, and 2.4G hardware transports are not implemented yet.
 - Codex app-server is the hard acceptance provider for command approval. Codex
   fallback `exec --json` remains non-forwarding.
 - Physical keyboard interaction is still represented by simulator/virtual input
-  paths in this backend scope.
+  paths in this backend scope. The local hotkey harness is a temporary external
+  test input surface, not formal product device transport.

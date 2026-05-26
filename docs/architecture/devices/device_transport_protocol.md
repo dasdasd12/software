@@ -28,7 +28,9 @@ WebSocket remains a local UI/test transport:
 UI/test client -> Local Core Service
 ```
 
-It is not the firmware protocol.
+It is not the firmware protocol. The local hotkey harness also belongs to this
+test/input category: it connects through the Local API and injects virtual input
+for loopback testing, but it is not a product device transport.
 
 ## DeviceTransport Interface
 
@@ -56,7 +58,7 @@ DongleVendorTransport
 Development may keep the current WebSocket simulator, but it should be treated
 as `SimulatedTransport`, not as the product device transport.
 
-Current V1 status:
+Current V2 status:
 
 - `SimulatedTransport` and backend transport abstractions are implemented.
 - Virtual input ingress is implemented for simulator/device test paths.
@@ -65,6 +67,10 @@ Current V1 status:
 - Device snapshots are projected from Local Core state.
 - Device config sync validates capabilities, chunks compiled profile payloads,
   and records simulator commit/reject results.
+- The temporary local hotkey harness provides external real test input by
+  sending Local API virtual input after identifying as `desktop-ui` with client
+  id `test-harness`. It is intentionally separate from this product transport
+  protocol.
 - Physical CDC, USB Vendor HID, BLE GATT, and dongle transports remain deferred.
 
 ## Protocol Layers
@@ -218,6 +224,10 @@ Development priority:
 5. 2.4G dongle vendor channel
 
 USB HID typing path is separate from the control/config channel.
+
+High-risk real approval testing currently uses the desktop-ui/test-harness
+loopback path. Formal `device-transport` clients remain policy-limited to
+low-risk direct approvals until a stronger product confirmation flow is defined.
 
 ## Error Handling
 
