@@ -18,22 +18,37 @@ the target architecture.
   identity, and capability checks.
 - Legacy messages are converted into the same internal command and permission
   paths where practical.
-- Runtime state flows through `CommandEnvelope`, `CommandRouter`, `StateStore`,
-  and `EventBus` for structured command/event/snapshot paths.
+- Runtime state flows through `CommandEnvelope`, async `CommandRouter`,
+  `StateStore`, and `EventBus` for structured command/event/snapshot paths.
+- Structured agent lifecycle commands cover launch/resume, interrupt, close,
+  and permission response handling.
+- Unified permission command handling applies client capability checks and
+  approval policy gates before provider-native forwarding.
 - SQLite is the primary app store for product state and audit metadata.
 - JSON import/export remains available for configuration interchange.
-- Device backend has simulator transport, capability negotiation, slot mapping,
-  slot generation mismatch handling, projected device snapshots, focus manager,
-  notification queue, and profile validation.
+- Focus and symbolic target resolution are tracked per device.
+- Keyboard bindings resolve active profile/layer input into command envelopes,
+  including agent lifecycle, permission, focus, active-tool, and profile
+  actions.
+- Profile, keymap, lighting, active profile, import/export, and compiled device
+  config paths are implemented for the backend model.
+- Device backend has simulator transport, virtual input ingress, capability
+  negotiation, slot mapping, slot generation mismatch handling, projected device
+  snapshots, focus manager, active tool state, config sync, notification queue,
+  and profile validation.
+- Local API includes the backend virtual-input path and the smoke script exposes
+  the `virtual-input` scenario.
+- Diagnostics cover local API, database, device transport, profile validation,
+  config sync, redaction, and import-boundary/path guards.
 
 ## Agent Adapters
 
 ### Codex
 
-Codex defaults to app-server mode:
+Codex defaults to app-server mode using the stdio listen transport:
 
 ```text
-codex app-server --listen stdio://
+codex app-server
 ```
 
 The app-server adapter uses newline-delimited JSON-RPC over stdio:
@@ -123,7 +138,30 @@ by Git.
 
 ## Diagnostics and Smoke
 
-The smoke script supports real approval scenarios:
+The smoke script supports these scenarios:
+
+```text
+basic
+permission
+real-agent
+approval-real
+virtual-input
+```
+
+Focused final backend virtual-input checks:
+
+```text
+pytest tests/architecture/test_import_boundaries.py -q -> 4 passed
+pytest tests/bridge/test_virtual_input_local_api.py -q -> 8 passed
+```
+
+The full final implementation suite result was:
+
+```text
+pytest tests -q -> 265 passed, 1 skipped in 3.49s
+```
+
+The smoke script also supports real approval scenarios:
 
 ```text
 python scripts/local-api-smoke.py --scenario approval-real --agent codex  --decision approve --require-forwarded
@@ -137,7 +175,8 @@ The Codex smoke uses a harmless stdout command:
 python -c "print('codex approval smoke')"
 ```
 
-The hard Codex acceptance path has been verified with the local Codex CLI:
+Earlier backend approval work verified the hard Codex acceptance path with the
+local Codex CLI:
 
 - Local API receives `permission_request`
 - smoke sends `permission_response`
@@ -146,6 +185,11 @@ The hard Codex acceptance path has been verified with the local Codex CLI:
 - Codex either executes the command after approval or reports that it was not
   run after denial
 - app-server child processes are cleaned up after turn completion
+
+The final backend virtual-input verification pass did not rerun real external
+Codex or Claude CLI approval smoke. It relied on the final full pytest suite,
+focused import-boundary checks, focused virtual-input Local API checks, and
+smoke help coverage for the `virtual-input` scenario.
 
 ## Known Gaps
 
@@ -156,3 +200,5 @@ The hard Codex acceptance path has been verified with the local Codex CLI:
 - USB HID, CDC, BLE, and 2.4G hardware transports are not implemented yet.
 - Codex app-server is the hard acceptance provider for command approval. Codex
   fallback `exec --json` remains non-forwarding.
+- Physical keyboard interaction is still represented by simulator/virtual input
+  paths in this backend scope.

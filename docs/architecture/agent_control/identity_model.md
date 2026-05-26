@@ -81,7 +81,7 @@ Current V1 defaults:
 ```text
 codex:
   mode: app_server
-  launch: codex app-server --listen stdio://
+  launch: codex app-server with stdio listen transport
   native permission forwarding: JSON-RPC response to app-server stdin
   fallback: exec_json, read-only for approval forwarding
 

@@ -29,16 +29,26 @@ The current backend has moved beyond the original bridge-only MVP:
   capabilities.
 - Structured `command` messages use `CommandEnvelope`, `CommandRouter`,
   `StateStore`, and `EventBus`.
+- Async command dispatch is implemented for structured backend command
+  handlers.
 - `system.snapshot.request` returns a current snapshot through the Local API.
 - Legacy messages remain supported for automation compatibility:
   `agent_launch`, `permission_response`, `interrupt`, and `list_sessions`.
+- Structured agent lifecycle and permission commands cover launch/resume,
+  interrupt, close, and permission responses behind capability/policy checks.
 - SQLite is the primary app store for product state and permission history.
-- The device side has simulator transport, capability negotiation, slot mapping,
-  projected snapshots, focus state, notification queue, and profile validation.
-- Codex native approval forwarding is implemented through `codex app-server
-  --listen stdio://`.
+- The keyboard/device side has simulator transport, virtual input ingress,
+  capability negotiation, slot mapping, projected snapshots, per-device focus,
+  active tool state, config sync, notification queue, profile validation,
+  lighting config, profile compilation, and active profile/import-export
+  persistence.
+- Codex native approval forwarding is implemented through `codex app-server`
+  JSON-RPC over the stdio listen transport.
 - Claude Code native approval forwarding is implemented through the Python Agent
   SDK permission callback path.
+- Final backend virtual-input verification used the full pytest suite and
+  focused import-boundary/Local API virtual-input checks. It did not rerun
+  external real Codex or Claude CLI approval smoke.
 
 See `implementation_status_v1.md` for the current implementation checklist and
 known gaps.
@@ -222,10 +232,12 @@ The existing bridge can be migrated in phases:
    and run registries. Partially done in repositories and architecture model;
    the compatibility WebSocket API still exposes `agent + session_id`.
 7. Add device transport abstraction and keep WebSocket only as a simulator or
-   UI/local API transport. Done for simulator/backend abstraction; physical USB,
-   CDC, BLE, and 2.4G transports remain deferred.
-8. Move persistence from session JSON toward SQLite. Done for app store and
-   permission history; legacy JSON remains import/export/scratch only.
+   UI/local API transport. Done for simulator/backend abstraction, virtual input
+   ingress/projection, and config sync; physical USB, CDC, BLE, and 2.4G
+   transports remain deferred.
+8. Move persistence from session JSON toward SQLite. Done for app store,
+   active profile, import/export, and permission history; legacy JSON remains
+   import/export/scratch only.
 
 Large file moves are not required at the beginning. The important part is to
 move behavior toward the module responsibilities above.

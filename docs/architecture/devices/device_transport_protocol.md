@@ -59,9 +59,12 @@ as `SimulatedTransport`, not as the product device transport.
 Current V1 status:
 
 - `SimulatedTransport` and backend transport abstractions are implemented.
+- Virtual input ingress is implemented for simulator/device test paths.
 - Capability negotiation is implemented for the simulator path.
 - Slot mapping and generation mismatch handling are implemented.
 - Device snapshots are projected from Local Core state.
+- Device config sync validates capabilities, chunks compiled profile payloads,
+  and records simulator commit/reject results.
 - Physical CDC, USB Vendor HID, BLE GATT, and dongle transports remain deferred.
 
 ## Protocol Layers
@@ -254,5 +257,6 @@ Tests should cover:
 - payload size boundary
 - transport disconnect event
 
-Current tests cover simulator negotiation, slot generation mismatch, device
-snapshot projection, and profile validation against device capabilities.
+Current tests cover simulator negotiation, virtual input, slot generation
+mismatch, device snapshot projection, config sync, and profile validation
+against device capabilities.

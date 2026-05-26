@@ -10,6 +10,49 @@
 
 ---
 
+## Current Status
+
+This plan is now a historical implementation plan plus final status record.
+The task checkboxes below are retained to show the original TDD execution
+sequence; they are not the current progress source of truth.
+
+Implemented backend scope:
+
+- Async `CommandRouter`.
+- Structured agent lifecycle commands for launch/resume, interrupt, close, and
+  permission response.
+- Unified permission command with client capability and approval policy gates.
+- Per-device focus and symbolic target resolution.
+- Keyboard binding resolver and action command factory.
+- Profile, keymap, lighting config, profile compilation, active profile, and
+  import/export persistence.
+- Virtual device ingress, simulated transport session loop, device projection,
+  active tool switching, and device config sync.
+- Local API virtual-input path and smoke scenario.
+- Diagnostics, redaction, import-boundary guards, and machine-path guards.
+
+Maintained boundaries:
+
+- Backend-only scope; no formal frontend or desktop shell was added.
+- Device interaction remains simulator/virtual-input based.
+- Physical USB HID, CDC, BLE, and 2.4G transports remain deferred.
+- Legacy Local API compatibility remains.
+- `permission_ack.forwarded=true` remains limited to provider-native delivery.
+
+Final verification evidence recorded for this backend virtual-input integration:
+
+```text
+pytest tests -q -> 265 passed, 1 skipped in 3.49s
+pytest tests/architecture/test_import_boundaries.py -q -> 4 passed
+pytest tests/bridge/test_virtual_input_local_api.py -q -> 8 passed
+scripts/local-api-smoke.py help includes --scenario {basic,permission,real-agent,approval-real,virtual-input}
+```
+
+The final backend virtual-input verification pass did not rerun external real
+Codex or Claude CLI approval smoke. Earlier Codex native approval smoke is
+separate evidence from the approval-forwarding work and should not be described
+as rerun in the final virtual-input pass.
+
 ## Baseline
 
 - Baseline branch: `backend-virtual-input-core`.
@@ -84,7 +127,7 @@ After each worker:
 - Modify: `src/bridge/server.py`
 - Test: `tests/architecture/test_async_command_router.py`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 ```python
 async def test_dispatch_async_awaits_async_handler():
@@ -107,7 +150,7 @@ Also cover:
 - `dispatch` rejects async handlers with an explicit error
 - unknown command keeps existing `KeyError` behavior
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run:
 
@@ -117,11 +160,11 @@ pytest tests/architecture/test_async_command_router.py -q
 
 Expected: fails because `dispatch_async` does not exist.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Add `dispatch_async()` using `inspect.isawaitable()`. Keep `dispatch()` for synchronous callers. Do not add domain logic to the router.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run:
 
@@ -140,7 +183,7 @@ Expected: all selected tests pass.
 - Modify: `src/bridge/server.py`
 - Test: `tests/bridge/test_structured_agent_commands.py`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Cover:
 
@@ -150,7 +193,7 @@ Cover:
 - `agent.session.close` calls fake controller `terminate`.
 - legacy `agent_launch` and `interrupt` produce the same state and events as structured commands.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run:
 
@@ -160,7 +203,7 @@ pytest tests/bridge/test_structured_agent_commands.py -q
 
 Expected: unknown command or missing handler failures.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Create an `AgentCommandService` that owns lifecycle side effects against injected dependencies:
 
@@ -178,7 +221,7 @@ Command handlers return structured events:
 
 Keep `src/bridge/server.py` as WebSocket/auth serialization and compatibility adapter only.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run:
 
@@ -197,7 +240,7 @@ Expected: legacy compatibility remains green.
 - Modify: `src/security/policy.py`
 - Test: `tests/bridge/test_structured_permission_command.py`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Cover:
 
@@ -208,7 +251,7 @@ Cover:
 - provider native forward failure leaves the request pending.
 - permission history persists forwarded evidence.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run:
 
@@ -218,11 +261,11 @@ pytest tests/bridge/test_structured_permission_command.py -q
 
 Expected: unknown command or old legacy-only path failures.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Move permission decision logic behind an injectable command service method. Legacy `permission_response` should build and dispatch `agent.permission.respond`, then serialize the same `permission_ack`.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run:
 
@@ -242,7 +285,7 @@ Expected: existing native forwarding guarantees remain intact.
 - Modify: `src/app/lifecycle.py`
 - Test: `tests/keyboard/test_focus_commands.py`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Cover:
 
@@ -252,7 +295,7 @@ Cover:
 - `focused_run` fallback emits a structured unresolved-target error.
 - snapshot contains focus by device.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run:
 
@@ -262,11 +305,11 @@ pytest tests/keyboard/test_focus_commands.py -q
 
 Expected: command handlers and snapshot focus fields are missing.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Keep resolution pure and testable. Do not call provider adapters from target resolution.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run:
 
@@ -286,7 +329,7 @@ Expected: all selected tests pass.
 - Test: `tests/keyboard/test_binding_resolver.py`
 - Test: `tests/keyboard/test_virtual_input_actions.py`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Cover:
 
@@ -297,7 +340,7 @@ Cover:
 - release does not trigger a press binding.
 - no match returns an empty action list, not an error.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run:
 
@@ -307,11 +350,11 @@ pytest tests/keyboard/test_binding_resolver.py tests/keyboard/test_virtual_input
 
 Expected: missing modules/classes.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Use dataclasses for input events and resolved actions. The resolver should not dispatch commands itself. `action_commands.py` converts resolved actions into `CommandEnvelope` with source kind `device-transport`.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run:
 
@@ -332,7 +375,7 @@ Expected: all selected tests pass.
 - Modify: `src/devices/device_transport.py`
 - Test: `tests/keyboard/test_profile_keymap_lighting.py`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Cover:
 
@@ -344,7 +387,7 @@ Cover:
 - profile JSON round trip preserves lighting and key bindings.
 - compiler output includes offline HID/layer/macro/lighting subset and marks agent actions as service-required.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run:
 
@@ -354,11 +397,11 @@ pytest tests/keyboard/test_profile_keymap_lighting.py -q
 
 Expected: lighting/compiler/profile service modules missing.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Keep profile storage semi-structured for now, but validation and compiled output must be structured. Do not add UI-only concepts.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run:
 
@@ -377,7 +420,7 @@ Expected: profile persistence round trips remain green.
 - Modify: `src/app/lifecycle.py`
 - Test: `tests/persistence/test_active_config_import_export.py`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Cover:
 
@@ -387,7 +430,7 @@ Cover:
 - import with `rename_on_conflict` creates a new profile ID.
 - unsupported schema version is rejected.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run:
 
@@ -397,11 +440,11 @@ pytest tests/persistence/test_active_config_import_export.py -q
 
 Expected: settings/import-export APIs missing.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Use a small key/value settings repository for `active_profile_id`, active tool by device, and global config flags. Keep migrations forward-only.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run:
 
@@ -424,7 +467,7 @@ Expected: all selected persistence tests pass.
 - Test: `tests/device/test_virtual_device_commands.py`
 - Test: `tests/device/test_projection_runtime.py`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Cover:
 
@@ -434,7 +477,7 @@ Cover:
 - device connect sends snapshot frames in order: snapshot begin, slot map, profile summary, focus, notifications/permissions, snapshot end.
 - permission event projects an incremental `PERMISSION_REQUEST_PUSH`.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run:
 
@@ -444,11 +487,11 @@ pytest tests/device/test_virtual_input_gateway.py tests/device/test_virtual_devi
 
 Expected: virtual ingress/projection runtime modules missing.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 The device session may depend on `CommandRouter`, `DeviceManager`, `DeviceProtocolCodec`, and keyboard action services. It must not depend on `bridge.server` or `AgentProxy`.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run:
 
@@ -469,7 +512,7 @@ Expected: all selected device tests pass.
 - Modify: `src/core/state_store.py`
 - Test: `tests/keyboard/test_tool_switch.py`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Cover:
 
@@ -479,7 +522,7 @@ Cover:
 - active tool appears in snapshot and emits `keyboard.tool.changed`.
 - virtual input can trigger tool switch through a binding.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run:
 
@@ -489,7 +532,7 @@ pytest tests/keyboard/test_tool_switch.py -q
 
 Expected: command and state missing.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Define initial tools as backend control modes, not UI widgets:
 
@@ -499,7 +542,7 @@ Define initial tools as backend control modes, not UI widgets:
 - `profile_config`
 - `device_status`
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run:
 
@@ -518,7 +561,7 @@ Expected: all selected tests pass.
 - Modify: `src/keyboard/compiler.py`
 - Test: `tests/device/test_config_sync.py`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Cover:
 
@@ -528,7 +571,7 @@ Cover:
 - simulator commit result is observable.
 - reject does not change active synced profile marker.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run:
 
@@ -538,11 +581,11 @@ pytest tests/device/test_config_sync.py -q
 
 Expected: config sync module missing.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Keep sync transport-independent. The simulator can provide deterministic accept/reject behavior for tests.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run:
 
@@ -559,7 +602,7 @@ Expected: all selected tests pass.
 - Modify: `scripts/local-api-smoke.py`
 - Test: `tests/bridge/test_virtual_input_local_api.py`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Cover:
 
@@ -568,7 +611,7 @@ Cover:
 - smoke scenario `virtual-input` can send a virtual key sequence through Local API or simulator adapter.
 - snapshot after virtual actions includes active profile, focus, active tool, sessions, permissions, and device state.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run:
 
@@ -578,11 +621,11 @@ pytest tests/bridge/test_virtual_input_local_api.py -q
 
 Expected: smoke scenario and structured handlers missing.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Add a backend-only smoke path. Do not add formal frontend or desktop shell.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run:
 
@@ -600,7 +643,7 @@ Expected: all selected bridge tests pass.
 - Test: `tests/diagnostics/test_backend_diagnostics.py`
 - Test: `tests/architecture/test_import_boundaries.py`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Cover:
 
@@ -609,7 +652,7 @@ Cover:
 - `src/devices` and `src/keyboard` do not import `bridge` or `AgentProxy`.
 - docs and runtime config contain no machine-specific absolute path in new files.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run:
 
@@ -619,11 +662,11 @@ pytest tests/diagnostics/test_backend_diagnostics.py tests/architecture/test_imp
 
 Expected: diagnostics/import-boundary tests missing or failing.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Keep diagnostics read-only. Do not start external CLIs from diagnostics tests.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run:
 
@@ -635,32 +678,51 @@ Expected: all selected tests pass.
 
 ## Final Integration
 
-- [ ] Run targeted suites from every worker.
-- [ ] Run full test suite:
+- [x] Run targeted suites from every worker.
+- [x] Run full test suite:
 
 ```text
 pytest tests -q
 ```
 
-- [ ] Run virtual input smoke with fake adapter.
-- [ ] Run real Codex approval smoke regression:
+Result recorded by final implementation verification:
+
+```text
+265 passed, 1 skipped in 3.49s
+```
+
+- [x] Run final focused backend virtual-input checks.
+
+```text
+pytest tests/architecture/test_import_boundaries.py -q -> 4 passed
+pytest tests/bridge/test_virtual_input_local_api.py -q -> 8 passed
+```
+
+- [x] Verify virtual input smoke scenario is exposed.
+
+```text
+scripts/local-api-smoke.py help includes --scenario {basic,permission,real-agent,approval-real,virtual-input}
+```
+
+- [ ] Real Codex approval smoke regression was not rerun in the final
+  backend virtual-input verification pass:
 
 ```text
 python scripts/local-api-smoke.py --scenario approval-real --agent codex --decision approve --require-forwarded --timeout 120 --json-log
 ```
 
-- [ ] Run real Codex denial smoke regression:
+- [ ] Real Codex denial smoke regression was not rerun in the final backend
+  virtual-input verification pass:
 
 ```text
 python scripts/local-api-smoke.py --scenario approval-real --agent codex --decision deny --require-forwarded --timeout 120 --json-log
 ```
 
-- [ ] Run Claude approval regression if local Claude credentials are available.
-- [ ] Verify no new hardcoded machine paths:
+- [ ] Claude approval regression was not rerun in the final backend
+  virtual-input verification pass.
+- [x] Verify no new hardcoded machine paths in architecture and plan docs:
 
-```text
-rg -n "[A-Za-z]:\\\\" src tests docs scripts
-```
+Result: no machine-specific path matches in architecture and plan docs.
 
 - [ ] Request final spec compliance review.
 - [ ] Request final code quality review.

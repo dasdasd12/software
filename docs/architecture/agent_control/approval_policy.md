@@ -242,7 +242,7 @@ Current V1 provider paths:
 
 ```text
 Codex:
-  codex app-server --listen stdio://
+  codex app-server with stdio listen transport
   item/commandExecution/requestApproval -> accept | decline
   item/fileChange/requestApproval       -> accept | decline
   item/permissions/requestApproval      -> accept | decline

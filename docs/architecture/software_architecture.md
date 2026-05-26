@@ -42,16 +42,30 @@ Implemented backend capabilities:
   and capability gates.
 - Structured command/event/snapshot path using core envelopes, router, state
   store, and event bus.
+- Async command routing and structured agent lifecycle commands for
+  launch/resume, interrupt, close, and permission response.
+- Unified permission command handling with capability and policy gates.
 - Legacy Local API compatibility for `agent_launch`, `permission_response`,
   `interrupt`, and `list_sessions`.
 - SQLite app store with repositories and migrations for product/audit metadata.
-- Device simulator backend with capability negotiation, slot mapping, projected
-  snapshots, focus state, notification queue, and profile validation.
+- Per-device focus, symbolic target resolution, active profile, active tool, and
+  virtual-input action dispatch.
+- Profile/keymap/lighting validation, profile compilation, active
+  profile/import-export persistence, and device config sync.
+- Device simulator backend with virtual input ingress, capability negotiation,
+  slot mapping, projected snapshots, focus state, active tool state,
+  notification queue, config sync, and profile validation.
+- Diagnostics, redaction, import-boundary, and path guard coverage.
 - Claude Code native approval forwarding through the Python Agent SDK.
-- Codex native approval forwarding through `codex app-server --listen stdio://`
-  JSON-RPC.
-- Real Codex approval and denial smoke tests with `permission_ack.forwarded=true`
-  evidence.
+- Codex native approval forwarding through `codex app-server` JSON-RPC over the
+  stdio listen transport.
+- Earlier real Codex approval and denial smoke tests produced
+  `permission_ack.forwarded=true` evidence. The final backend virtual-input
+  verification pass did not rerun external real Codex or Claude CLI smoke.
+
+Final backend virtual-input verification recorded `pytest tests -q` as
+`265 passed, 1 skipped in 3.49s`, with focused import-boundary and virtual-input
+Local API checks passing.
 
 Deferred from V1:
 

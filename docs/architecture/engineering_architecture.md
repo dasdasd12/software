@@ -81,8 +81,13 @@ src/agents/
 
 src/devices/
   manager.py           simulated/device transport manager
+  virtual_input.py     simulator input frame decoding
+  command_adapter.py   device input to command adapter
+  session.py           simulated transport session loop
   protocol_codec.py    device message codec
   projection.py        core state to device snapshot projection
+  projection_runtime.py snapshot/event projection runtime
+  config_sync.py       backend profile/config sync
   slot_mapper.py       compact slot mapping
   transports/          simulator and future physical transports
 
@@ -94,6 +99,19 @@ src/device/
 The current WebSocket device simulator remains useful as a test harness, but it
 should be treated as a PC-side simulation transport, not the real hardware
 transport.
+
+Current backend virtual-input core status:
+
+- The implemented path is backend-only and uses simulator/virtual input for
+  device interaction.
+- Virtual input frames are decoded into keyboard input events, resolved through
+  active profile bindings, converted to command envelopes, and dispatched
+  through the async command router.
+- Device projection sends compact state back to simulated devices from the same
+  Local Core state used by the Local API.
+- Device config sync is transport-independent and currently verified against
+  simulator behavior.
+- Physical USB HID, CDC, BLE, and 2.4G transports remain future adapter work.
 
 ## Device Access Layer
 
@@ -143,6 +161,9 @@ Current V1 adapter status:
 - Claude command/tool approval uses the Python Agent SDK permission callback.
 - Legacy stream-json parsing remains for compatibility but is not the dynamic
   approval path.
+- `permission_ack.forwarded=true` remains reserved for provider-native delivery.
+  The final backend virtual-input verification pass did not rerun external real
+  Codex or Claude CLI approval smoke.
 
 ## Local UI API
 
