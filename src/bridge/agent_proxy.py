@@ -157,7 +157,8 @@ class AgentProxy:
             )
         except Exception as exc:
             self._sm.update_state(session_id, AgentState.FAILED)
-            raise RuntimeError(f"Failed to start {self.agent_type.value}: {exc}")
+            detail = str(exc) or exc.__class__.__name__
+            raise RuntimeError(f"Failed to start {self.agent_type.value}: {detail}") from exc
 
         self._processes[session_id] = proc
         self._sm.set_process_pid(session_id, proc.pid)

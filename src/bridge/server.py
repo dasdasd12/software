@@ -1809,6 +1809,17 @@ class LocalCoreServiceMVP:
 #  CLI entrypoint
 # ------------------------------------------------------------------ #
 
+def _configure_windows_event_loop_policy() -> None:
+    if sys.platform != "win32":
+        return
+    policy_cls = getattr(asyncio, "WindowsProactorEventLoopPolicy", None)
+    if policy_cls is None:
+        return
+    if isinstance(asyncio.get_event_loop_policy(), policy_cls):
+        return
+    asyncio.set_event_loop_policy(policy_cls())
+
+
 def main():
     parser = argparse.ArgumentParser(description="AI Keyboard Local Core Service MVP")
     parser.add_argument("--config", "-c", default="config.yaml", help="Path to YAML config file")
@@ -1830,6 +1841,7 @@ def main():
     ))
 
     server = LocalCoreServiceMVP(config)
+    _configure_windows_event_loop_policy()
     asyncio.run(server.start())
 
 

@@ -78,6 +78,22 @@ def test_launch_creates_process_with_stdin_pipe_and_workspace_cwd(monkeypatch, t
     assert calls[0][1]["cwd"] == str(workspace.resolve())
 
 
+def test_launch_failure_includes_exception_class_when_message_is_empty(monkeypatch):
+    async def fake_create_subprocess_exec(*cmd, **kwargs):
+        raise NotImplementedError()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    proxy = make_proxy(AgentType.CODEX)
+    monkeypatch.setattr(proxy, "is_available", lambda: True)
+    session = proxy._sm.create(AgentType.CODEX)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        asyncio.run(proxy.launch(session.session_id, "hello"))
+
+    assert str(exc_info.value) == "Failed to start codex: NotImplementedError"
+    assert proxy._sm.get(session.session_id).state == AgentState.FAILED
+
+
 def test_codex_app_server_command_uses_stdio_listener():
     proxy = AgentProxy(
         agent_type=AgentType.CODEX,
