@@ -100,12 +100,12 @@ def build_virtual_profile(
                 "K_APPROVE": {
                     "type": "agent.permission.respond",
                     "target": "focused_permission",
-                    "decision": "approve",
+                    "approved": True,
                 },
                 "K_DENY": {
                     "type": "agent.permission.respond",
                     "target": "focused_permission",
-                    "decision": "deny",
+                    "approved": False,
                 },
                 "K_INTERRUPT": {
                     "type": "agent.run.interrupt",

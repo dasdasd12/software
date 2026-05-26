@@ -92,10 +92,16 @@ def test_virtual_profile_contains_expected_command_action_bindings():
         "context": "claude prompt",
         "workspace": "C:/work",
     }
-    assert bindings["K_APPROVE"]["target"] == "focused_permission"
-    assert bindings["K_APPROVE"]["decision"] == "approve"
-    assert bindings["K_DENY"]["target"] == "focused_permission"
-    assert bindings["K_DENY"]["decision"] == "deny"
+    assert bindings["K_APPROVE"] == {
+        "type": "agent.permission.respond",
+        "target": "focused_permission",
+        "approved": True,
+    }
+    assert bindings["K_DENY"] == {
+        "type": "agent.permission.respond",
+        "target": "focused_permission",
+        "approved": False,
+    }
     assert bindings["K_INTERRUPT"]["type"] == "agent.run.interrupt"
     assert bindings["K_CLOSE"]["type"] == "agent.session.close"
     assert bindings["K_FOCUS_NEXT"]["type"] == "agent.focus.next_session"
