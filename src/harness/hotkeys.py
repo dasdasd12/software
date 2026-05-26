@@ -2,11 +2,14 @@
 
 import argparse
 import asyncio
+from contextlib import suppress
 import json
 import sys
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
+
+from keyboard.layouts import HOTKEY_HARNESS_LAYOUT_ID
 
 
 DEFAULT_URL = "ws://127.0.0.1:8765"
@@ -94,6 +97,7 @@ def build_virtual_profile(
         "name": "Local Hotkey Harness",
         "target_device_family": "simulated",
         "keymap": {
+            "physical_layout_id": HOTKEY_HARNESS_LAYOUT_ID,
             "bindings": {
                 "K_CODEX_LAUNCH": codex_payload,
                 "K_CLAUDE_LAUNCH": claude_payload,
@@ -196,6 +200,56 @@ class PynputHotkeyEventSource:
         return callback
 
 
+class QueuedHotkeySender:
+    """Serializes global hotkey callbacks onto one websocket send/recv loop."""
+
+    def __init__(self, harness: "HotkeyHarness", ws: Any, *, loop: Optional[asyncio.AbstractEventLoop] = None) -> None:
+        self.harness = harness
+        self.ws = ws
+        self._loop = loop
+        self._queue: asyncio.Queue[str] = asyncio.Queue()
+        self._task: Optional[asyncio.Task] = None
+
+    def start(self) -> "QueuedHotkeySender":
+        if self._task is None:
+            self._loop = self._loop or asyncio.get_running_loop()
+            self._task = self._loop.create_task(self._run())
+        return self
+
+    def enqueue(self, key_id: str) -> None:
+        if self._loop is None:
+            raise RuntimeError("queued hotkey sender must be started before enqueue")
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if running_loop is self._loop:
+            self._queue.put_nowait(key_id)
+            return
+        self._loop.call_soon_threadsafe(self._queue.put_nowait, key_id)
+
+    async def drain(self) -> None:
+        await self._queue.join()
+
+    async def stop(self) -> None:
+        if self._task is None:
+            return
+        self._task.cancel()
+        with suppress(asyncio.CancelledError):
+            await self._task
+        self._task = None
+
+    async def _run(self) -> None:
+        while True:
+            key_id = await self._queue.get()
+            try:
+                await self.harness.send_key_id(self.ws, key_id)
+            except Exception as exc:
+                self.harness.report_worker_exception(key_id, exc)
+            finally:
+                self._queue.task_done()
+
+
 class HotkeyHarness:
     def __init__(self, config: HotkeyHarnessConfig) -> None:
         self.config = config
@@ -275,10 +329,10 @@ class HotkeyHarness:
 
         async with websockets.connect(self.config.url) as ws:
             await self.configure(ws)
-            loop = asyncio.get_running_loop()
+            sender = QueuedHotkeySender(self, ws).start()
 
             def on_key(key_id: str) -> None:
-                asyncio.run_coroutine_threadsafe(self.send_key_id(ws, key_id), loop)
+                sender.enqueue(key_id)
 
             source = PynputHotkeyEventSource(on_key)
             source.start()
@@ -286,6 +340,7 @@ class HotkeyHarness:
                 await asyncio.Future()
             finally:
                 source.stop()
+                await sender.stop()
 
     def _next_sequence(self) -> int:
         self._sequence += 1
@@ -315,6 +370,21 @@ class HotkeyHarness:
                 "payload": payload,
                 "timestamp": now_ts(),
             }, ensure_ascii=False))
+
+    def report_worker_exception(self, key_id: str, exc: Exception) -> None:
+        message = f"hotkey send failed for {key_id}: {exc}"
+        if self.config.json_log:
+            print(json.dumps({
+                "direction": "ERROR",
+                "payload": {
+                    "type": "hotkey_send_error",
+                    "key_id": key_id,
+                    "message": str(exc),
+                },
+                "timestamp": now_ts(),
+            }, ensure_ascii=False), file=sys.stderr)
+            return
+        print(message, file=sys.stderr)
 
     @staticmethod
     def _created_session_id(payload: Mapping[str, Any]) -> Optional[str]:
