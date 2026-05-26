@@ -111,10 +111,41 @@ class LocalApiSmokeClient:
         await ws.send(json.dumps(payload, ensure_ascii=False))
 
     async def recv_json(self, ws) -> Dict[str, Any]:
-        raw = await asyncio.wait_for(ws.recv(), timeout=self.timeout)
+        return await self.recv_json_with_timeout(ws, self.timeout)
+
+    async def recv_json_with_timeout(self, ws, timeout: float) -> Dict[str, Any]:
+        raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
         payload = json.loads(raw)
         self.log("RECV", payload)
         return payload
+
+    @staticmethod
+    def _payload_summary(payload: Dict[str, Any]) -> str:
+        if not payload:
+            return "none"
+        summary = {}
+        for key in ("type", "session_id", "request_id", "agent", "state", "code", "message"):
+            value = payload.get(key)
+            if isinstance(value, str) and len(value) > 160:
+                value = value[:160] + "...(truncated)"
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                summary[key] = value
+        return json.dumps(summary, ensure_ascii=False)
+
+    def _approval_timeout_error(
+        self,
+        stage: str,
+        session_id: str,
+        last_payload: Dict[str, Any],
+    ) -> RuntimeError:
+        session_text = session_id or "<unknown>"
+        last_type = last_payload.get("type") if last_payload else "none"
+        return RuntimeError(
+            f"Timed out waiting for {stage}; "
+            f"session_id={session_text}; "
+            f"last_payload_type={last_type}; "
+            f"last_payload={self._payload_summary(last_payload)}"
+        )
 
     async def wait_for_type(self, ws, expected_type: str) -> Dict[str, Any]:
         while True:
@@ -130,8 +161,29 @@ class LocalApiSmokeClient:
         expected_type: str,
         session_id: str,
     ) -> Dict[str, Any]:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.timeout
+        last_payload = None
+
         while True:
-            payload = await self.recv_json(ws)
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                last_type = last_payload.get("type") if last_payload else None
+                raise TimeoutError(
+                    f"Timed out waiting for {expected_type}; "
+                    f"session_id={session_id}; "
+                    f"last_payload_type={last_type}"
+                )
+            try:
+                payload = await self.recv_json_with_timeout(ws, remaining)
+            except asyncio.TimeoutError:
+                last_type = last_payload.get("type") if last_payload else None
+                raise TimeoutError(
+                    f"Timed out waiting for {expected_type}; "
+                    f"session_id={session_id}; "
+                    f"last_payload_type={last_type}"
+                )
+            last_payload = payload
             if payload.get("type") == "error":
                 raise RuntimeError(f"Local API error while waiting for {expected_type}: {payload}")
             if payload.get("session_id") == session_id and payload.get("type") in {"task_failed", "error"}:
@@ -205,12 +257,43 @@ class LocalApiSmokeClient:
             await self.hello(ws)
             await self.send(ws, self.agent_launch_payload(agent, context))
 
-            launch_ack = await self.wait_for_type(ws, "task_update")
+            deadline = time.monotonic() + self.timeout
+            session_id = None
+            last_payload = None
+
+            async def recv_for_stage(stage: str) -> Dict[str, Any]:
+                nonlocal last_payload
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise self._approval_timeout_error(stage, session_id, last_payload)
+                try:
+                    payload = await self.recv_json_with_timeout(ws, remaining)
+                except asyncio.TimeoutError:
+                    raise self._approval_timeout_error(stage, session_id, last_payload)
+                last_payload = payload
+                return payload
+
+            async def wait_for_session_type(expected_type: str, stage: str) -> Dict[str, Any]:
+                while True:
+                    payload = await recv_for_stage(stage)
+                    if payload.get("type") == "error":
+                        raise RuntimeError(f"Local API error while waiting for {expected_type}: {payload}")
+                    if payload.get("session_id") == session_id and payload.get("type") in {"task_failed", "error"}:
+                        raise RuntimeError(f"Session failed while waiting for {expected_type}: {payload}")
+                    if payload.get("type") == expected_type and payload.get("session_id") == session_id:
+                        return payload
+
+            while True:
+                launch_ack = await recv_for_stage("launch_ack")
+                if launch_ack.get("type") == "error":
+                    raise RuntimeError(f"Local API error while waiting for launch_ack: {launch_ack}")
+                if launch_ack.get("type") == "task_update":
+                    break
             session_id = launch_ack.get("session_id")
             if not isinstance(session_id, str) or not session_id:
                 raise RuntimeError(f"Launch ack did not include session_id: {launch_ack}")
 
-            permission_request = await self.wait_for_type_for_session(ws, "permission_request", session_id)
+            permission_request = await wait_for_session_type("permission_request", "permission_request")
             request_id = permission_request["request_id"]
             if not wait_for_hotkey_approval:
                 await self.send(ws, {
@@ -221,7 +304,7 @@ class LocalApiSmokeClient:
                     "timestamp": now_ts(),
                 })
 
-            ack = await self.wait_for_type_for_session(ws, "permission_ack", session_id)
+            ack = await wait_for_session_type("permission_ack", "permission_ack")
             if ack.get("request_id") != request_id or ack.get("session_id") != session_id:
                 raise RuntimeError(f"Permission ack did not match request/session: {ack}")
             if require_forwarded and not ack.get("forwarded"):
@@ -241,7 +324,7 @@ class LocalApiSmokeClient:
                     raise RuntimeError(f"Permission ack did not include Codex app-server evidence: {ack}")
 
             while True:
-                payload = await self.recv_json(ws)
+                payload = await recv_for_stage("task_completed/task_failed")
                 payload_type = payload.get("type")
                 if payload.get("session_id") != session_id:
                     continue
@@ -445,6 +528,13 @@ async def ensure_local_core_service(
 def stop_spawned_service(process: subprocess.Popen) -> None:
     if process is None or process.poll() is not None:
         return
+    if sys.platform.startswith("win"):
+        try:
+            subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], check=True)
+            process.wait(timeout=5)
+            return
+        except (OSError, subprocess.SubprocessError):
+            pass
     process.terminate()
     try:
         process.wait(timeout=5)
