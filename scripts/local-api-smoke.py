@@ -437,13 +437,8 @@ async def ensure_local_core_service(
         if not client.json_log:
             print(f"Started Local Core service with config {config}")
         return process
-    except Exception:
-        process.terminate()
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5)
+    except BaseException:
+        stop_spawned_service(process)
         raise
 
 

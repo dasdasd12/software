@@ -193,3 +193,51 @@ def test_auto_start_terminates_spawned_service_when_startup_check_fails(monkeypa
     assert checks == [1.0, 3.0]
     assert process.terminated is True
     assert process.killed is False
+
+
+def test_auto_start_terminates_spawned_service_when_startup_wait_aborts(monkeypatch):
+    module = load_smoke_module()
+
+    class StartupAbort(BaseException):
+        pass
+
+    class FakeProcess:
+        def __init__(self):
+            self.terminated = False
+            self.killed = False
+
+        def terminate(self):
+            self.terminated = True
+
+        def kill(self):
+            self.killed = True
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return None
+
+    process = FakeProcess()
+    checks = []
+
+    async def fake_wait_for_service_hello(client, timeout):
+        checks.append(timeout)
+        if len(checks) == 1:
+            raise RuntimeError("not already running")
+        raise StartupAbort("startup wait aborted")
+
+    monkeypatch.setattr(module, "wait_for_service_hello", fake_wait_for_service_hello)
+    monkeypatch.setattr(module, "start_local_core_service", lambda config, workspace: process)
+    client = make_client(module)
+
+    try:
+        asyncio.run(module.ensure_local_core_service(client, True, "config.yaml", "workspace", 3.0))
+    except StartupAbort as exc:
+        assert "startup wait aborted" in str(exc)
+    else:
+        raise AssertionError("startup abort did not propagate")
+
+    assert checks == [1.0, 3.0]
+    assert process.terminated is True
+    assert process.killed is False
