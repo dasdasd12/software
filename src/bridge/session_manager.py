@@ -16,6 +16,12 @@ from threading import Lock
 from typing import Dict, List, Optional
 
 
+DEFAULT_LAUNCH_SURFACE = "managed_headless"
+DEFAULT_CONTROL_MODE = "managed_native"
+VALID_LAUNCH_SURFACES = {"managed_headless", "foreground_cli"}
+VALID_CONTROL_MODES = {"managed_native"}
+
+
 class AgentType(Enum):
     CLAUDE = "claude"
     CODEX = "codex"
@@ -48,6 +54,9 @@ class Session:
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     process_pid: Optional[int] = None
+    launch_surface: str = DEFAULT_LAUNCH_SURFACE
+    control_mode: str = DEFAULT_CONTROL_MODE
+    frontend_pid: Optional[int] = None
     # Transient: not persisted
     last_delta: str = ""
 
@@ -58,6 +67,9 @@ class Session:
             "state": self.state.value,
             "created_at": int(self.created_at),
             "updated_at": int(self.updated_at),
+            "launch_surface": self.launch_surface,
+            "control_mode": self.control_mode,
+            "frontend_pid": self.frontend_pid,
         }
 
     @staticmethod
@@ -90,12 +102,27 @@ class Session:
         except (TypeError, ValueError) as exc:
             raise ValueError("created_at and updated_at must be numeric") from exc
 
+        launch_surface = data.get("launch_surface", DEFAULT_LAUNCH_SURFACE)
+        if launch_surface not in VALID_LAUNCH_SURFACES:
+            launch_surface = DEFAULT_LAUNCH_SURFACE
+
+        control_mode = data.get("control_mode", DEFAULT_CONTROL_MODE)
+        if control_mode not in VALID_CONTROL_MODES:
+            control_mode = DEFAULT_CONTROL_MODE
+
+        frontend_pid = data.get("frontend_pid")
+        if type(frontend_pid) is not int:
+            frontend_pid = None
+
         return Session(
             session_id=session_id,
             agent=agent,
             state=state,
             created_at=created_at,
             updated_at=updated_at,
+            launch_surface=launch_surface,
+            control_mode=control_mode,
+            frontend_pid=frontend_pid,
         )
 
 

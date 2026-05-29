@@ -39,6 +39,7 @@ AGENT_ACTION_TARGETS = {
     "agent.run.interrupt": {"focused_run", "focused_session"},
     "agent.session.close": {"focused_run", "focused_session"},
     "agent.session.launch_or_resume": SUPPORTED_AGENT_TARGETS - {"focused_permission"},
+    "agent.cli.launch_foreground": SUPPORTED_AGENT_TARGETS - {"focused_permission"},
     "agent.focus.next_session": {None},
 }
 SUPPORTED_TOOL_ACTIONS = {

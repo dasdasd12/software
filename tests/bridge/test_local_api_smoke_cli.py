@@ -102,6 +102,7 @@ def test_local_api_smoke_help_exposes_loopback_flags():
     assert "--config" in result.stdout
     assert "--wait-for-hotkey-approval" in result.stdout
     assert "--service-start-timeout" in result.stdout
+    assert "foreground-cli" in result.stdout
 
 
 def test_real_agent_launch_payload_includes_workspace(monkeypatch, tmpdir):
@@ -163,6 +164,37 @@ def test_approval_hotkey_mode_waits_for_external_ack_without_sending_response(mo
     assert "permission_response" not in sent_types
     launch = next(message for message in ws.sent if message["type"] == "agent_launch")
     assert launch["workspace"] == workspace
+
+
+def test_foreground_cli_scenario_sends_structured_cli_launch(monkeypatch, tmpdir):
+    module = load_smoke_module()
+    workspace = str(tmpdir)
+    ws = FakeWebSocket([
+        {"type": "hello_ack"},
+        {
+            "type": "event",
+            "event": {
+                "type": "agent.cli.launched",
+                "payload": {
+                    "agent": "claude",
+                    "workspace": workspace,
+                    "frontend_pid": 4321,
+                    "launch_surface": "foreground_cli",
+                    "control_mode": "managed_native",
+                },
+            },
+        },
+    ])
+    monkeypatch.setattr(module.websockets, "connect", lambda url: FakeConnect(ws))
+
+    asyncio.run(make_client(module, workspace=workspace).run_foreground_cli("claude"))
+
+    launch = next(message for message in ws.sent if message["type"] == "command")
+    assert launch["command"]["type"] == "agent.cli.launch_foreground"
+    assert launch["command"]["payload"] == {
+        "agent": "claude",
+        "workspace": workspace,
+    }
 
 
 def test_approval_real_deadline_is_not_extended_by_repeated_task_updates(monkeypatch):

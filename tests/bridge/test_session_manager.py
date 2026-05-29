@@ -8,7 +8,7 @@ import sys
 BRIDGE_DIR = Path(__file__).resolve().parents[2] / "src" / "bridge"
 sys.path.insert(0, str(BRIDGE_DIR))
 
-from session_manager import AgentState, AgentType, SessionManager  # noqa: E402
+from session_manager import AgentState, AgentType, Session, SessionManager  # noqa: E402
 
 
 def test_create_returns_without_deadlock():
@@ -73,7 +73,67 @@ def test_create_persists_readable_session_json(tmpdir):
     data = json.loads(path.read_text(encoding="utf-8"))
 
     assert data == [session.to_dict()]
-    assert set(data[0].keys()) == {"session_id", "agent", "state", "created_at", "updated_at"}
+    assert set(data[0].keys()) == {
+        "session_id",
+        "agent",
+        "state",
+        "created_at",
+        "updated_at",
+        "launch_surface",
+        "control_mode",
+        "frontend_pid",
+    }
+
+
+def test_session_metadata_round_trips_without_breaking_old_payloads():
+    session = Session(
+        session_id="sess_meta",
+        agent=AgentType.CODEX,
+        launch_surface="foreground_cli",
+        control_mode="managed_native",
+        frontend_pid=1234,
+    )
+
+    payload = session.to_dict()
+
+    assert payload["launch_surface"] == "foreground_cli"
+    assert payload["control_mode"] == "managed_native"
+    assert payload["frontend_pid"] == 1234
+    restored = Session.from_dict(payload)
+    assert restored.launch_surface == "foreground_cli"
+    assert restored.control_mode == "managed_native"
+    assert restored.frontend_pid == 1234
+
+
+def test_old_session_payload_defaults_to_managed_headless_metadata():
+    restored = Session.from_dict({
+        "session_id": "sess_old",
+        "agent": "claude",
+        "state": "IDLE",
+        "created_at": 1,
+        "updated_at": 1,
+    })
+
+    assert restored.launch_surface == "managed_headless"
+    assert restored.control_mode == "managed_native"
+    assert restored.frontend_pid is None
+
+
+def test_invalid_session_metadata_falls_back_to_defaults():
+    restored = Session.from_dict({
+        "session_id": "sess_invalid_meta",
+        "agent": "codex",
+        "state": "IDLE",
+        "created_at": 1,
+        "updated_at": 1,
+        "launch_surface": "external_scan",
+        "control_mode": "manual",
+        "frontend_pid": "not-an-int",
+    })
+
+    assert restored.launch_surface == "managed_headless"
+    assert restored.control_mode == "managed_native"
+    assert restored.frontend_pid is None
 
 
 def test_new_manager_restores_persisted_session_metadata(tmpdir):

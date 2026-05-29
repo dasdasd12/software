@@ -29,6 +29,28 @@ def make_proxy(agent_type, args=None, workspace=None):
     )
 
 
+def make_codex_app_server_proxy(workspace=None):
+    return AgentProxy(
+        agent_type=AgentType.CODEX,
+        session_manager=SessionManager(),
+        unifier=ProtocolUnifier(),
+        executable="codex.exe",
+        mode="app_server",
+        workspace=workspace,
+    )
+
+
+def make_claude_sdk_proxy(workspace=None):
+    return AgentProxy(
+        agent_type=AgentType.CLAUDE,
+        session_manager=SessionManager(),
+        unifier=ProtocolUnifier(),
+        executable="claude.exe",
+        mode="agent_sdk",
+        workspace=workspace,
+    )
+
+
 def test_claude_stream_json_command_includes_verbose():
     proxy = make_proxy(AgentType.CLAUDE)
 
@@ -92,16 +114,11 @@ def test_launch_failure_includes_exception_class_when_message_is_empty(monkeypat
 
     assert str(exc_info.value) == "Failed to start codex: NotImplementedError"
     assert proxy._sm.get(session.session_id).state == AgentState.FAILED
+    assert session.session_id not in proxy._session_workspaces
 
 
 def test_codex_app_server_command_uses_stdio_listener():
-    proxy = AgentProxy(
-        agent_type=AgentType.CODEX,
-        session_manager=SessionManager(),
-        unifier=ProtocolUnifier(),
-        executable="codex.exe",
-        mode="app_server",
-    )
+    proxy = make_codex_app_server_proxy()
 
     cmd = proxy._build_codex_cmd("sess_1", "hello")
 
@@ -109,25 +126,13 @@ def test_codex_app_server_command_uses_stdio_listener():
 
 
 def test_codex_app_server_uses_native_permission_adapter():
-    proxy = AgentProxy(
-        agent_type=AgentType.CODEX,
-        session_manager=SessionManager(),
-        unifier=ProtocolUnifier(),
-        executable="codex.exe",
-        mode="app_server",
-    )
+    proxy = make_codex_app_server_proxy()
 
     assert isinstance(proxy._permission_adapter, CodexAppServerPermissionAdapter)
 
 
 def test_codex_app_server_status_object_maps_to_working():
-    proxy = AgentProxy(
-        agent_type=AgentType.CODEX,
-        session_manager=SessionManager(),
-        unifier=ProtocolUnifier(),
-        executable="codex.exe",
-        mode="app_server",
-    )
+    proxy = make_codex_app_server_proxy()
 
     event = proxy._codex_app_server_notification_to_event(
         "sess_1",
@@ -145,13 +150,7 @@ def test_codex_app_server_status_object_maps_to_working():
 
 
 def test_codex_app_server_retry_error_is_not_terminal_failure():
-    proxy = AgentProxy(
-        agent_type=AgentType.CODEX,
-        session_manager=SessionManager(),
-        unifier=ProtocolUnifier(),
-        executable="codex.exe",
-        mode="app_server",
-    )
+    proxy = make_codex_app_server_proxy()
 
     event = proxy._codex_app_server_notification_to_event(
         "sess_1",
@@ -168,7 +167,7 @@ def test_codex_app_server_retry_error_is_not_terminal_failure():
     assert event["state"] == AgentState.WORKING.value
 
 
-def test_codex_app_server_task_stops_after_turn_completed(monkeypatch, tmpdir):
+def test_codex_app_server_keeps_native_channel_after_turn_completed(monkeypatch, tmpdir):
     workspace = Path(str(tmpdir))
     terminated = []
     cwd_calls = []
@@ -225,20 +224,366 @@ def test_codex_app_server_task_stops_after_turn_completed(monkeypatch, tmpdir):
     session = proxy._sm.create(AgentType.CODEX)
 
     async def run():
-        task = asyncio.create_task(proxy._read_codex_app_server(session.session_id, FakeProc(), "hello"))
+        proc = FakeProc()
+        proxy._processes[session.session_id] = proc
+        task = asyncio.create_task(proxy._read_codex_app_server(session.session_id, proc, "hello"))
         proxy._read_tasks[session.session_id] = task
-        await asyncio.wait_for(task, timeout=1)
+        for _ in range(20):
+            if proxy._sm.get(session.session_id).state == AgentState.COMPLETED:
+                break
+            await asyncio.sleep(0)
+        assert proxy._sm.get(session.session_id).state == AgentState.COMPLETED
+        assert task.done() is False
+        assert session.session_id in proxy._codex_clients
+        assert proxy._codex_thread_ids[session.session_id] == "thread_1"
+        assert proxy._session_workspaces[session.session_id] == workspace.resolve()
+        assert session.session_id in proxy._read_tasks
+        assert await proxy.terminate(session.session_id) is True
 
     asyncio.run(run())
 
-    assert terminated == ["terminate"]
+    assert terminated
     assert cwd_calls == [
         ("thread", str(workspace.resolve())),
         ("turn", str(workspace.resolve())),
     ]
     assert session.session_id not in proxy._processes
     assert session.session_id not in proxy._read_tasks
-    assert proxy._sm.get(session.session_id).state == AgentState.COMPLETED
+    assert session.session_id not in proxy._session_workspaces
+    assert session.session_id not in proxy._codex_clients
+    assert session.session_id not in proxy._codex_thread_ids
+    assert proxy._sm.get(session.session_id).state == AgentState.CANCELLED
+
+
+def test_codex_app_server_send_input_after_completed_turn_reuses_thread_and_workspace(monkeypatch, tmpdir):
+    workspace = Path(str(tmpdir))
+    turns = []
+    monkeypatch.setattr(agent_proxy_module.sys, "platform", "linux")
+
+    class FakeClient:
+        def __init__(self, reader, writer, on_server_request=None, on_notification=None):
+            self._on_notification = on_notification
+
+        async def read_loop(self):
+            await asyncio.Future()
+
+        async def initialize(self):
+            return {"ok": True}
+
+        async def start_thread(self, cwd):
+            return {"thread": {"id": "thread_1"}}
+
+        async def start_turn(self, thread_id, prompt, cwd):
+            turns.append({
+                "thread_id": thread_id,
+                "prompt": prompt,
+                "cwd": cwd,
+            })
+            self._on_notification({
+                "method": "turn/completed",
+                "params": {"threadId": thread_id, "turnId": "turn_%d" % len(turns)},
+            })
+            return {"turn": {"id": "turn_%d" % len(turns)}}
+
+    class FakeProc:
+        class Stderr:
+            async def readline(self):
+                return b""
+
+        stdout = object()
+        stderr = Stderr()
+        stdin = object()
+        returncode = None
+
+        def terminate(self):
+            self.returncode = 0
+
+        async def wait(self):
+            return 0
+
+    monkeypatch.setattr(agent_proxy_module, "CodexAppServerClient", FakeClient)
+    proxy = make_codex_app_server_proxy(workspace=workspace)
+    session = proxy._sm.create(AgentType.CODEX)
+
+    async def run():
+        proc = FakeProc()
+        proxy._processes[session.session_id] = proc
+        task = asyncio.create_task(proxy._read_codex_app_server(session.session_id, proc, "hello"))
+        proxy._read_tasks[session.session_id] = task
+        for _ in range(20):
+            if proxy._sm.get(session.session_id).state == AgentState.COMPLETED:
+                break
+            await asyncio.sleep(0)
+        assert proxy._sm.get(session.session_id).state == AgentState.COMPLETED
+        accepted = await proxy.send_input(session.session_id, "next prompt")
+        for _ in range(20):
+            if len(turns) == 2:
+                break
+            await asyncio.sleep(0)
+        await proxy.terminate(session.session_id)
+        return accepted
+
+    accepted = asyncio.run(run())
+
+    assert accepted is True
+    assert turns == [
+        {
+            "thread_id": "thread_1",
+            "prompt": "hello",
+            "cwd": str(workspace.resolve()),
+        },
+        {
+            "thread_id": "thread_1",
+            "prompt": "next prompt",
+            "cwd": str(workspace.resolve()),
+        },
+    ]
+
+
+def test_codex_app_server_send_input_starts_turn_with_existing_thread(tmpdir):
+    class FakeCodexClient:
+        def __init__(self, proxy):
+            self.turns = []
+            self._proxy = proxy
+
+        async def start_turn(self, thread_id, prompt, cwd):
+            self.turns.append({
+                "thread_id": thread_id,
+                "prompt": prompt,
+                "cwd": cwd,
+            })
+            self._proxy._handle_codex_notification(session_id, {
+                "method": "turn/completed",
+                "params": {"threadId": thread_id, "turnId": "turn_1"},
+            })
+
+    workspace = Path(str(tmpdir)).resolve()
+    proxy = make_codex_app_server_proxy(workspace=workspace)
+    session = proxy._sm.create(AgentType.CODEX)
+    session_id = session.session_id
+    proxy._session_workspaces[session_id] = workspace
+    proxy._codex_thread_ids[session_id] = "thread_1"
+    proxy._codex_clients[session_id] = FakeCodexClient(proxy)
+
+    async def run():
+        proxy._codex_turn_done_events[session_id] = asyncio.Event()
+        proxy._codex_turn_done_events[session_id].set()
+        accepted = await proxy.send_input(session_id, "next prompt")
+        for _ in range(20):
+            if proxy._codex_clients[session_id].turns:
+                break
+            await asyncio.sleep(0)
+        task = proxy._codex_input_tasks.pop(session_id, None)
+        if task:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        return accepted
+
+    accepted = asyncio.run(run())
+
+    assert accepted is True
+    assert proxy._sm.get(session_id).state == AgentState.COMPLETED
+    assert proxy._codex_clients[session_id].turns == [{
+        "thread_id": "thread_1",
+        "prompt": "next prompt",
+        "cwd": str(workspace),
+    }]
+
+
+def test_codex_app_server_send_input_serializes_follow_up_turns(tmpdir):
+    class FakeCodexClient:
+        def __init__(self):
+            self.turns = []
+
+        async def start_turn(self, thread_id, prompt, cwd):
+            self.turns.append({
+                "thread_id": thread_id,
+                "prompt": prompt,
+                "cwd": cwd,
+            })
+
+    workspace = Path(str(tmpdir)).resolve()
+    proxy = make_codex_app_server_proxy(workspace=workspace)
+    session = proxy._sm.create(AgentType.CODEX)
+    session_id = session.session_id
+    client = FakeCodexClient()
+    proxy._session_workspaces[session_id] = workspace
+    proxy._codex_thread_ids[session_id] = "thread_1"
+    proxy._codex_clients[session_id] = client
+
+    async def run():
+        done_event = asyncio.Event()
+        done_event.set()
+        proxy._codex_turn_done_events[session_id] = done_event
+        first = await proxy.send_input(session_id, "first")
+        second = await proxy.send_input(session_id, "second")
+        for _ in range(20):
+            if len(client.turns) == 1:
+                break
+            await asyncio.sleep(0)
+        assert [turn["prompt"] for turn in client.turns] == ["first"]
+        done_event.set()
+        for _ in range(20):
+            if len(client.turns) == 2:
+                break
+            await asyncio.sleep(0)
+        task = proxy._codex_input_tasks.pop(session_id, None)
+        if task:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        return first, second
+
+    first, second = asyncio.run(run())
+
+    assert first is True
+    assert second is True
+    assert client.turns == [
+        {"thread_id": "thread_1", "prompt": "first", "cwd": str(workspace)},
+        {"thread_id": "thread_1", "prompt": "second", "cwd": str(workspace)},
+    ]
+
+
+def test_codex_app_server_send_input_returns_false_without_client_or_thread():
+    proxy = make_codex_app_server_proxy()
+
+    assert asyncio.run(proxy.send_input("sess_1", "next prompt")) is False
+
+    proxy._codex_clients["sess_1"] = object()
+    assert asyncio.run(proxy.send_input("sess_1", "next prompt")) is False
+
+
+def test_claude_agent_sdk_send_input_enqueues_prompt():
+    proxy = make_claude_sdk_proxy()
+
+    async def run():
+        proxy._sdk_prompt_queues["sess_1"] = asyncio.Queue()
+        accepted = await proxy.send_input("sess_1", "next prompt")
+        queued = await proxy._sdk_prompt_queues["sess_1"].get()
+        return accepted, queued
+
+    accepted, queued = asyncio.run(run())
+    assert accepted is True
+    assert queued == "next prompt"
+
+
+def test_claude_agent_sdk_send_input_returns_false_without_active_queue():
+    proxy = make_claude_sdk_proxy()
+
+    assert asyncio.run(proxy.send_input("sess_1", "next prompt")) is False
+
+
+def test_claude_agent_sdk_keeps_queue_after_result_and_runs_follow_up(monkeypatch, tmpdir):
+    workspace = Path(str(tmpdir))
+    prompts = []
+    clients = []
+
+    class ClaudeAgentOptions:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class ResultMessage:
+        is_error = False
+        result = "done"
+
+    class ClaudeSDKClient:
+        def __init__(self, options):
+            self.options = options
+            self.connected = False
+            self.disconnected = False
+            self.query_count = 0
+            clients.append(self)
+
+        async def connect(self):
+            self.connected = True
+
+        async def query(self, prompt):
+            assert self.connected is True
+            self.query_count += 1
+            prompts.append(prompt)
+
+        async def receive_response(self):
+            yield ResultMessage()
+
+        async def disconnect(self):
+            self.disconnected = True
+
+    monkeypatch.setitem(
+        sys.modules,
+        "claude_agent_sdk",
+        SimpleNamespace(ClaudeAgentOptions=ClaudeAgentOptions, ClaudeSDKClient=ClaudeSDKClient),
+    )
+    proxy = make_claude_sdk_proxy(workspace=workspace)
+    session = proxy._sm.create(AgentType.CLAUDE)
+    proxy._session_workspaces[session.session_id] = workspace.resolve()
+
+    async def run():
+        done_event = asyncio.Event()
+        task = asyncio.create_task(
+            proxy._run_claude_agent_sdk(session.session_id, "hello", done_event, workspace)
+        )
+        for _ in range(20):
+            if prompts == ["hello"] and proxy._sm.get(session.session_id).state == AgentState.COMPLETED:
+                break
+            await asyncio.sleep(0)
+        assert prompts == ["hello"]
+        assert proxy._sm.get(session.session_id).state == AgentState.COMPLETED
+        assert task.done() is False
+        assert session.session_id in proxy._sdk_prompt_queues
+        assert proxy._session_workspaces[session.session_id] == workspace.resolve()
+        accepted = await proxy.send_input(session.session_id, "next prompt")
+        for _ in range(20):
+            if prompts == ["hello", "next prompt"]:
+                break
+            await asyncio.sleep(0)
+        done_event.set()
+        await asyncio.wait_for(task, timeout=1)
+        return accepted
+
+    accepted = asyncio.run(run())
+
+    assert accepted is True
+    assert prompts == ["hello", "next prompt"]
+    assert len(clients) == 1
+    assert clients[0].query_count == 2
+    assert clients[0].disconnected is True
+
+
+def test_legacy_subprocess_send_input_writes_line_and_drains():
+    class FakeStdin:
+        def __init__(self):
+            self.writes = []
+            self.drained = False
+
+        def write(self, data):
+            self.writes.append(data)
+
+        async def drain(self):
+            self.drained = True
+
+    stdin = FakeStdin()
+    proxy = make_proxy(AgentType.CODEX)
+    proxy._processes["sess_1"] = SimpleNamespace(stdin=stdin)
+
+    accepted = asyncio.run(proxy.send_input("sess_1", "next prompt"))
+
+    assert accepted is True
+    assert stdin.writes == [b"next prompt\n"]
+    assert stdin.drained is True
+
+
+def test_legacy_subprocess_send_input_returns_false_without_stdin():
+    proxy = make_proxy(AgentType.CODEX)
+
+    assert asyncio.run(proxy.send_input("sess_1", "next prompt")) is False
+
+    proxy._processes["sess_1"] = SimpleNamespace(stdin=None)
+    assert asyncio.run(proxy.send_input("sess_1", "next prompt")) is False
 
 
 def test_unsupported_permission_forwarding_reports_evidence():
@@ -358,14 +703,26 @@ def test_claude_agent_sdk_options_use_workspace(monkeypatch, tmpdir):
         is_error = False
         result = "done"
 
-    async def query(prompt, options):
-        captured["options"] = options
-        yield ResultMessage()
+    class ClaudeSDKClient:
+        def __init__(self, options):
+            captured["options"] = options
+
+        async def connect(self):
+            return None
+
+        async def query(self, prompt):
+            return None
+
+        async def receive_response(self):
+            yield ResultMessage()
+
+        async def disconnect(self):
+            return None
 
     monkeypatch.setitem(
         sys.modules,
         "claude_agent_sdk",
-        SimpleNamespace(ClaudeAgentOptions=ClaudeAgentOptions, query=query),
+        SimpleNamespace(ClaudeAgentOptions=ClaudeAgentOptions, ClaudeSDKClient=ClaudeSDKClient),
     )
     proxy = AgentProxy(
         agent_type=AgentType.CLAUDE,
@@ -378,7 +735,16 @@ def test_claude_agent_sdk_options_use_workspace(monkeypatch, tmpdir):
     session = proxy._sm.create(AgentType.CLAUDE)
 
     async def run():
-        await proxy._run_claude_agent_sdk(session.session_id, "hello", asyncio.Event())
+        done_event = asyncio.Event()
+        task = asyncio.create_task(
+            proxy._run_claude_agent_sdk(session.session_id, "hello", done_event)
+        )
+        for _ in range(20):
+            if captured.get("options") is not None:
+                break
+            await asyncio.sleep(0)
+        done_event.set()
+        await asyncio.wait_for(task, timeout=1)
 
     asyncio.run(run())
 

@@ -132,10 +132,9 @@ def build_virtual_profile(
 
 def _launch_action(agent: str, context: str, workspace: Optional[str]) -> Dict[str, Any]:
     payload = {
-        "type": "agent.session.launch_or_resume",
+        "type": "agent.cli.launch_foreground",
         "target": "focused_agent",
         "agent": agent,
-        "context": context,
     }
     if workspace:
         payload["workspace"] = workspace

@@ -30,6 +30,7 @@ if str(SRC_DIR) not in sys.path:
 
 from agent_proxy import AgentProxy
 from agents.commands import AgentCommandService
+from agents.foreground_cli import ForegroundCliLauncher
 from agents.runtime import AgentLifecycleError, AgentRuntime
 from app import build_runtime, resolve_workspace
 from core import CommandEnvelope, CommandSource
@@ -118,6 +119,7 @@ class LocalCoreServiceMVP:
         self.runtime = build_runtime()
         self.app_store = self._init_app_store(config.get("persistence", {}))
         self._restore_sessions_from_app_store()
+        self.security = SecurityConfig.from_dict(config.get("security"))
 
         # Agent proxies
         self.agents: Dict[AgentType, AgentProxy] = {}
@@ -130,6 +132,8 @@ class LocalCoreServiceMVP:
         self.agent_commands = AgentCommandService(
             self.agent_runtime,
             permission_responder=self._handle_permission_command,
+            foreground_cli_launcher=self._build_foreground_cli_launcher(),
+            workspace_resolver=self._resolve_launch_workspace,
         )
         self.runtime.configure_agent_commands(self.agent_commands)
 
@@ -137,7 +141,6 @@ class LocalCoreServiceMVP:
         self.connected_clients: Set[asyncio.Queue] = set()
         self.connected_devices = self.connected_clients  # Backward-compatible alias.
         self.client_identities: Dict[asyncio.Queue, ClientIdentity] = {}
-        self.security = SecurityConfig.from_dict(config.get("security"))
         self.approval_policy = ApprovalPolicy(
             policy_id="default",
             mode=ApprovalMode(config.get("approval_policy", {}).get("mode", ApprovalMode.MANUAL.value)),
@@ -148,6 +151,7 @@ class LocalCoreServiceMVP:
         self._virtual_sessions: Dict[str, VirtualDeviceSession] = {}
         self._virtual_transports: Dict[str, SimulatedTransport] = {}
         self._virtual_session_owners: Dict[str, asyncio.Queue] = {}
+        self._foreground_cli_session_owners: Dict[asyncio.Queue, Set[str]] = {}
         self._server = None
         self._shutdown_event: Optional[asyncio.Event] = None
 
@@ -191,6 +195,40 @@ class LocalCoreServiceMVP:
             self.agents[agent_type] = proxy
             status = "available" if proxy.is_available() else "NOT FOUND"
             self.logger.info(f"Agent {agent_key}: {status} ({proxy._executable or 'PATH'})")
+
+    def _build_foreground_cli_launcher(self) -> ForegroundCliLauncher:
+        return ForegroundCliLauncher(
+            api_url=self._local_api_url(),
+            token=self._foreground_cli_token(),
+            python_executable=sys.executable,
+        )
+
+    def _foreground_cli_token(self) -> Optional[str]:
+        if self.security.launch_token:
+            return self.security.launch_token
+        for grant in self.security.client_grants:
+            if (
+                grant.token
+                and grant.client_kind == "desktop-ui"
+                and grant.client_id == "local-agent-cli"
+            ):
+                return grant.token
+        return None
+
+    def _local_api_url(self) -> str:
+        srv_cfg = self.cfg.get("server", {})
+        host = srv_cfg.get("host", "127.0.0.1")
+        if host in {"0.0.0.0", "::", ""}:
+            host = "127.0.0.1"
+        port = srv_cfg.get("port", 8765)
+        return f"ws://{host}:{port}"
+
+    def _resolve_launch_workspace(self, workspace: Optional[str]) -> str:
+        return str(resolve_workspace(
+            cli_workspace=workspace,
+            config_default=str(self.cfg.get("workspace", {}).get("resolved", ".")),
+            start=Path.cwd(),
+        ))
 
     def _init_app_store(self, cfg: Dict[str, Any]) -> Optional[SQLiteAppStore]:
         if not cfg.get("enabled", False):
@@ -267,6 +305,7 @@ class LocalCoreServiceMVP:
                 except asyncio.CancelledError:
                     pass
             self.connected_clients.discard(client_queue)
+            await self._cleanup_foreground_cli_sessions_for_queue(client_queue)
             await self._cleanup_virtual_devices_for_queue(client_queue)
             self.client_identities.pop(client_queue, None)
             self.logger.info(f"Local API client disconnected: {peer}")
@@ -417,6 +456,8 @@ class LocalCoreServiceMVP:
             self._broadcast_incremental_events(start_seq, exclude_event=event)
             return
 
+        self._track_foreground_cli_session(command, event, queue)
+
         if command.type == "system.snapshot.request":
             self._sync_runtime_state()
             payload = {
@@ -431,6 +472,56 @@ class LocalCoreServiceMVP:
 
         self._sync_runtime_state()
         self._broadcast_core_events(self._events_to_broadcast(start_seq, event))
+
+    def _track_foreground_cli_session(
+        self,
+        command: CommandEnvelope,
+        event: Any,
+        queue: asyncio.Queue,
+    ) -> None:
+        session_id = None
+        payload = getattr(event, "payload", {})
+        if isinstance(payload, dict):
+            value = payload.get("session_id")
+            if isinstance(value, str) and value:
+                session_id = value
+        if command.type == "agent.session.close":
+            if session_id:
+                owned = self._foreground_cli_session_owners.get(queue)
+                if owned is not None:
+                    owned.discard(session_id)
+                    if not owned:
+                        self._foreground_cli_session_owners.pop(queue, None)
+            return
+        if command.type != "agent.session.launch_or_resume":
+            return
+        if command.payload.get("launch_surface") != "foreground_cli":
+            return
+        if not session_id:
+            return
+        session = self.session_mgr.get(session_id)
+        if session is not None and getattr(session, "launch_surface", None) != "foreground_cli":
+            return
+        self._foreground_cli_session_owners.setdefault(queue, set()).add(session_id)
+
+    async def _cleanup_foreground_cli_sessions_for_queue(self, queue: asyncio.Queue) -> None:
+        session_ids = self._foreground_cli_session_owners.pop(queue, set())
+        for session_id in list(session_ids):
+            session = self.session_mgr.get(session_id)
+            if session is None or getattr(session, "launch_surface", None) != "foreground_cli":
+                continue
+            controller = self.agents.get(session.agent)
+            terminate = getattr(controller, "terminate", None)
+            if not callable(terminate):
+                continue
+            try:
+                accepted = await terminate(session_id)
+            except Exception as exc:
+                self.logger.warning(f"Foreground CLI session cleanup failed for {session_id}: {exc}")
+                continue
+            if accepted:
+                self.session_mgr.update_state(session_id, AgentState.CANCELLED)
+                self._persist_session(session_id)
 
     async def _cmd_virtual_device_configure(self, msg: Dict[str, Any], queue: asyncio.Queue) -> None:
         device_id = msg.get("device_id")
@@ -774,7 +865,7 @@ class LocalCoreServiceMVP:
         sessions = self.session_mgr.list_by_agent(agent_type) if agent_type else self.session_mgr.list_all()
         payload = {
             "type": "session_list",
-            "sessions": [s.to_dict() for s in sessions],
+            "sessions": [self._legacy_session_list_record(s) for s in sessions],
             "timestamp": int(time.time()),
         }
         await queue.put(json.dumps(payload, ensure_ascii=False))
@@ -942,6 +1033,16 @@ class LocalCoreServiceMVP:
             "name": profile.name,
             "version": profile.version,
             "target_device_family": profile.target_device_family,
+        }
+
+    @staticmethod
+    def _legacy_session_list_record(session: Session) -> Dict[str, Any]:
+        return {
+            "session_id": session.session_id,
+            "agent": session.agent.value,
+            "state": session.state.value,
+            "created_at": int(session.created_at),
+            "updated_at": int(session.updated_at),
         }
 
     def _device_frame_summary(self, frame) -> Dict[str, Any]:
@@ -1663,6 +1764,8 @@ class LocalCoreServiceMVP:
     def _capability_for_command(command_type: str) -> Optional[str]:
         return {
             "agent.session.launch_or_resume": CAP_AGENT_LAUNCH,
+            "agent.cli.launch_foreground": CAP_AGENT_LAUNCH,
+            "agent.session.input": CAP_AGENT_LAUNCH,
             "agent.run.interrupt": CAP_AGENT_LAUNCH,
             "agent.session.close": CAP_AGENT_LAUNCH,
             "system.snapshot.request": CAP_SESSION_LIST,

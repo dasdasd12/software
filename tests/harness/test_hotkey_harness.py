@@ -211,17 +211,15 @@ def test_virtual_profile_contains_expected_command_action_bindings():
 
     bindings = profile["keymap"]["bindings"]
     assert bindings["K_CODEX_LAUNCH"] == {
-        "type": "agent.session.launch_or_resume",
+        "type": "agent.cli.launch_foreground",
         "target": "focused_agent",
         "agent": "codex",
-        "context": "codex prompt",
         "workspace": "C:/work",
     }
     assert bindings["K_CLAUDE_LAUNCH"] == {
-        "type": "agent.session.launch_or_resume",
+        "type": "agent.cli.launch_foreground",
         "target": "focused_agent",
         "agent": "claude",
-        "context": "claude prompt",
         "workspace": "C:/work",
     }
     assert bindings["K_APPROVE"] == {

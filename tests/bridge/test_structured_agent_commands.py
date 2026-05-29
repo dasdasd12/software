@@ -124,9 +124,48 @@ def test_structured_launch_or_resume_new_session_creates_session_and_calls_launc
     assert event["type"] == "agent.session.created"
     assert session_id != "new"
     assert event["payload"]["agent"] == "codex"
+    assert event["payload"]["launch_surface"] == "managed_headless"
+    assert event["payload"]["control_mode"] == "managed_native"
     assert server.agents[AgentType.CODEX].launches == [(session_id, "hello")]
     assert server.agents[AgentType.CODEX].launch_workspaces == [None]
     assert server.session_mgr.get(session_id).agent == AgentType.CODEX
+
+    server._sync_runtime_state()
+    snapshot = server.runtime.snapshot().to_dict()
+    session_record = snapshot["sessions"][session_id]
+    assert session_record["launch_surface"] == "managed_headless"
+    assert session_record["control_mode"] == "managed_native"
+
+
+def test_structured_launch_or_resume_applies_foreground_metadata_to_created_session():
+    server = make_server()
+    queue = CaptureQueue()
+    server.connected_clients.add(queue)
+
+    asyncio.run(server._cmd_structured_command(command_message(
+        "agent.session.launch_or_resume",
+        target={"session_id": "new"},
+        payload={
+            "agent": "codex",
+            "context": "hello",
+            "launch_surface": "foreground_cli",
+            "frontend_pid": 2468,
+        },
+        command_id="cmd_launch_foreground_metadata",
+    ), queue))
+
+    event = read_event(queue)
+    session_id = event["payload"]["session_id"]
+    assert event["type"] == "agent.session.created"
+    assert event["payload"]["launch_surface"] == "foreground_cli"
+    assert event["payload"]["control_mode"] == "managed_native"
+    assert event["payload"]["frontend_pid"] == 2468
+
+    server._sync_runtime_state()
+    session_record = server.runtime.snapshot().to_dict()["sessions"][session_id]
+    assert session_record["launch_surface"] == "foreground_cli"
+    assert session_record["control_mode"] == "managed_native"
+    assert session_record["frontend_pid"] == 2468
 
 
 def test_structured_launch_or_resume_passes_payload_workspace_to_controller(tmpdir):

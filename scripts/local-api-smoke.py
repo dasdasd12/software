@@ -214,6 +214,21 @@ class LocalApiSmokeClient:
             payload["workspace"] = self.workspace
         return payload
 
+    def foreground_cli_command_payload(self, agent: str) -> Dict[str, Any]:
+        payload = {"agent": agent}
+        if self.workspace:
+            payload["workspace"] = self.workspace
+        return {
+            "type": "command",
+            "command": {
+                "command_id": "cmd_smoke_foreground_cli",
+                "type": "agent.cli.launch_foreground",
+                "source": {"kind": self.client_kind, "client_id": self.client_id},
+                "payload": payload,
+            },
+            "timestamp": now_ts(),
+        }
+
     async def run_basic(self) -> None:
         async with websockets.connect(self.url) as ws:
             await self.hello(ws)
@@ -244,6 +259,22 @@ class LocalApiSmokeClient:
                     if payload.get("type") in {"task_failed", "error"}:
                         raise RuntimeError(f"Real-agent scenario ended with failure: {payload}")
                     return
+
+    async def run_foreground_cli(self, agent: str) -> None:
+        async with websockets.connect(self.url) as ws:
+            await self.hello(ws)
+            await self.send(ws, self.foreground_cli_command_payload(agent))
+            payload = await self.wait_for_type(ws, "event")
+            event = payload.get("event") or {}
+            event_payload = event.get("payload") or {}
+            if event.get("type") != "agent.cli.launched":
+                raise RuntimeError(f"Foreground CLI launch returned unexpected event: {payload}")
+            if event_payload.get("agent") != agent:
+                raise RuntimeError(f"Foreground CLI launch returned wrong agent: {payload}")
+            if not event_payload.get("frontend_pid"):
+                raise RuntimeError(f"Foreground CLI launch did not include frontend_pid: {payload}")
+            if event_payload.get("launch_surface") != "foreground_cli":
+                raise RuntimeError(f"Foreground CLI launch returned wrong launch_surface: {payload}")
 
     async def run_approval_real(
         self,
@@ -548,7 +579,7 @@ async def amain() -> None:
     parser.add_argument("--url", default="ws://127.0.0.1:8765", help="Local Core Service WebSocket URL")
     parser.add_argument(
         "--scenario",
-        choices=("basic", "permission", "real-agent", "approval-real", "virtual-input"),
+        choices=("basic", "permission", "real-agent", "approval-real", "virtual-input", "foreground-cli"),
         default="basic",
     )
     parser.add_argument("--agent", choices=("codex", "claude"), default="codex")
@@ -643,6 +674,8 @@ async def amain() -> None:
             )
         elif args.scenario == "virtual-input":
             await client.run_virtual_input(args.agent, context)
+        elif args.scenario == "foreground-cli":
+            await client.run_foreground_cli(args.agent)
         else:
             await client.run_real_agent(args.agent, context)
         if not args.json_log:

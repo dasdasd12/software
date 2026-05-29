@@ -35,6 +35,8 @@ class LocalCoreRuntime:
             self.command_router,
             {
                 "agent.session.launch_or_resume": service.launch_or_resume,
+                "agent.cli.launch_foreground": service.launch_foreground_cli,
+                "agent.session.input": service.send_input,
                 "agent.run.interrupt": service.interrupt,
                 "agent.session.close": service.close_session,
                 "agent.permission.respond": service.respond_permission,

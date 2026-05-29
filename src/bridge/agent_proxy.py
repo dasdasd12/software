@@ -65,10 +65,14 @@ class AgentProxy:
         self._read_tasks: Dict[str, asyncio.Task] = {}
         self._sdk_tasks: Dict[str, asyncio.Task] = {}
         self._sdk_input_done: Dict[str, asyncio.Event] = {}
+        self._sdk_prompt_queues: Dict[str, asyncio.Queue] = {}
         self._codex_clients: Dict[str, CodexAppServerClient] = {}
         self._codex_thread_ids: Dict[str, str] = {}
         self._codex_stderr_tasks: Dict[str, asyncio.Task] = {}
         self._codex_turn_done_events: Dict[str, asyncio.Event] = {}
+        self._codex_input_queues: Dict[str, asyncio.Queue] = {}
+        self._codex_input_tasks: Dict[str, asyncio.Task] = {}
+        self._session_workspaces: Dict[str, Path] = {}
         self._on_unified_event: Optional[Callable[[str], None]] = None
 
     # ------------------------------------------------------------------ #
@@ -140,6 +144,7 @@ class AgentProxy:
             raise RuntimeError(f"{self.agent_type.value} executable not found")
 
         launch_workspace = self._resolve_launch_workspace(workspace)
+        self._session_workspaces[session_id] = launch_workspace
         if self._uses_claude_agent_sdk():
             return await self._launch_claude_agent_sdk(session_id, context, launch_workspace)
 
@@ -157,6 +162,7 @@ class AgentProxy:
             )
         except Exception as exc:
             self._sm.update_state(session_id, AgentState.FAILED)
+            self._session_workspaces.pop(session_id, None)
             detail = str(exc) or exc.__class__.__name__
             raise RuntimeError(f"Failed to start {self.agent_type.value}: {detail}") from exc
 
@@ -195,6 +201,8 @@ class AgentProxy:
             done_event = self._sdk_input_done.pop(session_id, None)
             if done_event:
                 done_event.set()
+            self._sdk_prompt_queues.pop(session_id, None)
+            self._session_workspaces.pop(session_id, None)
             sdk_task.cancel()
             try:
                 await sdk_task
@@ -207,6 +215,11 @@ class AgentProxy:
         self._codex_clients.pop(session_id, None)
         self._codex_thread_ids.pop(session_id, None)
         self._codex_turn_done_events.pop(session_id, None)
+        codex_input_task = self._codex_input_tasks.pop(session_id, None)
+        self._codex_input_queues.pop(session_id, None)
+        if codex_input_task:
+            codex_input_task.cancel()
+        self._session_workspaces.pop(session_id, None)
         stderr_task = self._codex_stderr_tasks.pop(session_id, None)
         if stderr_task:
             stderr_task.cancel()
@@ -285,6 +298,40 @@ class AgentProxy:
             }
         return await expire(session_id, request_id)
 
+    async def send_input(self, session_id: str, text: str) -> bool:
+        """Send a follow-up prompt to an active provider session."""
+        if self._uses_codex_app_server():
+            client = self._codex_clients.get(session_id)
+            thread_id = self._codex_thread_ids.get(session_id)
+            if client is None or not thread_id:
+                return False
+            queue = self._codex_input_queues.get(session_id)
+            if queue is None:
+                queue = asyncio.Queue()
+                self._codex_input_queues[session_id] = queue
+            if session_id not in self._codex_input_tasks:
+                self._codex_input_tasks[session_id] = asyncio.create_task(
+                    self._run_codex_input_worker(session_id)
+                )
+            self._sm.update_state(session_id, AgentState.SUBMITTED)
+            await queue.put(text)
+            return True
+
+        if self._uses_claude_agent_sdk():
+            queue = self._sdk_prompt_queues.get(session_id)
+            if queue is None:
+                return False
+            await queue.put(text)
+            self._sm.update_state(session_id, AgentState.SUBMITTED)
+            return True
+
+        proc = self._processes.get(session_id)
+        if proc is None or proc.stdin is None:
+            return False
+        proc.stdin.write((text + "\n").encode("utf-8"))
+        await proc.stdin.drain()
+        return True
+
     async def _launch_claude_agent_sdk(
         self,
         session_id: str,
@@ -294,6 +341,7 @@ class AgentProxy:
         self._sm.update_state(session_id, AgentState.WORKING)
         done_event = asyncio.Event()
         self._sdk_input_done[session_id] = done_event
+        self._sdk_prompt_queues[session_id] = asyncio.Queue()
         self._sdk_tasks[session_id] = asyncio.create_task(
             self._run_claude_agent_sdk(session_id, context, done_event, workspace)
         )
@@ -307,27 +355,56 @@ class AgentProxy:
         workspace: Optional[Any] = None,
     ) -> None:
         launch_workspace = self._resolve_launch_workspace(workspace)
+        self._session_workspaces[session_id] = launch_workspace
+        queue = self._sdk_prompt_queues.get(session_id)
+        if queue is None:
+            queue = asyncio.Queue()
+            self._sdk_prompt_queues[session_id] = queue
+        await queue.put(context or "say hello")
         try:
-            from claude_agent_sdk import ClaudeAgentOptions, query
+            from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 
-            async for message in query(
-                prompt=self._claude_sdk_prompt_stream(context, done_event),
-                options=ClaudeAgentOptions(
-                    can_use_tool=self._claude_sdk_can_use_tool(session_id),
-                    permission_mode="default",
-                    cwd=launch_workspace,
-                    cli_path=self._executable,
-                    env=self._extra_env,
-                    max_turns=3,
-                    stderr=lambda text: print(
-                        f"[{session_id}] {self.agent_type.value} stderr: {text}"
-                    ),
+            client = ClaudeSDKClient(options=ClaudeAgentOptions(
+                can_use_tool=self._claude_sdk_can_use_tool(session_id),
+                permission_mode="default",
+                cwd=launch_workspace,
+                cli_path=self._executable,
+                env=self._extra_env,
+                max_turns=3,
+                stderr=lambda text: print(
+                    f"[{session_id}] {self.agent_type.value} stderr: {text}"
                 ),
-            ):
-                for event in self._claude_sdk_message_to_events(session_id, message):
-                    self._emit_unified_event(event)
-                if message.__class__.__name__ == "ResultMessage":
-                    done_event.set()
+            ))
+            connect = getattr(client, "connect", None)
+            if connect is not None:
+                result = connect()
+                if asyncio.iscoroutine(result):
+                    await result
+
+            while not done_event.is_set():
+                get_task = asyncio.create_task(queue.get())
+                done_task = asyncio.create_task(done_event.wait())
+                completed, pending = await asyncio.wait(
+                    {get_task, done_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for task in pending:
+                    task.cancel()
+                if done_task in completed:
+                    if not get_task.done():
+                        get_task.cancel()
+                    break
+                prompt = get_task.result()
+
+                query_result = client.query(prompt)
+                if asyncio.iscoroutine(query_result):
+                    await query_result
+
+                async for message in client.receive_response():
+                    for event in self._claude_sdk_message_to_events(session_id, message):
+                        self._emit_unified_event(event)
+                    if done_event.is_set():
+                        break
 
         except asyncio.CancelledError:
             done_event.set()
@@ -344,8 +421,17 @@ class AgentProxy:
             )
         finally:
             done_event.set()
+            client = locals().get("client")
+            if client is not None:
+                disconnect = getattr(client, "disconnect", None)
+                if disconnect is not None:
+                    result = disconnect()
+                    if asyncio.iscoroutine(result):
+                        await result
             self._sdk_tasks.pop(session_id, None)
             self._sdk_input_done.pop(session_id, None)
+            self._sdk_prompt_queues.pop(session_id, None)
+            self._session_workspaces.pop(session_id, None)
 
     async def _read_codex_app_server(
         self,
@@ -355,6 +441,7 @@ class AgentProxy:
         workspace: Optional[Any] = None,
     ) -> None:
         launch_workspace = self._resolve_launch_workspace(workspace)
+        self._session_workspaces[session_id] = launch_workspace
         done_event = asyncio.Event()
         self._codex_turn_done_events[session_id] = done_event
         client = CodexAppServerClient(
@@ -376,15 +463,7 @@ class AgentProxy:
                 raise RuntimeError(f"Codex app-server thread/start did not return a thread id: {thread}")
             self._codex_thread_ids[session_id] = thread_id
             await client.start_turn(thread_id=thread_id, prompt=context or "say hello", cwd=cwd)
-            done_task = asyncio.create_task(done_event.wait())
-            completed, pending = await asyncio.wait(
-                {read_task, done_task},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            for task in pending:
-                task.cancel()
-            if read_task in completed:
-                await read_task
+            await read_task
         except asyncio.CancelledError:
             read_task.cancel()
             raise
@@ -404,12 +483,43 @@ class AgentProxy:
             self._codex_clients.pop(session_id, None)
             self._codex_thread_ids.pop(session_id, None)
             self._codex_turn_done_events.pop(session_id, None)
+            input_task = self._codex_input_tasks.pop(session_id, None)
+            self._codex_input_queues.pop(session_id, None)
+            if input_task:
+                input_task.cancel()
             self._codex_stderr_tasks.pop(session_id, None)
+            self._session_workspaces.pop(session_id, None)
             if not read_task.done():
                 read_task.cancel()
             if not stderr_task.done():
                 stderr_task.cancel()
             await self._terminate_codex_app_server_process(session_id, proc)
+
+    async def _run_codex_input_worker(self, session_id: str) -> None:
+        queue = self._codex_input_queues.get(session_id)
+        if queue is None:
+            return
+        try:
+            while True:
+                prompt = await queue.get()
+                client = self._codex_clients.get(session_id)
+                thread_id = self._codex_thread_ids.get(session_id)
+                if client is None or not thread_id:
+                    continue
+                done_event = self._codex_turn_done_events.get(session_id)
+                if done_event is not None:
+                    await done_event.wait()
+                    done_event.clear()
+                cwd = str(self._session_workspaces.get(session_id, self._workspace))
+                self._sm.update_state(session_id, AgentState.SUBMITTED)
+                await client.start_turn(thread_id=thread_id, prompt=prompt, cwd=cwd)
+                done_event = self._codex_turn_done_events.get(session_id)
+                if done_event is not None:
+                    await done_event.wait()
+        except asyncio.CancelledError:
+            raise
+        finally:
+            self._codex_input_tasks.pop(session_id, None)
 
     async def _drain_codex_app_server_stderr(
         self,
@@ -584,6 +694,7 @@ class AgentProxy:
 
     async def _claude_sdk_prompt_stream(
         self,
+        session_id: str,
         context: str,
         done_event: asyncio.Event,
     ) -> AsyncIterator[Dict[str, Any]]:
@@ -593,7 +704,30 @@ class AgentProxy:
             "message": {"role": "user", "content": context or "say hello"},
             "parent_tool_use_id": None,
         }
-        await done_event.wait()
+        queue = self._sdk_prompt_queues.get(session_id)
+        if queue is None:
+            await done_event.wait()
+            return
+        while not done_event.is_set():
+            get_task = asyncio.create_task(queue.get())
+            done_task = asyncio.create_task(done_event.wait())
+            completed, pending = await asyncio.wait(
+                {get_task, done_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            if done_task in completed:
+                if not get_task.done():
+                    get_task.cancel()
+                break
+            text = get_task.result()
+            yield {
+                "type": "user",
+                "session_id": "",
+                "message": {"role": "user", "content": text},
+                "parent_tool_use_id": None,
+            }
 
     def _claude_sdk_can_use_tool(self, session_id: str) -> Callable[..., Any]:
         async def can_use_tool(tool_name: str, input_data: Dict[str, Any], context: Any) -> Any:
@@ -777,6 +911,7 @@ class AgentProxy:
 
         # Process exited
         self._processes.pop(session_id, None)
+        self._session_workspaces.pop(session_id, None)
         sess = self._sm.get(session_id)
         if sess and sess.state not in {
             AgentState.COMPLETED, AgentState.FAILED,
