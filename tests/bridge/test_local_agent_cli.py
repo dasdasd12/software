@@ -178,6 +178,7 @@ def test_cli_builds_native_claude_hook_settings(tmpdir):
     assert "agent-hook" in data["hooks"]["PermissionRequest"][0]["hooks"][0]["args"]
     assert "PreToolUse" in data["hooks"]
     assert data["hooks"]["PreToolUse"][0]["matcher"] == "AskUserQuestion|ExitPlanMode"
+    assert data["env"]["ANTHROPIC_AUTH_TOKEN"] == ""
 
 
 def test_native_claude_env_removes_launch_token_and_keeps_hook_token(monkeypatch):
@@ -201,6 +202,48 @@ def test_native_claude_env_removes_launch_token_and_keeps_hook_token(monkeypatch
     assert module.LAUNCH_TOKEN_ENV not in env
     assert module.FOREGROUND_REGISTRATION_TOKEN_ENV not in env
     assert module.FOREGROUND_EXIT_TOKEN_ENV not in env
+    assert env[module.CLAUDE_HOOK_TOKEN_ENV] == "hook-token"
+
+
+def test_native_claude_env_removes_provider_auth_secrets(monkeypatch):
+    module = load_cli_module()
+    args = module.parse_args(
+        ["--agent", "claude", "--workspace", "C:/project", "--native-cli"],
+        env={module.CLAUDE_HOOK_TOKEN_ENV: "hook-token"},
+    )
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "api-key")
+    monkeypatch.setenv("Anthropic_Auth_Token", "auth-token")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-token")
+    monkeypatch.setenv("NORMAL_CLAUDE_SETTING", "kept")
+
+    env = module._native_claude_env(args)
+
+    assert "ANTHROPIC_API_KEY" not in {key.upper() for key in env}
+    assert "ANTHROPIC_AUTH_TOKEN" not in {key.upper() for key in env}
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in {key.upper() for key in env}
+    assert env[module.CLAUDE_HOOK_TOKEN_ENV] == "hook-token"
+    assert env["NORMAL_CLAUDE_SETTING"] == "kept"
+
+
+def test_native_claude_env_filters_provider_auth_secrets_case_insensitively(monkeypatch):
+    module = load_cli_module()
+    args = module.parse_args(
+        ["--agent", "claude", "--workspace", "C:/project", "--native-cli"],
+        env={module.CLAUDE_HOOK_TOKEN_ENV: "hook-token"},
+    )
+    monkeypatch.setattr(module.os, "environ", {
+        "Anthropic_Api_Key": "api-key",
+        "anthropic_auth_token": "auth-token",
+        "Claude_Code_Oauth_Token": "oauth-token",
+        "PATH": "C:/Windows/System32",
+    })
+
+    env = module._native_claude_env(args)
+
+    assert "Anthropic_Api_Key" not in env
+    assert "anthropic_auth_token" not in env
+    assert "Claude_Code_Oauth_Token" not in env
+    assert env["PATH"] == "C:/Windows/System32"
     assert env[module.CLAUDE_HOOK_TOKEN_ENV] == "hook-token"
 
 

@@ -21,6 +21,11 @@ LAUNCH_TOKEN_ENV = "AI_KEYB_LAUNCH_TOKEN"
 CLAUDE_HOOK_TOKEN_ENV = "AI_KEYB_CLAUDE_HOOK_TOKEN"
 FOREGROUND_REGISTRATION_TOKEN_ENV = "AI_KEYB_FOREGROUND_REGISTRATION_TOKEN"
 FOREGROUND_EXIT_TOKEN_ENV = "AI_KEYB_FOREGROUND_EXIT_TOKEN"
+NATIVE_CLAUDE_SECRET_ENV_VARS = {
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+}
 DEFAULT_CAPABILITIES = ["agent:launch", "permission:respond", "session:list"]
 PRINT_EVENT_TYPES = {
     "agent_message_delta",
@@ -259,6 +264,9 @@ def build_claude_hook_settings(
     async_handler["async"] = True
     async_handler["timeout"] = 30
     return {
+        "env": {
+            "ANTHROPIC_AUTH_TOKEN": "",
+        },
         "hooks": {
             "PermissionRequest": [{"matcher": "*", "hooks": [handler]}],
             "PreToolUse": [{"matcher": "AskUserQuestion|ExitPlanMode", "hooks": [handler]}],
@@ -461,7 +469,11 @@ async def _run_native_claude_cli(ws, args, state: Dict[str, Any]) -> int:
 
 
 def _native_claude_env(args) -> Dict[str, str]:
-    env = dict(os.environ)
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key.upper() not in NATIVE_CLAUDE_SECRET_ENV_VARS
+    }
     env.pop(LAUNCH_TOKEN_ENV, None)
     env.pop(FOREGROUND_REGISTRATION_TOKEN_ENV, None)
     env.pop(FOREGROUND_EXIT_TOKEN_ENV, None)
