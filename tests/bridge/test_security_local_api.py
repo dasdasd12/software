@@ -185,6 +185,63 @@ def test_token_bound_client_grant_allows_matching_identity_only():
     asyncio.run(run())
 
 
+def test_hello_accepts_dedicated_claude_hook_token_only_for_hook_capability():
+    async def run():
+        server = make_server({
+            "auth_enabled": True,
+            "launch_token": "tok_123",
+            "allow_loopback_without_token": False,
+        })
+        server.agent_commands._foreground_hook_tokens_by_session_id["sess_1"] = "hook-token"
+        ws_server, uri = await serve(server)
+        try:
+            async with websockets.connect(uri) as ws:
+                await ws.send(json.dumps({
+                    "type": "hello",
+                    "token": "hook-token",
+                    "client_kind": "agent-hook",
+                    "client_id": "claude-code-hook:sess_1",
+                    "capabilities": ["claude:hook", "permission:respond"],
+                }))
+                ack = await recv_json(ws)
+                assert ack["type"] == "hello_ack"
+                assert ack["client_kind"] == "agent-hook"
+                assert ack["capabilities"] == ["claude:hook"]
+        finally:
+            ws_server.close()
+            await ws_server.wait_closed()
+
+    asyncio.run(run())
+
+
+def test_hello_rejects_hook_token_for_desktop_identity():
+    async def run():
+        server = make_server({
+            "auth_enabled": True,
+            "launch_token": "tok_123",
+            "allow_loopback_without_token": False,
+        })
+        server.agent_commands._foreground_hook_tokens_by_session_id["sess_1"] = "hook-token"
+        ws_server, uri = await serve(server)
+        try:
+            async with websockets.connect(uri) as ws:
+                await ws.send(json.dumps({
+                    "type": "hello",
+                    "token": "hook-token",
+                    "client_kind": "desktop-ui",
+                    "client_id": "local-agent-cli",
+                    "capabilities": ["permission:respond"],
+                }))
+                error = await recv_json(ws)
+                assert error["type"] == "error"
+                assert error["code"] == "AUTH_FAILED"
+        finally:
+            ws_server.close()
+            await ws_server.wait_closed()
+
+    asyncio.run(run())
+
+
 def test_auth_enabled_rejects_command_before_hello():
     async def run():
         server = make_server({

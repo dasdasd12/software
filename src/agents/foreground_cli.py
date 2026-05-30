@@ -9,6 +9,8 @@ from typing import List, Optional
 
 VALID_AGENTS = {"claude", "codex"}
 LAUNCH_TOKEN_ENV = "AI_KEYB_LAUNCH_TOKEN"
+CLAUDE_HOOK_TOKEN_ENV = "AI_KEYB_CLAUDE_HOOK_TOKEN"
+FOREGROUND_REGISTRATION_TOKEN_ENV = "AI_KEYB_FOREGROUND_REGISTRATION_TOKEN"
 SENSITIVE_ENV_KEY_MARKERS = (
     "API_KEY",
     "AUTH_TOKEN",
@@ -56,6 +58,7 @@ def build_foreground_cli_command(
     api_url: str,
     token: Optional[str] = None,
     foreground_launch_id: Optional[str] = None,
+    native_cli: bool = False,
     python_executable: Optional[str] = None,
 ) -> List[str]:
     """Build the argv for the known local foreground CLI host script.
@@ -82,6 +85,8 @@ def build_foreground_cli_command(
     ]
     if foreground_launch_id:
         command += ["--launch-id", str(foreground_launch_id)]
+    if native_cli:
+        command.append("--native-cli")
     return command
 
 
@@ -89,6 +94,8 @@ def build_foreground_cli_env(
     base_env: Optional[dict] = None,
     extra_env: Optional[dict] = None,
     token: Optional[str] = None,
+    hook_token: Optional[str] = None,
+    registration_token: Optional[str] = None,
 ) -> dict:
     """Build a terminal-friendly environment without provider/API secrets."""
     source_env = os.environ if base_env is None else base_env
@@ -104,12 +111,16 @@ def build_foreground_cli_env(
             env[key] = value
     if token is not None:
         env[LAUNCH_TOKEN_ENV] = token
+    if hook_token is not None:
+        env[CLAUDE_HOOK_TOKEN_ENV] = hook_token
+    if registration_token is not None:
+        env[FOREGROUND_REGISTRATION_TOKEN_ENV] = registration_token
     return env
 
 
 def _is_sensitive_env_key(key: str) -> bool:
     normalized = str(key).upper()
-    if normalized == LAUNCH_TOKEN_ENV:
+    if normalized in {LAUNCH_TOKEN_ENV, CLAUDE_HOOK_TOKEN_ENV, FOREGROUND_REGISTRATION_TOKEN_ENV}:
         return True
     return any(marker in normalized for marker in SENSITIVE_ENV_KEY_MARKERS)
 
@@ -121,11 +132,13 @@ class ForegroundCliLauncher:
         self,
         api_url: str,
         token: Optional[str] = None,
+        hook_token: Optional[str] = None,
         python_executable: Optional[str] = None,
         env: Optional[dict] = None,
     ):
         self.api_url = api_url
         self.token = token
+        self.hook_token = hook_token
         self.python_executable = python_executable
         self.env = env
 
@@ -134,6 +147,9 @@ class ForegroundCliLauncher:
         agent: str,
         workspace: str,
         foreground_launch_id: Optional[str] = None,
+        native_cli: bool = False,
+        registration_token: Optional[str] = None,
+        hook_token: Optional[str] = None,
     ):
         resolved_workspace = str(Path(workspace).resolve())
         command = build_foreground_cli_command(
@@ -142,14 +158,36 @@ class ForegroundCliLauncher:
             api_url=self.api_url,
             token=self.token,
             foreground_launch_id=foreground_launch_id,
+            native_cli=native_cli,
             python_executable=self.python_executable,
         )
-        env = build_foreground_cli_env(extra_env=self.env, token=self.token)
+        env = build_foreground_cli_env(
+            extra_env=self.env,
+            token=self.token,
+            hook_token=hook_token or self.hook_token,
+            registration_token=registration_token,
+        )
 
         kwargs = {
             "cwd": resolved_workspace,
             "env": env,
         }
         if sys.platform == "win32":
-            kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+            bootstrap = [
+                "cmd.exe",
+                "/d",
+                "/c",
+                "start",
+                "",
+                "/D",
+                resolved_workspace,
+            ] + command
+            return subprocess.Popen(
+                bootstrap,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                **kwargs,
+            )
+        if hasattr(os, "setsid"):
+            kwargs["preexec_fn"] = os.setsid
         return subprocess.Popen(command, **kwargs)

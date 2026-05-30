@@ -107,6 +107,16 @@ def read_error(queue):
     return payload
 
 
+def prime_foreground_registration(server, launch_id="fg_native", agent="claude", token="reg-token"):
+    server.agent_commands._foreground_registrations_by_launch_id[launch_id] = {
+        "registration_token": token,
+        "hook_token": "hook-token",
+        "agent": agent,
+        "workspace": "C:/repo",
+        "bootstrap_pid": 4321,
+    }
+
+
 def test_structured_launch_or_resume_new_session_creates_session_and_calls_launch():
     server = make_server()
     queue = CaptureQueue()
@@ -149,6 +159,7 @@ def test_structured_launch_or_resume_applies_foreground_metadata_to_created_sess
             "agent": "codex",
             "context": "hello",
             "launch_surface": "foreground_cli",
+            "control_mode": "native_cli",
             "frontend_pid": 2468,
         },
         command_id="cmd_launch_foreground_metadata",
@@ -166,6 +177,159 @@ def test_structured_launch_or_resume_applies_foreground_metadata_to_created_sess
     assert session_record["launch_surface"] == "foreground_cli"
     assert session_record["control_mode"] == "managed_native"
     assert session_record["frontend_pid"] == 2468
+
+
+def test_structured_launch_or_resume_cannot_mark_session_native_cli():
+    server = make_server()
+    queue = CaptureQueue()
+    server.connected_clients.add(queue)
+
+    asyncio.run(server._cmd_structured_command(command_message(
+        "agent.session.launch_or_resume",
+        target={"session_id": "new"},
+        payload={
+            "agent": "codex",
+            "context": "hello",
+            "launch_surface": "foreground_cli",
+            "control_mode": "native_cli",
+        },
+        command_id="cmd_launch_native_spoof",
+    ), queue))
+    event = read_event(queue)
+    session_id = event["payload"]["session_id"]
+
+    asyncio.run(server._cmd_structured_command(command_message(
+        "agent.session.close",
+        target={"session_id": session_id},
+        command_id="cmd_close_spoofed_managed",
+    ), queue))
+
+    close_event = read_event(queue)
+    assert close_event["type"] == "agent.session.closed"
+    assert server.session_mgr.get(session_id).control_mode == "managed_native"
+    assert server.agents[AgentType.CODEX].terminations == [session_id]
+
+
+def test_structured_register_foreground_session_does_not_launch_provider():
+    server = make_server()
+    queue = CaptureQueue()
+    server.connected_clients.add(queue)
+    prime_foreground_registration(server)
+
+    asyncio.run(server._cmd_structured_command(command_message(
+        "agent.session.register_foreground",
+        target={"session_id": "new"},
+        payload={
+            "agent": "claude",
+            "workspace": "C:/repo",
+            "launch_surface": "foreground_cli",
+            "control_mode": "native_cli",
+            "frontend_pid": 2468,
+            "foreground_launch_id": "fg_native",
+            "foreground_registration_token": "reg-token",
+        },
+        command_id="cmd_register_native_foreground",
+    ), queue))
+
+    event = read_event(queue)
+    session_id = event["payload"]["session_id"]
+    assert event["type"] == "agent.session.created"
+    assert event["payload"]["launch_surface"] == "foreground_cli"
+    assert event["payload"]["control_mode"] == "native_cli"
+    assert event["payload"]["foreground_launch_id"] == "fg_native"
+    assert event["payload"]["frontend_pid"] == 2468
+    assert server.agents[AgentType.CLAUDE].launches == []
+    assert server.session_mgr.get(session_id).control_mode == "native_cli"
+    assert server.agent_commands._foreground_root_pids_by_session_id[session_id] == 2468
+    assert server.agent_commands.hook_token_for_session(session_id) == "hook-token"
+
+
+def test_structured_close_native_foreground_session_terminates_root_process(monkeypatch):
+    server = make_server()
+    queue = CaptureQueue()
+    server.connected_clients.add(queue)
+    terminated = []
+    monkeypatch.setattr(
+        server.agent_commands,
+        "_terminate_process_tree",
+        lambda pid: terminated.append(pid),
+    )
+    prime_foreground_registration(server)
+
+    asyncio.run(server._cmd_structured_command(command_message(
+        "agent.session.register_foreground",
+        target={"session_id": "new"},
+        payload={
+            "agent": "claude",
+            "launch_surface": "foreground_cli",
+            "control_mode": "native_cli",
+            "frontend_pid": 2468,
+            "foreground_launch_id": "fg_native",
+            "foreground_registration_token": "reg-token",
+        },
+        command_id="cmd_register_native_foreground",
+    ), queue))
+    event = read_event(queue)
+    session_id = event["payload"]["session_id"]
+
+    asyncio.run(server._cmd_structured_command(command_message(
+        "agent.session.close",
+        target={"session_id": session_id},
+        command_id="cmd_close_native_foreground",
+    ), queue))
+
+    close_event = read_event(queue)
+    assert close_event["type"] == "agent.session.closed"
+    assert terminated == [2468]
+    assert server.agent_commands.hook_token_for_session(session_id) is None
+
+
+def test_structured_register_foreground_rejects_unrecognized_launch_id():
+    server = make_server()
+    queue = CaptureQueue()
+    server.connected_clients.add(queue)
+
+    asyncio.run(server._cmd_structured_command(command_message(
+        "agent.session.register_foreground",
+        target={"session_id": "new"},
+        payload={
+            "agent": "claude",
+            "launch_surface": "foreground_cli",
+            "control_mode": "native_cli",
+            "frontend_pid": 2468,
+            "foreground_launch_id": "fg_unknown",
+            "foreground_registration_token": "reg-token",
+        },
+        command_id="cmd_register_unknown_foreground",
+    ), queue))
+
+    error = read_error(queue)
+    assert error["code"] == "FOREGROUND_CLI_REGISTRATION_DENIED"
+
+
+def test_structured_register_foreground_rejects_bad_registration_token():
+    server = make_server()
+    queue = CaptureQueue()
+    server.connected_clients.add(queue)
+    prime_foreground_registration(server)
+
+    asyncio.run(server._cmd_structured_command(command_message(
+        "agent.session.register_foreground",
+        target={"session_id": "new"},
+        payload={
+            "agent": "claude",
+            "launch_surface": "foreground_cli",
+            "control_mode": "native_cli",
+            "frontend_pid": 2468,
+            "foreground_launch_id": "fg_native",
+            "foreground_registration_token": "wrong",
+        },
+        command_id="cmd_register_bad_token",
+    ), queue))
+
+    error = read_error(queue)
+    assert error["code"] == "FOREGROUND_CLI_REGISTRATION_DENIED"
+    assert "fg_native" in server.agent_commands._foreground_registrations_by_launch_id
 
 
 def test_structured_launch_or_resume_passes_payload_workspace_to_controller(tmpdir):

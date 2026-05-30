@@ -229,6 +229,19 @@ class LocalApiSmokeClient:
             "timestamp": now_ts(),
         }
 
+    def session_close_command_payload(self, session_id: str) -> Dict[str, Any]:
+        return {
+            "type": "command",
+            "command": {
+                "command_id": "cmd_smoke_close_%s" % session_id,
+                "type": "agent.session.close",
+                "source": {"kind": self.client_kind, "client_id": self.client_id},
+                "target": {"session_id": session_id},
+                "payload": {},
+            },
+            "timestamp": now_ts(),
+        }
+
     async def run_basic(self) -> None:
         async with websockets.connect(self.url) as ws:
             await self.hello(ws)
@@ -321,6 +334,23 @@ class LocalApiSmokeClient:
                     if not event_payload.get("frontend_pid"):
                         raise RuntimeError(f"Foreground CLI session did not include frontend_pid: {payload}")
                     created = event_payload
+
+            await self.send(ws, self.session_close_command_payload(created["session_id"]))
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError("Timed out waiting for foreground CLI session close")
+                payload = await self.recv_json_with_timeout(ws, remaining)
+                if payload.get("type") == "error":
+                    raise RuntimeError(f"Local API error while closing foreground CLI: {payload}")
+                if payload.get("type") != "event":
+                    continue
+                event = payload.get("event") or {}
+                if (
+                    event.get("type") == "agent.session.closed"
+                    and (event.get("payload") or {}).get("session_id") == created["session_id"]
+                ):
+                    return
 
     async def run_approval_real(
         self,

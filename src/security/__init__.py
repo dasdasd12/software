@@ -3,6 +3,7 @@
 from .auth import SecurityConfig
 from .client_identity import (
     CAP_AGENT_LAUNCH,
+    CAP_CLAUDE_HOOK,
     CAP_NOTIFICATION_CREATE,
     CAP_PERMISSION_RESPOND,
     CAP_PERMISSION_RESPOND_LOW_RISK,
@@ -27,6 +28,7 @@ __all__ = [
     "ApprovalPolicyEngine",
     "ApprovalResult",
     "CAP_AGENT_LAUNCH",
+    "CAP_CLAUDE_HOOK",
     "CAP_NOTIFICATION_CREATE",
     "CAP_PERMISSION_RESPOND",
     "CAP_PERMISSION_RESPOND_LOW_RISK",

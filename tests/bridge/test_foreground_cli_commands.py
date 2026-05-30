@@ -12,6 +12,8 @@ sys.path.insert(0, str(SRC_DIR))
 sys.path.insert(0, str(BRIDGE_DIR))
 
 from agents.foreground_cli import (  # noqa: E402
+    CLAUDE_HOOK_TOKEN_ENV,
+    FOREGROUND_REGISTRATION_TOKEN_ENV,
     LAUNCH_TOKEN_ENV,
     ForegroundCliLauncher,
     build_foreground_cli_env,
@@ -40,8 +42,23 @@ class FakeForegroundLauncher:
         self.pid = pid
         self.launches = []
 
-    def launch(self, agent, workspace, foreground_launch_id=None):
-        self.launches.append((agent, workspace, foreground_launch_id))
+    def launch(
+        self,
+        agent,
+        workspace,
+        foreground_launch_id=None,
+        native_cli=False,
+        registration_token=None,
+        hook_token=None,
+    ):
+        self.launches.append((
+            agent,
+            workspace,
+            foreground_launch_id,
+            native_cli,
+            registration_token,
+            hook_token,
+        ))
 
         class Process:
             pass
@@ -110,6 +127,7 @@ def test_foreground_cli_command_uses_repo_script_and_workspace(tmpdir):
         api_url="ws://127.0.0.1:8765",
         token="token-value",
         foreground_launch_id="fg_test",
+        native_cli=True,
         python_executable="python",
     )
 
@@ -122,6 +140,7 @@ def test_foreground_cli_command_uses_repo_script_and_workspace(tmpdir):
     assert "ws://127.0.0.1:8765" in command
     assert "--launch-id" in command
     assert "fg_test" in command
+    assert "--native-cli" in command
     assert "--token" not in command
     assert "token-value" not in command
 
@@ -156,6 +175,8 @@ def test_foreground_cli_launcher_uses_popen_without_shell(monkeypatch, tmpdir):
         python_executable="python",
     )
 
+    monkeypatch.setattr(sys, "platform", "linux")
+
     process = launcher.launch("claude", str(tmpdir))
 
     assert process.pid == 4321
@@ -188,6 +209,8 @@ def test_foreground_cli_launcher_merges_custom_env_with_launch_token(monkeypatch
         env={"EXTRA_ENV": "present", LAUNCH_TOKEN_ENV: "old-value"},
     )
 
+    monkeypatch.setattr(sys, "platform", "linux")
+
     launcher.launch("claude", str(tmpdir))
 
     _, kwargs = calls[0]
@@ -212,8 +235,12 @@ def test_foreground_cli_env_keeps_terminal_environment_and_filters_secrets():
             "EXPLICIT_ENV": "present",
             "CODEX_API_KEY": "secret-value",
             LAUNCH_TOKEN_ENV: "old-token",
+            CLAUDE_HOOK_TOKEN_ENV: "old-hook-token",
+            FOREGROUND_REGISTRATION_TOKEN_ENV: "old-registration-token",
         },
         token="token-value",
+        hook_token="hook-token-value",
+        registration_token="registration-token-value",
     )
 
     assert env["PATH"] == "C:/Windows/System32"
@@ -222,6 +249,8 @@ def test_foreground_cli_env_keeps_terminal_environment_and_filters_secrets():
     assert env["NORMAL_SETTING"] == "visible"
     assert env["EXPLICIT_ENV"] == "present"
     assert env[LAUNCH_TOKEN_ENV] == "token-value"
+    assert env[CLAUDE_HOOK_TOKEN_ENV] == "hook-token-value"
+    assert env[FOREGROUND_REGISTRATION_TOKEN_ENV] == "registration-token-value"
     assert "OPENAI_API_KEY" not in env
     assert "ANTHROPIC_AUTH_TOKEN" not in env
     assert "CODEX_TOKEN" not in env
@@ -258,6 +287,8 @@ def test_foreground_cli_launcher_filters_sensitive_service_env(monkeypatch, tmpd
         env={"EXPLICIT_ENV": "present"},
     )
 
+    monkeypatch.setattr(sys, "platform", "linux")
+
     launcher.launch("claude", str(tmpdir))
 
     _, kwargs = calls[0]
@@ -268,7 +299,7 @@ def test_foreground_cli_launcher_filters_sensitive_service_env(monkeypatch, tmpd
     assert "ANTHROPIC_API_KEY" not in kwargs["env"]
 
 
-def test_foreground_cli_launcher_uses_create_new_console_on_windows(monkeypatch, tmpdir):
+def test_foreground_cli_launcher_uses_cmd_start_on_windows(monkeypatch, tmpdir):
     calls = []
 
     class FakeProcess:
@@ -280,12 +311,18 @@ def test_foreground_cli_launcher_uses_create_new_console_on_windows(monkeypatch,
 
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
-    monkeypatch.setattr(subprocess, "CREATE_NEW_CONSOLE", 16, raising=False)
     launcher = ForegroundCliLauncher(api_url="ws://127.0.0.1:8765")
 
     launcher.launch("codex", str(tmpdir))
 
-    assert calls[0][1]["creationflags"] == 16
+    command, kwargs = calls[0]
+    assert command[:4] == ["cmd.exe", "/d", "/c", "start"]
+    assert command[4] == ""
+    assert "/D" in command
+    assert str(Path(str(tmpdir)).resolve()) in command
+    assert kwargs.get("shell") is None
+    assert kwargs["stdout"] == subprocess.DEVNULL
+    assert kwargs["stderr"] == subprocess.DEVNULL
 
 
 def test_cli_launch_foreground_emits_event_with_frontend_pid(tmpdir):
@@ -309,8 +346,12 @@ def test_cli_launch_foreground_emits_event_with_frontend_pid(tmpdir):
     assert event["payload"]["frontend_pid"] == 4321
     assert event["payload"]["foreground_launch_id"].startswith("fg_")
     assert event["payload"]["launch_surface"] == "foreground_cli"
-    assert event["payload"]["control_mode"] == "managed_native"
-    assert launcher.launches == [("claude", workspace, event["payload"]["foreground_launch_id"])]
+    assert event["payload"]["control_mode"] == "native_cli"
+    assert len(launcher.launches) == 1
+    launch = launcher.launches[0]
+    assert launch[:4] == ("claude", workspace, event["payload"]["foreground_launch_id"], True)
+    assert launch[4].startswith("reg_")
+    assert launch[5].startswith("hook_")
 
 
 def test_cli_launch_foreground_rejects_unavailable_agent_before_launcher(tmpdir):
@@ -359,6 +400,7 @@ def test_foreground_cli_launcher_uses_desktop_client_grant_without_global_token(
     launcher = server._build_foreground_cli_launcher()
 
     assert launcher.token == "grant-token"
+    assert launcher.hook_token is None
 
 
 def test_foreground_cli_launcher_prefers_global_launch_token(tmpdir):
@@ -377,6 +419,7 @@ def test_foreground_cli_launcher_prefers_global_launch_token(tmpdir):
     launcher = server._build_foreground_cli_launcher()
 
     assert launcher.token == "global-token"
+    assert launcher.hook_token is None
 
 
 def test_disconnect_cleanup_terminates_owned_foreground_cli_session(tmpdir):

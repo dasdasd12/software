@@ -90,18 +90,18 @@ def test_session_metadata_round_trips_without_breaking_old_payloads():
         session_id="sess_meta",
         agent=AgentType.CODEX,
         launch_surface="foreground_cli",
-        control_mode="managed_native",
+        control_mode="native_cli",
         frontend_pid=1234,
     )
 
     payload = session.to_dict()
 
     assert payload["launch_surface"] == "foreground_cli"
-    assert payload["control_mode"] == "managed_native"
+    assert payload["control_mode"] == "native_cli"
     assert payload["frontend_pid"] == 1234
     restored = Session.from_dict(payload)
     assert restored.launch_surface == "foreground_cli"
-    assert restored.control_mode == "managed_native"
+    assert restored.control_mode == "native_cli"
     assert restored.frontend_pid == 1234
 
 

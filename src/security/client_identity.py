@@ -11,9 +11,11 @@ class ClientKind(str, Enum):
     DEVICE_TRANSPORT = "device-transport"
     TEST_CLIENT = "test-client"
     AUTOMATION_CLIENT = "automation-client"
+    AGENT_HOOK = "agent-hook"
 
 
 CAP_AGENT_LAUNCH = "agent:launch"
+CAP_CLAUDE_HOOK = "claude:hook"
 CAP_NOTIFICATION_CREATE = "notification:create"
 CAP_PERMISSION_RESPOND = "permission:respond"
 CAP_PERMISSION_RESPOND_LOW_RISK = "permission:respond:low_risk"
@@ -38,6 +40,7 @@ DEFAULT_CAPABILITIES = {
     },
     ClientKind.TEST_CLIENT: set(),
     ClientKind.AUTOMATION_CLIENT: set(),
+    ClientKind.AGENT_HOOK: set(),
 }
 
 

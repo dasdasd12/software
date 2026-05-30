@@ -19,7 +19,7 @@ from typing import Dict, List, Optional
 DEFAULT_LAUNCH_SURFACE = "managed_headless"
 DEFAULT_CONTROL_MODE = "managed_native"
 VALID_LAUNCH_SURFACES = {"managed_headless", "foreground_cli"}
-VALID_CONTROL_MODES = {"managed_native"}
+VALID_CONTROL_MODES = {"managed_native", "native_cli"}
 
 
 class AgentType(Enum):

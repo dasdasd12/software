@@ -5,7 +5,11 @@ import argparse
 import asyncio
 import json
 import os
+from pathlib import Path
+import shutil
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -14,6 +18,8 @@ from typing import Any, Dict, Optional
 
 DEFAULT_API_URL = "ws://127.0.0.1:8765"
 LAUNCH_TOKEN_ENV = "AI_KEYB_LAUNCH_TOKEN"
+CLAUDE_HOOK_TOKEN_ENV = "AI_KEYB_CLAUDE_HOOK_TOKEN"
+FOREGROUND_REGISTRATION_TOKEN_ENV = "AI_KEYB_FOREGROUND_REGISTRATION_TOKEN"
 DEFAULT_CAPABILITIES = ["agent:launch", "permission:respond", "session:list"]
 PRINT_EVENT_TYPES = {
     "agent_message_delta",
@@ -38,8 +44,11 @@ def parse_args(argv, env=None):
     parser.add_argument("--client-id", default="local-agent-cli")
     parser.add_argument("--context", default="")
     parser.add_argument("--launch-id", default="")
+    parser.add_argument("--native-cli", action="store_true")
     args = parser.parse_args(argv)
     args.token = (env or os.environ).get(LAUNCH_TOKEN_ENV, "")
+    args.hook_token = (env or os.environ).get(CLAUDE_HOOK_TOKEN_ENV, "")
+    args.registration_token = (env or os.environ).get(FOREGROUND_REGISTRATION_TOKEN_ENV, "")
     return args
 
 
@@ -71,18 +80,44 @@ def build_launch_command(
     workspace: str,
     context: str = "",
     foreground_launch_id: str = "",
+    control_mode: str = "managed_native",
 ):
     payload = {
         "agent": agent,
         "workspace": workspace,
         "context": context,
         "launch_surface": "foreground_cli",
+        "control_mode": control_mode,
         "frontend_pid": os.getpid(),
     }
     if foreground_launch_id:
         payload["foreground_launch_id"] = foreground_launch_id
     return _command(
         "agent.session.launch_or_resume",
+        payload=payload,
+        target={"session_id": "new"},
+    )
+
+
+def build_register_foreground_command(
+    agent: str,
+    workspace: str,
+    foreground_launch_id: str = "",
+    registration_token: str = "",
+):
+    payload = {
+        "agent": agent,
+        "workspace": workspace,
+        "launch_surface": "foreground_cli",
+        "control_mode": "native_cli",
+        "frontend_pid": os.getpid(),
+    }
+    if foreground_launch_id:
+        payload["foreground_launch_id"] = foreground_launch_id
+    if registration_token:
+        payload["foreground_registration_token"] = registration_token
+    return _command(
+        "agent.session.register_foreground",
         payload=payload,
         target={"session_id": "new"},
     )
@@ -182,6 +217,81 @@ def _start_stdin_reader(queue: asyncio.Queue, stdin=None) -> threading.Thread:
     return thread
 
 
+def build_claude_hook_settings(
+    hook_python: str,
+    hook_script: str,
+    api_url: str,
+    session_id: str,
+    timeout: int = 600,
+) -> Dict[str, Any]:
+    handler = {
+        "type": "command",
+        "command": hook_python,
+        "args": [
+            hook_script,
+            "--api-url",
+            api_url,
+            "--session-id",
+            session_id,
+            "--client-kind",
+            "agent-hook",
+            "--client-id",
+            "claude-code-hook:%s" % session_id,
+            "--timeout",
+            str(timeout),
+        ],
+        "timeout": timeout,
+    }
+    async_handler = dict(handler)
+    async_handler["async"] = True
+    async_handler["timeout"] = 30
+    return {
+        "hooks": {
+            "PermissionRequest": [{"matcher": "*", "hooks": [handler]}],
+            "PreToolUse": [{"matcher": "AskUserQuestion|ExitPlanMode", "hooks": [handler]}],
+            "UserPromptSubmit": [{"hooks": [async_handler]}],
+            "MessageDisplay": [{"hooks": [async_handler]}],
+            "PostToolUse": [{"matcher": "*", "hooks": [async_handler]}],
+            "PostToolUseFailure": [{"matcher": "*", "hooks": [async_handler]}],
+            "Stop": [{"hooks": [async_handler]}],
+            "SessionEnd": [{"hooks": [async_handler]}],
+        }
+    }
+
+
+def write_claude_hook_settings(
+    api_url: str,
+    session_id: str,
+    directory: str = None,
+) -> str:
+    root = Path(__file__).resolve().parents[1]
+    hook_script = root / "scripts" / "claude-code-hook.py"
+    settings = build_claude_hook_settings(
+        str(Path(sys.executable).resolve()),
+        str(hook_script),
+        api_url,
+        session_id,
+    )
+    settings_dir = Path(directory or tempfile.gettempdir())
+    settings_dir.mkdir(parents=True, exist_ok=True)
+    path = settings_dir / ("ai-keyb-claude-hooks-%s.json" % session_id)
+    path.write_text(json.dumps(settings, ensure_ascii=False), encoding="utf-8")
+    return str(path)
+
+
+def build_native_claude_command(settings_path: str):
+    executable = shutil.which("claude") or "claude"
+    return [
+        executable,
+        "--permission-mode",
+        "default",
+        "--settings",
+        settings_path,
+        "--name",
+        "AI Keyboard Claude",
+    ]
+
+
 async def _receiver(ws, state: Dict[str, Any], stop_event: asyncio.Event) -> None:
     while not stop_event.is_set():
         raw = await ws.recv()
@@ -244,6 +354,8 @@ async def run_cli(args) -> int:
     stop_event = asyncio.Event()
     async with websockets.connect(args.api_url) as ws:
         await _send_json(ws, build_hello_message(args.client_kind, args.token, args.client_id))
+        if args.native_cli and args.agent == "claude":
+            return await _run_native_claude_cli(ws, args, state)
         await _send_json(ws, build_launch_command(
             args.agent,
             args.workspace,
@@ -265,6 +377,54 @@ async def run_cli(args) -> int:
             if exc:
                 raise exc
     return 0
+
+
+async def _run_native_claude_cli(ws, args, state: Dict[str, Any]) -> int:
+    await _send_json(ws, build_register_foreground_command(
+        args.agent,
+        args.workspace,
+        args.launch_id,
+        args.registration_token,
+    ))
+
+    while True:
+        payload = _load_json(await ws.recv())
+        session_id = _extract_session_id(payload)
+        if session_id:
+            state["session_id"] = session_id
+        event = _event_payload(payload)
+        if event.get("type") == "agent.session.created" and state.get("session_id"):
+            break
+        if payload.get("type") == "error":
+            print(json.dumps(payload, ensure_ascii=False), flush=True)
+            return 1
+
+    settings_path = write_claude_hook_settings(args.api_url, state["session_id"])
+    command = build_native_claude_command(settings_path)
+    process = subprocess.Popen(
+        command,
+        cwd=args.workspace,
+        env=_native_claude_env(args),
+    )
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(None, process.wait)
+    finally:
+        try:
+            Path(settings_path).unlink()
+        except OSError:
+            pass
+
+
+def _native_claude_env(args) -> Dict[str, str]:
+    env = dict(os.environ)
+    env.pop(LAUNCH_TOKEN_ENV, None)
+    env.pop(FOREGROUND_REGISTRATION_TOKEN_ENV, None)
+    if args.hook_token:
+        env[CLAUDE_HOOK_TOKEN_ENV] = args.hook_token
+    else:
+        env.pop(CLAUDE_HOOK_TOKEN_ENV, None)
+    return env
 
 
 def main(argv=None) -> int:

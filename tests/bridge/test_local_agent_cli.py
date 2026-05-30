@@ -20,7 +20,11 @@ def test_local_agent_cli_parser_defaults_to_managed_session():
 
     args = module.parse_args(
         ["--agent", "codex", "--workspace", "C:/project"],
-        env={module.LAUNCH_TOKEN_ENV: "env-token"},
+        env={
+            module.LAUNCH_TOKEN_ENV: "env-token",
+            module.CLAUDE_HOOK_TOKEN_ENV: "hook-token",
+            module.FOREGROUND_REGISTRATION_TOKEN_ENV: "registration-token",
+        },
     )
 
     assert args.agent == "codex"
@@ -28,7 +32,10 @@ def test_local_agent_cli_parser_defaults_to_managed_session():
     assert args.client_kind == "desktop-ui"
     assert args.api_url == "ws://127.0.0.1:8765"
     assert args.token == "env-token"
+    assert args.hook_token == "hook-token"
+    assert args.registration_token == "registration-token"
     assert args.launch_id == ""
+    assert args.native_cli is False
 
 
 def test_cli_builds_hello_launch_and_input_commands():
@@ -52,8 +59,21 @@ def test_cli_builds_hello_launch_and_input_commands():
     assert launch["command"]["payload"]["workspace"] == "C:/project"
     assert launch["command"]["payload"]["context"] == "hello"
     assert launch["command"]["payload"]["launch_surface"] == "foreground_cli"
+    assert launch["command"]["payload"]["control_mode"] == "managed_native"
     assert launch["command"]["payload"]["frontend_pid"] == module.os.getpid()
     assert launch["command"]["payload"]["foreground_launch_id"] == "fg_test"
+
+    registered = module.build_register_foreground_command(
+        "claude",
+        "C:/project",
+        "fg_native",
+        "reg-token",
+    )
+    assert registered["command"]["type"] == "agent.session.register_foreground"
+    assert registered["command"]["payload"]["agent"] == "claude"
+    assert registered["command"]["payload"]["control_mode"] == "native_cli"
+    assert registered["command"]["payload"]["foreground_launch_id"] == "fg_native"
+    assert registered["command"]["payload"]["foreground_registration_token"] == "reg-token"
 
     input_message = module.build_input_command("sess_1", "hello")
     assert input_message["command"]["type"] == "agent.session.input"
@@ -129,3 +149,44 @@ def test_sender_sends_close_before_exit_when_session_active():
     assert len(sent) == 1
     assert sent[0]["command"]["type"] == "agent.session.close"
     assert sent[0]["command"]["target"] == {"session_id": "sess_1"}
+
+
+def test_cli_builds_native_claude_hook_settings(tmpdir):
+    module = load_cli_module()
+    settings_path = module.write_claude_hook_settings(
+        "ws://127.0.0.1:8765",
+        "sess_native",
+        directory=str(tmpdir),
+    )
+
+    data = module.json.loads(module.Path(settings_path).read_text(encoding="utf-8"))
+
+    assert "PermissionRequest" in data["hooks"]
+    assert data["hooks"]["PermissionRequest"][0]["hooks"][0]["command"].endswith("python.exe") or data["hooks"]["PermissionRequest"][0]["hooks"][0]["command"].endswith("python")
+    assert "claude-code-hook.py" in data["hooks"]["PermissionRequest"][0]["hooks"][0]["args"][0]
+    assert "--session-id" in data["hooks"]["PermissionRequest"][0]["hooks"][0]["args"]
+    assert "--client-kind" in data["hooks"]["PermissionRequest"][0]["hooks"][0]["args"]
+    assert "agent-hook" in data["hooks"]["PermissionRequest"][0]["hooks"][0]["args"]
+    assert "PreToolUse" in data["hooks"]
+    assert data["hooks"]["PreToolUse"][0]["matcher"] == "AskUserQuestion|ExitPlanMode"
+
+
+def test_native_claude_env_removes_launch_token_and_keeps_hook_token(monkeypatch):
+    module = load_cli_module()
+    args = module.parse_args(
+        ["--agent", "claude", "--workspace", "C:/project", "--native-cli"],
+        env={
+            module.LAUNCH_TOKEN_ENV: "launch-token",
+            module.CLAUDE_HOOK_TOKEN_ENV: "hook-token",
+            module.FOREGROUND_REGISTRATION_TOKEN_ENV: "registration-token",
+        },
+    )
+    monkeypatch.setenv(module.LAUNCH_TOKEN_ENV, "launch-token")
+    monkeypatch.setenv(module.CLAUDE_HOOK_TOKEN_ENV, "hook-token")
+    monkeypatch.setenv(module.FOREGROUND_REGISTRATION_TOKEN_ENV, "registration-token")
+
+    env = module._native_claude_env(args)
+
+    assert module.LAUNCH_TOKEN_ENV not in env
+    assert module.FOREGROUND_REGISTRATION_TOKEN_ENV not in env
+    assert env[module.CLAUDE_HOOK_TOKEN_ENV] == "hook-token"

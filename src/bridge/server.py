@@ -14,6 +14,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import secrets
 import signal
 import sys
 import time
@@ -52,6 +53,7 @@ from security import (
     ApprovalPolicy,
     ApprovalPolicyEngine,
     CAP_AGENT_LAUNCH,
+    CAP_CLAUDE_HOOK,
     CAP_NOTIFICATION_CREATE,
     CAP_PERMISSION_RESPOND,
     CAP_PERMISSION_RESPOND_LOW_RISK,
@@ -72,6 +74,11 @@ _permission_client_context: ContextVar[Optional[ClientIdentity]] = ContextVar(
 )
 
 
+def uuid_hash(value: Any) -> str:
+    raw = json.dumps(value, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha1(raw).hexdigest()[:12]
+
+
 @dataclass
 class PendingPermission:
     request_id: str
@@ -86,6 +93,16 @@ class PendingPermission:
     run_id: Optional[str] = None
     priority: int = 0
     native: Optional[Dict[str, Any]] = None
+
+
+@dataclass
+class PendingClaudeHookDecision:
+    request_id: str
+    session_id: str
+    hook_input: Dict[str, Any]
+    created_at: float
+    result_future: asyncio.Future
+    delivered_future: asyncio.Future
 
 
 class LocalCoreServiceMVP:
@@ -147,6 +164,7 @@ class LocalCoreServiceMVP:
         )
         self.approval_policy_engine = ApprovalPolicyEngine()
         self.pending_permissions: Dict[str, PendingPermission] = {}
+        self._claude_hook_decisions: Dict[str, PendingClaudeHookDecision] = {}
         self._virtual_profiles: Dict[str, Profile] = {}
         self._virtual_sessions: Dict[str, VirtualDeviceSession] = {}
         self._virtual_transports: Dict[str, SimulatedTransport] = {}
@@ -346,6 +364,12 @@ class LocalCoreServiceMVP:
             await self._cmd_virtual_input(msg, client_queue)
         elif msg_type == "permission_response":
             await self._cmd_permission_response(msg, client_queue)
+        elif msg_type == "claude_hook_event":
+            if not await self._require_capability(client_queue, CAP_CLAUDE_HOOK):
+                return
+            if not await self._require_client_kind(client_queue, ClientKind.AGENT_HOOK):
+                return
+            await self._cmd_claude_hook_event(msg, client_queue)
         elif msg_type == "interrupt":
             await self._cmd_interrupt(msg, client_queue)
         elif msg_type == "list_sessions":
@@ -378,10 +402,6 @@ class LocalCoreServiceMVP:
         websocket: Any = None,
     ) -> None:
         peer = getattr(websocket, "remote_address", None)
-        if not self.security.validate_token(msg.get("token"), self._is_loopback_peer(peer)):
-            await self._send_error(queue, "AUTH_FAILED", "invalid or missing launch token")
-            return
-
         client_kind = msg.get("client_kind")
         client_id = msg.get("client_id")
         requested_capabilities = msg.get("capabilities", [])
@@ -390,6 +410,30 @@ class LocalCoreServiceMVP:
             return
         if not isinstance(requested_capabilities, list):
             await self._send_error(queue, "INVALID_HELLO", "capabilities must be a list")
+            return
+
+        try:
+            hook_identity = self._hook_identity_from_hello(
+                token=msg.get("token"),
+                client_kind=client_kind,
+                client_id=client_id,
+                requested_capabilities=requested_capabilities,
+                is_loopback_peer=self._is_loopback_peer(peer),
+            )
+        except ValueError as exc:
+            await self._send_error(queue, "AUTH_FAILED", str(exc))
+            return
+        if hook_identity is not None:
+            self.client_identities[queue] = hook_identity
+            await queue.put(json.dumps(HelloAck(
+                client_kind=hook_identity.kind.value,
+                client_id=hook_identity.client_id,
+                capabilities=hook_identity.capabilities,
+            ).to_dict(), ensure_ascii=False))
+            return
+
+        if not self.security.validate_token(msg.get("token"), self._is_loopback_peer(peer)):
+            await self._send_error(queue, "AUTH_FAILED", "invalid or missing launch token")
             return
 
         try:
@@ -419,6 +463,40 @@ class LocalCoreServiceMVP:
             client_id=identity.client_id,
             capabilities=identity.capabilities,
         ).to_dict(), ensure_ascii=False))
+
+    def _hook_identity_from_hello(
+        self,
+        token: Any,
+        client_kind: str,
+        client_id: str,
+        requested_capabilities: List[Any],
+        is_loopback_peer: bool,
+    ) -> Optional[ClientIdentity]:
+        if client_kind != ClientKind.AGENT_HOOK.value:
+            return None
+        if not isinstance(token, str) or not token:
+            raise ValueError("invalid Claude hook token")
+        if not is_loopback_peer:
+            raise ValueError("Claude hook token is valid only on loopback clients")
+        session_id = self._session_id_from_hook_client_id(client_id)
+        expected = self.agent_commands.hook_token_for_session(session_id) if session_id else None
+        if not (
+            isinstance(expected, str)
+            and expected
+            and secrets.compare_digest(token, expected)
+        ):
+            raise ValueError("invalid Claude hook token")
+        requested = {cap for cap in requested_capabilities if isinstance(cap, str)}
+        capabilities = requested.intersection({CAP_CLAUDE_HOOK})
+        return build_client_identity(client_kind, client_id, capabilities)
+
+    @staticmethod
+    def _session_id_from_hook_client_id(client_id: str) -> Optional[str]:
+        prefix = "claude-code-hook:"
+        if not isinstance(client_id, str) or not client_id.startswith(prefix):
+            return None
+        session_id = client_id[len(prefix):]
+        return session_id or None
 
     async def _cmd_structured_command(self, msg: Dict[str, Any], queue: asyncio.Queue) -> None:
         try:
@@ -493,7 +571,7 @@ class LocalCoreServiceMVP:
                     if not owned:
                         self._foreground_cli_session_owners.pop(queue, None)
             return
-        if command.type != "agent.session.launch_or_resume":
+        if command.type not in {"agent.session.launch_or_resume", "agent.session.register_foreground"}:
             return
         if command.payload.get("launch_surface") != "foreground_cli":
             return
@@ -510,18 +588,16 @@ class LocalCoreServiceMVP:
             session = self.session_mgr.get(session_id)
             if session is None or getattr(session, "launch_surface", None) != "foreground_cli":
                 continue
-            controller = self.agents.get(session.agent)
-            terminate = getattr(controller, "terminate", None)
-            if not callable(terminate):
-                continue
             try:
-                accepted = await terminate(session_id)
+                await self.agent_commands.close_session(CommandEnvelope(
+                    type="agent.session.close",
+                    source=CommandSource(kind="desktop-ui", client_id="foreground-cleanup"),
+                    target={"session_id": session_id},
+                    payload={},
+                ))
             except Exception as exc:
                 self.logger.warning(f"Foreground CLI session cleanup failed for {session_id}: {exc}")
                 continue
-            if accepted:
-                self.session_mgr.update_state(session_id, AgentState.CANCELLED)
-                self._persist_session(session_id)
 
     async def _cmd_virtual_device_configure(self, msg: Dict[str, Any], queue: asyncio.Queue) -> None:
         device_id = msg.get("device_id")
@@ -721,9 +797,108 @@ class LocalCoreServiceMVP:
             type="agent.permission.respond",
             source=self._command_source_for_queue(queue),
             target=target,
-            payload={"approved": msg.get("approved", False)},
+            payload={
+                "approved": msg.get("approved", False),
+                "decision": msg.get("decision"),
+            },
         )
         await self._dispatch_permission_command(command, queue)
+
+    async def _cmd_claude_hook_event(self, msg: Dict[str, Any], queue: asyncio.Queue) -> None:
+        hook_input = msg.get("hook")
+        if not isinstance(hook_input, dict):
+            await self._send_error(queue, "INVALID_HOOK_EVENT", "hook must be an object")
+            return
+        session_id = msg.get("session_id") or hook_input.get("session_id")
+        if not isinstance(session_id, str) or not session_id:
+            await self._send_error(queue, "INVALID_HOOK_EVENT", "session_id is required")
+            return
+        if not await self._validate_claude_hook_session(session_id, queue):
+            return
+
+        hook_event_name = hook_input.get("hook_event_name")
+        if hook_event_name == "PermissionRequest":
+            await self._cmd_claude_permission_hook(session_id, hook_input, queue)
+            return
+
+        self._emit_claude_hook_observation(session_id, hook_input)
+        await queue.put(json.dumps({
+            "type": "claude_hook_result",
+            "session_id": session_id,
+            "hook_event_name": hook_event_name,
+            "hook_response": {},
+            "timestamp": int(time.time()),
+        }, ensure_ascii=False))
+
+    async def _validate_claude_hook_session(self, session_id: str, queue: asyncio.Queue) -> bool:
+        client = self._client_for_queue(queue)
+        if client.client_id != f"claude-code-hook:{session_id}":
+            await self._send_error(queue, "INVALID_HOOK_SESSION", "hook client is not bound to session_id")
+            return False
+        session = self.session_mgr.get(session_id)
+        if session is None:
+            await self._send_error(queue, "INVALID_HOOK_SESSION", "session_id is not registered")
+            return False
+        if session.agent != AgentType.CLAUDE:
+            await self._send_error(queue, "INVALID_HOOK_SESSION", "session is not a Claude session")
+            return False
+        if (
+            getattr(session, "launch_surface", None) != "foreground_cli"
+            or getattr(session, "control_mode", None) != "native_cli"
+        ):
+            await self._send_error(queue, "INVALID_HOOK_SESSION", "session is not a native foreground Claude session")
+            return False
+        return True
+
+    async def _cmd_claude_permission_hook(
+        self,
+        session_id: str,
+        hook_input: Dict[str, Any],
+        queue: asyncio.Queue,
+    ) -> None:
+        loop = asyncio.get_running_loop()
+        request_id = "claude_hook_%s" % uuid_hash({
+            "session_id": session_id,
+            "hook_input": hook_input,
+            "time": time.time(),
+        })
+        result_future = loop.create_future()
+        delivered_future = loop.create_future()
+        permission_event = self._claude_hook_permission_event(session_id, request_id, hook_input)
+        pending_key = self._pending_permission_key(request_id, session_id, None, None)
+        self._claude_hook_decisions[pending_key] = PendingClaudeHookDecision(
+            request_id=request_id,
+            session_id=session_id,
+            hook_input=hook_input,
+            created_at=time.time(),
+            result_future=result_future,
+            delivered_future=delivered_future,
+        )
+        self._on_agent_event(self.unifier.encode_device_message(permission_event))
+        try:
+            hook_response = await asyncio.wait_for(
+                result_future,
+                timeout=int(permission_event["timeout_sec"]),
+            )
+        except asyncio.TimeoutError:
+            self.pending_permissions.pop(pending_key, None)
+            self._claude_hook_decisions.pop(pending_key, None)
+            hook_response = self._claude_hook_permission_response(
+                hook_input,
+                approved=False,
+                decision="deny",
+                message=f"Local API permission request {request_id} timed out.",
+            )
+        await queue.put(json.dumps({
+            "type": "claude_hook_result",
+            "session_id": session_id,
+            "request_id": request_id,
+            "hook_event_name": "PermissionRequest",
+            "hook_response": hook_response,
+            "timestamp": int(time.time()),
+        }, ensure_ascii=False))
+        if not delivered_future.done():
+            delivered_future.set_result(True)
 
     async def _dispatch_permission_command(
         self,
@@ -784,6 +959,11 @@ class LocalCoreServiceMVP:
             approved = self._parse_approved(command.payload.get("approved", False))
         except ValueError as exc:
             raise AgentLifecycleError("INVALID_PERMISSION_RESPONSE", str(exc)) from exc
+        decision = self._permission_decision_from_payload(command.payload, approved)
+        if decision == "always_allow":
+            approved = True
+        elif decision == "deny":
+            approved = False
 
         self.logger.info(f"Permission {request_id}: {'APPROVED' if approved else 'DENIED'}")
 
@@ -803,7 +983,9 @@ class LocalCoreServiceMVP:
 
         proxy = self.agents.get(pending.agent)
         result = {"accepted": True, "forwarded": False, "evidence": {}}
-        if proxy:
+        if self._is_claude_hook_permission(pending):
+            result = await self._deliver_claude_hook_permission(pending_key, pending, approved, decision)
+        elif proxy:
             try:
                 result = await proxy.handle_permission_response(
                     pending.session_id,
@@ -832,7 +1014,7 @@ class LocalCoreServiceMVP:
             self.session_mgr.update_state(pending.session_id, AgentState.WORKING)
         self._append_permission_history(client, pending, approved, result)
         self._persist_session(pending.session_id)
-        return {
+        ack = {
             "type": "permission_ack",
             "request_id": pending.request_id,
             "session_id": pending.session_id,
@@ -840,6 +1022,9 @@ class LocalCoreServiceMVP:
             "forwarded": bool(result.get("forwarded", False)),
             "evidence": result.get("evidence", {}),
         }
+        if decision == "always_allow":
+            ack["decision"] = decision
+        return ack
 
     async def _cmd_interrupt(self, msg: Dict[str, Any], queue: asyncio.Queue) -> None:
         if not await self._require_capability(queue, CAP_AGENT_LAUNCH):
@@ -1532,6 +1717,163 @@ class LocalCoreServiceMVP:
         except Exception as exc:
             self.logger.warning(f"SQLite permission history append failed for {pending.request_id}: {exc}")
 
+    def _emit_claude_hook_observation(self, session_id: str, hook_input: Dict[str, Any]) -> None:
+        payload = {
+            "type": "agent_hook_event",
+            "session_id": session_id,
+            "agent": AgentType.CLAUDE.value,
+            "hook_event_name": hook_input.get("hook_event_name"),
+            "tool": hook_input.get("tool_name"),
+            "hook_input": hook_input,
+            "timestamp": int(time.time()),
+        }
+        self._on_agent_event(self.unifier.encode_device_message(payload))
+
+    def _claude_hook_permission_event(
+        self,
+        session_id: str,
+        request_id: str,
+        hook_input: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        tool_name = str(hook_input.get("tool_name") or "unknown")
+        tool_input = hook_input.get("tool_input") if isinstance(hook_input.get("tool_input"), dict) else {}
+        description = self._describe_claude_hook_tool(tool_name, tool_input)
+        return {
+            "type": "permission_request",
+            "request_id": request_id,
+            "session_id": session_id,
+            "agent": AgentType.CLAUDE.value,
+            "tool": tool_name,
+            "description": description,
+            "risk_level": self._risk_for_claude_hook_tool(tool_name),
+            "timeout_sec": int(self.cfg["unifier"].get("permission_timeout_sec", 30)),
+            "native": {
+                "adapter": "claude_code_hook",
+                "native_channel": "PermissionRequest",
+                "hook_event_name": "PermissionRequest",
+                "tool_name": tool_name,
+                "tool_input": tool_input,
+                "permission_suggestions": hook_input.get("permission_suggestions", []),
+            },
+        }
+
+    @staticmethod
+    def _describe_claude_hook_tool(tool_name: str, tool_input: Dict[str, Any]) -> str:
+        if tool_name == "Bash":
+            return str(tool_input.get("description") or tool_input.get("command") or "Claude requests shell access.")
+        for key in ("file_path", "url", "query"):
+            value = tool_input.get(key)
+            if value:
+                return f"Claude requests {tool_name}: {value}"
+        return f"Claude requests permission to use {tool_name}."
+
+    @staticmethod
+    def _risk_for_claude_hook_tool(tool_name: str) -> str:
+        if tool_name in {"Bash", "Write, Edit", "Write", "Edit", "MultiEdit"}:
+            return RiskLevel.HIGH.value
+        if tool_name in {"Read", "Glob", "Grep", "LS"}:
+            return RiskLevel.LOW.value
+        return RiskLevel.MEDIUM.value
+
+    @staticmethod
+    def _is_claude_hook_permission(pending: PendingPermission) -> bool:
+        native = pending.native or {}
+        return native.get("adapter") == "claude_code_hook"
+
+    async def _deliver_claude_hook_permission(
+        self,
+        pending_key: str,
+        pending: PendingPermission,
+        approved: bool,
+        decision: str,
+    ) -> Dict[str, Any]:
+        waiter = self._claude_hook_decisions.get(pending_key)
+        if waiter is None:
+            return {
+                "accepted": True,
+                "forwarded": False,
+                "evidence": {
+                    "adapter": "claude_code_hook",
+                    "reason": "hook_waiter_not_registered",
+                    "session_id": pending.session_id,
+                    "request_id": pending.request_id,
+                },
+            }
+        if not waiter.result_future.done():
+            waiter.result_future.set_result(self._claude_hook_permission_response(
+                waiter.hook_input,
+                approved=approved,
+                decision=decision,
+            ))
+        try:
+            await asyncio.wait_for(waiter.delivered_future, timeout=10.0)
+        except asyncio.TimeoutError:
+            return {
+                "accepted": True,
+                "forwarded": False,
+                "evidence": {
+                    "adapter": "claude_code_hook",
+                    "reason": "hook_response_delivery_timeout",
+                    "session_id": pending.session_id,
+                    "request_id": pending.request_id,
+                },
+            }
+        finally:
+            self._claude_hook_decisions.pop(pending_key, None)
+        return {
+            "accepted": True,
+            "forwarded": True,
+            "evidence": {
+                "adapter": "claude_code_hook",
+                "native_channel": "PermissionRequest",
+                "decision_delivered": True,
+                "response_written": True,
+                "session_id": pending.session_id,
+                "request_id": pending.request_id,
+                "decision": decision,
+                "age_ms": int((time.time() - waiter.created_at) * 1000),
+            },
+        }
+
+    @staticmethod
+    def _claude_hook_permission_response(
+        hook_input: Dict[str, Any],
+        approved: bool,
+        decision: str,
+        message: str = "",
+    ) -> Dict[str, Any]:
+        hook_decision: Dict[str, Any]
+        if approved:
+            hook_decision = {"behavior": "allow"}
+            if decision == "always_allow":
+                suggestions = hook_input.get("permission_suggestions")
+                if isinstance(suggestions, list) and suggestions:
+                    hook_decision["updatedPermissions"] = suggestions
+        else:
+            hook_decision = {
+                "behavior": "deny",
+                "message": message or "Denied by Local API permission response.",
+            }
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PermissionRequest",
+                "decision": hook_decision,
+            }
+        }
+
+    @staticmethod
+    def _permission_decision_from_payload(payload: Dict[str, Any], approved: bool) -> str:
+        value = payload.get("decision")
+        if isinstance(value, str):
+            normalized = value.strip().lower().replace("-", "_")
+            if normalized in {"approve", "approved", "allow"}:
+                return "approve"
+            if normalized in {"always_allow", "allow_always", "approve_always", "dont_ask"}:
+                return "always_allow"
+            if normalized in {"deny", "denied", "decline"}:
+                return "deny"
+        return "approve" if approved else "deny"
+
     @staticmethod
     def _agent_from_string(value: str) -> Optional[AgentType]:
         try:
@@ -1760,10 +2102,18 @@ class LocalCoreServiceMVP:
         await self._send_error(queue, "CAPABILITY_DENIED", f"client lacks capability: {capability}")
         return False
 
+    async def _require_client_kind(self, queue: asyncio.Queue, kind: ClientKind) -> bool:
+        client = self._client_for_queue(queue)
+        if client.kind == kind:
+            return True
+        await self._send_error(queue, "CAPABILITY_DENIED", f"client must be {kind.value}")
+        return False
+
     @staticmethod
     def _capability_for_command(command_type: str) -> Optional[str]:
         return {
             "agent.session.launch_or_resume": CAP_AGENT_LAUNCH,
+            "agent.session.register_foreground": CAP_AGENT_LAUNCH,
             "agent.cli.launch_foreground": CAP_AGENT_LAUNCH,
             "agent.session.input": CAP_AGENT_LAUNCH,
             "agent.run.interrupt": CAP_AGENT_LAUNCH,

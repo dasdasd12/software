@@ -200,6 +200,17 @@ def test_foreground_cli_scenario_sends_structured_cli_launch(monkeypatch, tmpdir
                 },
             },
         },
+        {
+            "type": "event",
+            "event": {
+                "type": "agent.session.closed",
+                "payload": {
+                    "session_id": "sess_foreground",
+                    "closed": True,
+                    "accepted": True,
+                },
+            },
+        },
     ])
     monkeypatch.setattr(module.websockets, "connect", lambda url: FakeConnect(ws))
 
@@ -211,6 +222,9 @@ def test_foreground_cli_scenario_sends_structured_cli_launch(monkeypatch, tmpdir
         "agent": "claude",
         "workspace": workspace,
     }
+    close = [message for message in ws.sent if message["type"] == "command"][-1]
+    assert close["command"]["type"] == "agent.session.close"
+    assert close["command"]["target"] == {"session_id": "sess_foreground"}
 
 
 def test_foreground_cli_scenario_requires_managed_session_created(monkeypatch, tmpdir):

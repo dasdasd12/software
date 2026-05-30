@@ -1,6 +1,10 @@
 """Agent command handlers."""
 
+import secrets
 from pathlib import Path
+import os
+import signal
+import subprocess
 from typing import Any, Awaitable, Callable, Dict, Optional
 import uuid
 
@@ -26,6 +30,10 @@ class AgentCommandService:
         self._permission_responder = permission_responder
         self._foreground_cli_launcher = foreground_cli_launcher
         self._workspace_resolver = workspace_resolver or self._default_workspace_resolver
+        self._foreground_root_pids_by_launch_id: Dict[str, int] = {}
+        self._foreground_root_pids_by_session_id: Dict[str, int] = {}
+        self._foreground_registrations_by_launch_id: Dict[str, Dict[str, Any]] = {}
+        self._foreground_hook_tokens_by_session_id: Dict[str, str] = {}
 
     async def launch_or_resume(self, command: CommandEnvelope) -> EventEnvelope:
         session_id = self._session_id(command) or "new"
@@ -133,12 +141,32 @@ class AgentCommandService:
         agent = self.runtime.agent_value(agent_key)
         workspace = self._workspace_resolver(self._workspace(command))
         foreground_launch_id = "fg_%s" % uuid.uuid4().hex
+        native_cli = bool(command.payload.get("native_cli", agent == "claude"))
+        registration_token = "reg_%s" % secrets.token_urlsafe(24) if native_cli else None
+        hook_token = "hook_%s" % secrets.token_urlsafe(24) if native_cli else None
         try:
-            process = self._foreground_cli_launcher.launch(agent, workspace, foreground_launch_id)
+            process = self._foreground_cli_launcher.launch(
+                agent,
+                workspace,
+                foreground_launch_id,
+                native_cli=native_cli,
+                registration_token=registration_token,
+                hook_token=hook_token,
+            )
         except Exception as exc:
             raise AgentLifecycleError("FOREGROUND_CLI_LAUNCH_FAILED", str(exc)) from exc
 
         frontend_pid = getattr(process, "pid", None)
+        if type(frontend_pid) is int:
+            self._foreground_root_pids_by_launch_id[foreground_launch_id] = frontend_pid
+        if native_cli:
+            self._foreground_registrations_by_launch_id[foreground_launch_id] = {
+                "registration_token": registration_token,
+                "hook_token": hook_token,
+                "agent": agent,
+                "workspace": workspace,
+                "bootstrap_pid": frontend_pid if type(frontend_pid) is int else None,
+            }
         return EventEnvelope(
             seq=0,
             type="agent.cli.launched",
@@ -149,13 +177,52 @@ class AgentCommandService:
                 "frontend_pid": frontend_pid,
                 "foreground_launch_id": foreground_launch_id,
                 "launch_surface": "foreground_cli",
-                "control_mode": "managed_native",
+                "control_mode": "native_cli" if native_cli else "managed_native",
             },
         )
+
+    async def register_foreground_session(self, command: CommandEnvelope) -> EventEnvelope:
+        agent_key = self.runtime.resolve_agent_key(self._agent(command))
+        self.runtime.require_controller(agent_key)
+        frontend_pid = command.payload.get("frontend_pid")
+        if type(frontend_pid) is not int or frontend_pid <= 0:
+            raise AgentLifecycleError(
+                "FOREGROUND_CLI_REGISTRATION_DENIED",
+                "foreground native CLI registration requires a valid frontend_pid",
+            )
+        registration = self._validated_foreground_registration(command)
+        session = self.runtime.create_session(agent_key)
+        self._apply_launch_metadata(session, command.payload, allow_native_cli=True)
+        session_id = session.session_id
+        foreground_launch_id = command.payload.get("foreground_launch_id")
+        self._foreground_root_pids_by_launch_id.pop(str(foreground_launch_id), None)
+        self._foreground_root_pids_by_session_id[session_id] = frontend_pid
+        self._foreground_hook_tokens_by_session_id[session_id] = str(registration["hook_token"])
+        if hasattr(session, "frontend_pid"):
+            session.frontend_pid = frontend_pid
+        self.runtime.update_state(session_id, "WORKING")
+        self.runtime.persist(session_id)
+        return self._event("agent.session.created", session_id, **self._launch_event_extra(command, self._workspace(command)))
 
     async def close_session(self, command: CommandEnvelope) -> EventEnvelope:
         session_id = self._required_session_id(command)
         session = self.runtime.require_session(session_id)
+        if (
+            getattr(session, "launch_surface", None) == "foreground_cli"
+            and getattr(session, "control_mode", None) == "native_cli"
+        ):
+            root_pid = self._foreground_root_pids_by_session_id.pop(session_id, None)
+            self._foreground_hook_tokens_by_session_id.pop(session_id, None)
+            if root_pid is None:
+                raise AgentLifecycleError(
+                    "FOREGROUND_CLI_NOT_OWNED",
+                    "native foreground session was not launched by Local API and cannot be terminated safely",
+                )
+            if root_pid is not None:
+                self._terminate_process_tree(root_pid)
+            self.runtime.update_state(session_id, "CANCELLED")
+            self.runtime.persist(session_id)
+            return self._event("agent.session.closed", session_id, closed=True, accepted=True)
         controller = self.runtime.require_controller(session.agent)
         try:
             accepted = await controller.terminate(session_id)
@@ -184,6 +251,41 @@ class AgentCommandService:
             },
             payload=ack,
         )
+
+    def hook_token_for_session(self, session_id: str) -> Optional[str]:
+        return self._foreground_hook_tokens_by_session_id.get(session_id)
+
+    def _validated_foreground_registration(self, command: CommandEnvelope) -> Dict[str, Any]:
+        foreground_launch_id = command.payload.get("foreground_launch_id")
+        registration_token = command.payload.get("foreground_registration_token")
+        if not isinstance(foreground_launch_id, str) or not foreground_launch_id:
+            raise AgentLifecycleError(
+                "FOREGROUND_CLI_REGISTRATION_DENIED",
+                "foreground native CLI registration requires a launch id",
+            )
+        registration = self._foreground_registrations_by_launch_id.get(foreground_launch_id)
+        if registration is None:
+            raise AgentLifecycleError(
+                "FOREGROUND_CLI_REGISTRATION_DENIED",
+                "foreground native CLI launch id is not recognized",
+            )
+        expected = registration.get("registration_token")
+        if not (
+            isinstance(registration_token, str)
+            and isinstance(expected, str)
+            and secrets.compare_digest(registration_token, expected)
+        ):
+            raise AgentLifecycleError(
+                "FOREGROUND_CLI_REGISTRATION_DENIED",
+                "foreground native CLI registration token is invalid",
+            )
+        agent = command.payload.get("agent")
+        if agent != registration.get("agent"):
+            raise AgentLifecycleError(
+                "FOREGROUND_CLI_REGISTRATION_DENIED",
+                "foreground native CLI registration agent does not match launch",
+            )
+        return self._foreground_registrations_by_launch_id.pop(foreground_launch_id)
 
     def _event(self, event_type: str, session_id: str, **extra: Any) -> EventEnvelope:
         payload = self.runtime.session_payload(session_id, **extra)
@@ -238,18 +340,43 @@ class AgentCommandService:
         return str(Path(workspace or ".").resolve())
 
     @staticmethod
-    def _apply_launch_metadata(session: Any, payload: Dict[str, Any]) -> None:
+    def _apply_launch_metadata(
+        session: Any,
+        payload: Dict[str, Any],
+        allow_native_cli: bool = False,
+    ) -> None:
         launch_surface = payload.get("launch_surface")
         if launch_surface == "foreground_cli" and hasattr(session, "launch_surface"):
             session.launch_surface = launch_surface
 
         control_mode = payload.get("control_mode")
-        if control_mode == "managed_native" and hasattr(session, "control_mode"):
+        allowed_control_modes = {"managed_native"}
+        if allow_native_cli:
+            allowed_control_modes.add("native_cli")
+        if control_mode in allowed_control_modes and hasattr(session, "control_mode"):
             session.control_mode = control_mode
 
         frontend_pid = payload.get("frontend_pid")
         if type(frontend_pid) is int and hasattr(session, "frontend_pid"):
             session.frontend_pid = frontend_pid
+
+    @staticmethod
+    def _terminate_process_tree(pid: int) -> None:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            return
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except Exception:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except Exception:
+                pass
 
     @staticmethod
     def _launch_event_extra(command: CommandEnvelope, workspace: Optional[str]) -> Dict[str, Any]:
@@ -267,6 +394,7 @@ def register_agent_lifecycle_handlers(
     service: AgentCommandService,
 ) -> None:
     router.register("agent.session.launch_or_resume", service.launch_or_resume)
+    router.register("agent.session.register_foreground", service.register_foreground_session)
     router.register("agent.cli.launch_foreground", service.launch_foreground_cli)
     router.register("agent.session.input", service.send_input)
     router.register("agent.run.interrupt", service.interrupt)
