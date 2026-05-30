@@ -49,6 +49,7 @@ class FakeForegroundLauncher:
         workspace,
         foreground_launch_id=None,
         native_cli=False,
+        permission_mode="default",
         registration_token=None,
         hook_token=None,
         exit_token=None,
@@ -58,6 +59,7 @@ class FakeForegroundLauncher:
             workspace,
             foreground_launch_id,
             native_cli,
+            permission_mode,
             registration_token,
             hook_token,
             exit_token,
@@ -146,6 +148,36 @@ def test_foreground_cli_command_uses_repo_script_and_workspace(tmpdir):
     assert "--native-cli" in command
     assert "--token" not in command
     assert "token-value" not in command
+
+
+def test_foreground_cli_command_can_request_claude_plan_mode(tmpdir):
+    command = build_foreground_cli_command(
+        agent="claude",
+        workspace=str(tmpdir),
+        api_url="ws://127.0.0.1:8765",
+        native_cli=True,
+        permission_mode="plan",
+        python_executable="python",
+    )
+
+    assert "--native-cli" in command
+    assert "--permission-mode" in command
+    assert command[command.index("--permission-mode") + 1] == "plan"
+
+
+def test_foreground_cli_command_rejects_bypass_permission_mode(tmpdir):
+    try:
+        build_foreground_cli_command(
+            agent="claude",
+            workspace=str(tmpdir),
+            api_url="ws://127.0.0.1:8765",
+            native_cli=True,
+            permission_mode="bypassPermissions",
+        )
+    except ValueError as exc:
+        assert "permission_mode" in str(exc)
+    else:
+        raise AssertionError("unsafe permission mode was accepted")
 
 
 def test_foreground_cli_command_rejects_shell_command_agent(tmpdir):
@@ -362,12 +394,81 @@ def test_cli_launch_foreground_emits_event_with_frontend_pid(tmpdir):
     assert event["payload"]["foreground_launch_id"].startswith("fg_")
     assert event["payload"]["launch_surface"] == "foreground_cli"
     assert event["payload"]["control_mode"] == "native_cli"
+    assert event["payload"]["permission_mode"] == "default"
     assert len(launcher.launches) == 1
     launch = launcher.launches[0]
     assert launch[:4] == ("claude", workspace, event["payload"]["foreground_launch_id"], True)
-    assert launch[4].startswith("reg_")
-    assert launch[5].startswith("hook_")
-    assert launch[6].startswith("exit_")
+    assert launch[4] == "default"
+    assert launch[5].startswith("reg_")
+    assert launch[6].startswith("hook_")
+    assert launch[7].startswith("exit_")
+
+
+def test_cli_launch_foreground_passes_plan_permission_mode(tmpdir):
+    workspace = str(Path(str(tmpdir)).resolve())
+    server = make_server(tmpdir)
+    launcher = FakeForegroundLauncher(pid=4321)
+    server.agent_commands._foreground_cli_launcher = launcher
+    queue = CaptureQueue()
+    server.connected_clients.add(queue)
+
+    asyncio.run(server._cmd_structured_command(command_message(
+        "agent.cli.launch_foreground",
+        payload={"agent": "claude", "workspace": workspace, "permission_mode": "plan"},
+        command_id="cmd_cli_launch_plan",
+    ), queue))
+
+    event = read_event(queue)
+    assert event["type"] == "agent.cli.launched"
+    assert event["payload"]["permission_mode"] == "plan"
+    launch = launcher.launches[0]
+    assert launch[4] == "plan"
+
+
+def test_cli_launch_foreground_rejects_bypass_permission_mode_payload(tmpdir):
+    workspace = str(Path(str(tmpdir)).resolve())
+    server = make_server(tmpdir)
+    launcher = FakeForegroundLauncher(pid=4321)
+    server.agent_commands._foreground_cli_launcher = launcher
+    queue = CaptureQueue()
+    server.connected_clients.add(queue)
+
+    asyncio.run(server._cmd_structured_command(command_message(
+        "agent.cli.launch_foreground",
+        payload={"agent": "claude", "workspace": workspace, "permission_mode": "bypassPermissions"},
+        command_id="cmd_cli_launch_bypass",
+    ), queue))
+
+    payload = json.loads(queue.get_nowait())
+    assert payload["type"] == "error"
+    assert payload["code"] == "INVALID_PERMISSION_MODE"
+    assert launcher.launches == []
+
+
+def test_cli_launch_foreground_rejects_plan_mode_for_managed_foreground(tmpdir):
+    workspace = str(Path(str(tmpdir)).resolve())
+    server = make_server(tmpdir)
+    launcher = FakeForegroundLauncher(pid=4321)
+    server.agent_commands._foreground_cli_launcher = launcher
+    queue = CaptureQueue()
+    server.connected_clients.add(queue)
+
+    asyncio.run(server._cmd_structured_command(command_message(
+        "agent.cli.launch_foreground",
+        payload={
+            "agent": "codex",
+            "workspace": workspace,
+            "native_cli": False,
+            "permission_mode": "plan",
+        },
+        command_id="cmd_cli_launch_plan_managed",
+    ), queue))
+
+    payload = json.loads(queue.get_nowait())
+    assert payload["type"] == "error"
+    assert payload["code"] == "INVALID_PERMISSION_MODE"
+    assert "native foreground Claude" in payload["message"]
+    assert launcher.launches == []
 
 
 def test_cli_launch_foreground_rejects_unavailable_agent_before_launcher(tmpdir):

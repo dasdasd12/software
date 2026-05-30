@@ -8,6 +8,7 @@ from typing import List, Optional
 
 
 VALID_AGENTS = {"claude", "codex"}
+VALID_NATIVE_CLAUDE_PERMISSION_MODES = {"default", "plan"}
 LAUNCH_TOKEN_ENV = "AI_KEYB_LAUNCH_TOKEN"
 CLAUDE_HOOK_TOKEN_ENV = "AI_KEYB_CLAUDE_HOOK_TOKEN"
 FOREGROUND_REGISTRATION_TOKEN_ENV = "AI_KEYB_FOREGROUND_REGISTRATION_TOKEN"
@@ -53,6 +54,12 @@ def _validate_api_url(api_url: str) -> str:
     return api_url
 
 
+def _validate_permission_mode(permission_mode: str) -> str:
+    if permission_mode not in VALID_NATIVE_CLAUDE_PERMISSION_MODES:
+        raise ValueError("permission_mode must be one of: default, plan")
+    return permission_mode
+
+
 def build_foreground_cli_command(
     agent: str,
     workspace: str,
@@ -60,6 +67,7 @@ def build_foreground_cli_command(
     token: Optional[str] = None,
     foreground_launch_id: Optional[str] = None,
     native_cli: bool = False,
+    permission_mode: str = "default",
     python_executable: Optional[str] = None,
 ) -> List[str]:
     """Build the argv for the known local foreground CLI host script.
@@ -70,6 +78,7 @@ def build_foreground_cli_command(
 
     agent = _validate_agent(agent)
     api_url = _validate_api_url(api_url)
+    permission_mode = _validate_permission_mode(permission_mode)
     if not isinstance(workspace, str) or not workspace:
         raise ValueError("workspace is required")
 
@@ -88,6 +97,7 @@ def build_foreground_cli_command(
         command += ["--launch-id", str(foreground_launch_id)]
     if native_cli:
         command.append("--native-cli")
+        command += ["--permission-mode", permission_mode]
     return command
 
 
@@ -157,6 +167,7 @@ class ForegroundCliLauncher:
         workspace: str,
         foreground_launch_id: Optional[str] = None,
         native_cli: bool = False,
+        permission_mode: str = "default",
         registration_token: Optional[str] = None,
         hook_token: Optional[str] = None,
         exit_token: Optional[str] = None,
@@ -169,6 +180,7 @@ class ForegroundCliLauncher:
             token=self.token,
             foreground_launch_id=foreground_launch_id,
             native_cli=native_cli,
+            permission_mode=permission_mode,
             python_executable=self.python_executable,
         )
         env = build_foreground_cli_env(

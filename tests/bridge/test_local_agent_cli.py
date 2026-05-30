@@ -39,6 +39,47 @@ def test_local_agent_cli_parser_defaults_to_managed_session():
     assert args.exit_token == "exit-token"
     assert args.launch_id == ""
     assert args.native_cli is False
+    assert args.permission_mode == "default"
+
+
+def test_local_agent_cli_parser_accepts_plan_permission_mode():
+    module = load_cli_module()
+
+    args = module.parse_args(
+        ["--agent", "claude", "--workspace", "C:/project", "--native-cli", "--permission-mode", "plan"],
+        env={},
+    )
+
+    assert args.permission_mode == "plan"
+
+
+def test_local_agent_cli_parser_rejects_bypass_permission_mode():
+    module = load_cli_module()
+
+    try:
+        module.parse_args(
+            ["--agent", "claude", "--workspace", "C:/project", "--native-cli", "--permission-mode", "bypassPermissions"],
+            env={},
+        )
+    except SystemExit as exc:
+        assert exc.code == 2
+    else:
+        raise AssertionError("unsafe permission mode was accepted")
+
+
+def test_build_native_claude_command_uses_requested_permission_mode():
+    module = load_cli_module()
+
+    command = module.build_native_claude_command("settings.json", permission_mode="plan")
+
+    assert command[1:] == [
+        "--permission-mode",
+        "plan",
+        "--settings",
+        "settings.json",
+        "--name",
+        "AI Keyboard Claude",
+    ]
 
 
 def test_cli_builds_hello_launch_and_input_commands():
@@ -312,14 +353,18 @@ def test_native_claude_cli_notifies_foreground_exit_without_leaking_tokens(monke
         return FakeProcess()
 
     monkeypatch.setattr(module, "write_claude_hook_settings", lambda api_url, session_id: str(settings_path))
-    monkeypatch.setattr(module, "build_native_claude_command", lambda path: ["claude", "--settings", path])
+    monkeypatch.setattr(
+        module,
+        "build_native_claude_command",
+        lambda path, permission_mode="default": ["claude", "--settings", path, "--permission-mode", permission_mode],
+    )
     monkeypatch.setattr(module.subprocess, "Popen", fake_popen)
     monkeypatch.setenv(module.LAUNCH_TOKEN_ENV, "launch-token")
     monkeypatch.setenv(module.FOREGROUND_REGISTRATION_TOKEN_ENV, "registration-token")
     monkeypatch.setenv(module.FOREGROUND_EXIT_TOKEN_ENV, "exit-token")
     monkeypatch.setenv(module.CLAUDE_HOOK_TOKEN_ENV, "hook-token")
     args = module.parse_args(
-        ["--agent", "claude", "--workspace", "C:/project", "--native-cli", "--launch-id", "fg_native"],
+        ["--agent", "claude", "--workspace", "C:/project", "--native-cli", "--launch-id", "fg_native", "--permission-mode", "plan"],
         env={
             module.LAUNCH_TOKEN_ENV: "launch-token",
             module.CLAUDE_HOOK_TOKEN_ENV: "hook-token",
@@ -333,6 +378,8 @@ def test_native_claude_cli_notifies_foreground_exit_without_leaking_tokens(monke
     result = asyncio.run(module._run_native_claude_cli(ws, args, state))
 
     assert result == 0
+    assert "--permission-mode" in captured_popen["command"]
+    assert captured_popen["command"][captured_popen["command"].index("--permission-mode") + 1] == "plan"
     assert captured_popen["env"][module.CLAUDE_HOOK_TOKEN_ENV] == "hook-token"
     assert module.LAUNCH_TOKEN_ENV not in captured_popen["env"]
     assert module.FOREGROUND_REGISTRATION_TOKEN_ENV not in captured_popen["env"]

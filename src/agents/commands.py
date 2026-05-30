@@ -143,6 +143,7 @@ class AgentCommandService:
         workspace = self._workspace_resolver(self._workspace(command))
         foreground_launch_id = "fg_%s" % uuid.uuid4().hex
         native_cli = bool(command.payload.get("native_cli", agent == "claude"))
+        permission_mode = self._permission_mode(command.payload, native_cli=native_cli)
         registration_token = "reg_%s" % secrets.token_urlsafe(24) if native_cli else None
         hook_token = "hook_%s" % secrets.token_urlsafe(24) if native_cli else None
         exit_token = "exit_%s" % secrets.token_urlsafe(24) if native_cli else None
@@ -152,6 +153,7 @@ class AgentCommandService:
                 workspace,
                 foreground_launch_id,
                 native_cli=native_cli,
+                permission_mode=permission_mode,
                 registration_token=registration_token,
                 hook_token=hook_token,
                 exit_token=exit_token,
@@ -182,6 +184,7 @@ class AgentCommandService:
                 "foreground_launch_id": foreground_launch_id,
                 "launch_surface": "foreground_cli",
                 "control_mode": "native_cli" if native_cli else "managed_native",
+                "permission_mode": permission_mode,
             },
         )
 
@@ -400,6 +403,23 @@ class AgentCommandService:
     @staticmethod
     def _default_workspace_resolver(workspace: Optional[str]) -> str:
         return str(Path(workspace or ".").resolve())
+
+    @staticmethod
+    def _permission_mode(payload: Dict[str, Any], native_cli: bool = True) -> str:
+        value = payload.get("permission_mode")
+        if value in {None, ""}:
+            return "default"
+        if value not in {"default", "plan"}:
+            raise AgentLifecycleError(
+                "INVALID_PERMISSION_MODE",
+                "permission_mode must be one of: default, plan",
+            )
+        if value == "plan" and not native_cli:
+            raise AgentLifecycleError(
+                "INVALID_PERMISSION_MODE",
+                "permission_mode=plan requires native foreground Claude",
+            )
+        return str(value)
 
     @staticmethod
     def _apply_launch_metadata(

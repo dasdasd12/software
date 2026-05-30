@@ -17,6 +17,7 @@ from typing import Any, Dict, Optional
 
 
 DEFAULT_API_URL = "ws://127.0.0.1:8765"
+NATIVE_CLAUDE_PERMISSION_MODES = ("default", "plan")
 LAUNCH_TOKEN_ENV = "AI_KEYB_LAUNCH_TOKEN"
 CLAUDE_HOOK_TOKEN_ENV = "AI_KEYB_CLAUDE_HOOK_TOKEN"
 FOREGROUND_REGISTRATION_TOKEN_ENV = "AI_KEYB_FOREGROUND_REGISTRATION_TOKEN"
@@ -58,6 +59,7 @@ def parse_args(argv, env=None):
     parser.add_argument("--context", default="")
     parser.add_argument("--launch-id", default="")
     parser.add_argument("--native-cli", action="store_true")
+    parser.add_argument("--permission-mode", choices=NATIVE_CLAUDE_PERMISSION_MODES, default="default")
     args = parser.parse_args(argv)
     args.token = (env or os.environ).get(LAUNCH_TOKEN_ENV, "")
     args.hook_token = (env or os.environ).get(CLAUDE_HOOK_TOKEN_ENV, "")
@@ -310,12 +312,14 @@ def write_claude_hook_settings(
     return str(path)
 
 
-def build_native_claude_command(settings_path: str):
+def build_native_claude_command(settings_path: str, permission_mode: str = "default"):
+    if permission_mode not in NATIVE_CLAUDE_PERMISSION_MODES:
+        raise ValueError("permission_mode must be one of: default, plan")
     executable = shutil.which("claude") or "claude"
     return [
         executable,
         "--permission-mode",
-        "default",
+        permission_mode,
         "--settings",
         settings_path,
         "--name",
@@ -450,7 +454,7 @@ async def _run_native_claude_cli(ws, args, state: Dict[str, Any]) -> int:
             return 1
 
     settings_path = write_claude_hook_settings(args.api_url, state["session_id"])
-    command = build_native_claude_command(settings_path)
+    command = build_native_claude_command(settings_path, permission_mode=args.permission_mode)
     process = subprocess.Popen(
         command,
         cwd=args.workspace,
