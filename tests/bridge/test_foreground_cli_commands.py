@@ -13,6 +13,7 @@ sys.path.insert(0, str(BRIDGE_DIR))
 
 from agents.foreground_cli import (  # noqa: E402
     CLAUDE_HOOK_TOKEN_ENV,
+    FOREGROUND_EXIT_TOKEN_ENV,
     FOREGROUND_REGISTRATION_TOKEN_ENV,
     LAUNCH_TOKEN_ENV,
     ForegroundCliLauncher,
@@ -50,6 +51,7 @@ class FakeForegroundLauncher:
         native_cli=False,
         registration_token=None,
         hook_token=None,
+        exit_token=None,
     ):
         self.launches.append((
             agent,
@@ -58,6 +60,7 @@ class FakeForegroundLauncher:
             native_cli,
             registration_token,
             hook_token,
+            exit_token,
         ))
 
         class Process:
@@ -237,10 +240,12 @@ def test_foreground_cli_env_keeps_terminal_environment_and_filters_secrets():
             LAUNCH_TOKEN_ENV: "old-token",
             CLAUDE_HOOK_TOKEN_ENV: "old-hook-token",
             FOREGROUND_REGISTRATION_TOKEN_ENV: "old-registration-token",
+            FOREGROUND_EXIT_TOKEN_ENV: "old-exit-token",
         },
         token="token-value",
         hook_token="hook-token-value",
         registration_token="registration-token-value",
+        exit_token="exit-token-value",
     )
 
     assert env["PATH"] == "C:/Windows/System32"
@@ -251,6 +256,7 @@ def test_foreground_cli_env_keeps_terminal_environment_and_filters_secrets():
     assert env[LAUNCH_TOKEN_ENV] == "token-value"
     assert env[CLAUDE_HOOK_TOKEN_ENV] == "hook-token-value"
     assert env[FOREGROUND_REGISTRATION_TOKEN_ENV] == "registration-token-value"
+    assert env[FOREGROUND_EXIT_TOKEN_ENV] == "exit-token-value"
     assert "OPENAI_API_KEY" not in env
     assert "ANTHROPIC_AUTH_TOKEN" not in env
     assert "CODEX_TOKEN" not in env
@@ -352,6 +358,7 @@ def test_cli_launch_foreground_emits_event_with_frontend_pid(tmpdir):
     assert launch[:4] == ("claude", workspace, event["payload"]["foreground_launch_id"], True)
     assert launch[4].startswith("reg_")
     assert launch[5].startswith("hook_")
+    assert launch[6].startswith("exit_")
 
 
 def test_cli_launch_foreground_rejects_unavailable_agent_before_launcher(tmpdir):

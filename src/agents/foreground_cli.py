@@ -11,6 +11,7 @@ VALID_AGENTS = {"claude", "codex"}
 LAUNCH_TOKEN_ENV = "AI_KEYB_LAUNCH_TOKEN"
 CLAUDE_HOOK_TOKEN_ENV = "AI_KEYB_CLAUDE_HOOK_TOKEN"
 FOREGROUND_REGISTRATION_TOKEN_ENV = "AI_KEYB_FOREGROUND_REGISTRATION_TOKEN"
+FOREGROUND_EXIT_TOKEN_ENV = "AI_KEYB_FOREGROUND_EXIT_TOKEN"
 SENSITIVE_ENV_KEY_MARKERS = (
     "API_KEY",
     "AUTH_TOKEN",
@@ -96,6 +97,7 @@ def build_foreground_cli_env(
     token: Optional[str] = None,
     hook_token: Optional[str] = None,
     registration_token: Optional[str] = None,
+    exit_token: Optional[str] = None,
 ) -> dict:
     """Build a terminal-friendly environment without provider/API secrets."""
     source_env = os.environ if base_env is None else base_env
@@ -115,12 +117,19 @@ def build_foreground_cli_env(
         env[CLAUDE_HOOK_TOKEN_ENV] = hook_token
     if registration_token is not None:
         env[FOREGROUND_REGISTRATION_TOKEN_ENV] = registration_token
+    if exit_token is not None:
+        env[FOREGROUND_EXIT_TOKEN_ENV] = exit_token
     return env
 
 
 def _is_sensitive_env_key(key: str) -> bool:
     normalized = str(key).upper()
-    if normalized in {LAUNCH_TOKEN_ENV, CLAUDE_HOOK_TOKEN_ENV, FOREGROUND_REGISTRATION_TOKEN_ENV}:
+    if normalized in {
+        LAUNCH_TOKEN_ENV,
+        CLAUDE_HOOK_TOKEN_ENV,
+        FOREGROUND_REGISTRATION_TOKEN_ENV,
+        FOREGROUND_EXIT_TOKEN_ENV,
+    }:
         return True
     return any(marker in normalized for marker in SENSITIVE_ENV_KEY_MARKERS)
 
@@ -150,6 +159,7 @@ class ForegroundCliLauncher:
         native_cli: bool = False,
         registration_token: Optional[str] = None,
         hook_token: Optional[str] = None,
+        exit_token: Optional[str] = None,
     ):
         resolved_workspace = str(Path(workspace).resolve())
         command = build_foreground_cli_command(
@@ -166,6 +176,7 @@ class ForegroundCliLauncher:
             token=self.token,
             hook_token=hook_token or self.hook_token,
             registration_token=registration_token,
+            exit_token=exit_token,
         )
 
         kwargs = {

@@ -61,6 +61,29 @@ def permission_denied_response(message: str) -> Dict[str, Any]:
     }
 
 
+def pretooluse_denied_response(message: str) -> Dict[str, Any]:
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": message,
+        }
+    }
+
+
+def is_controlled_pretooluse_input(hook_input: Dict[str, Any]) -> bool:
+    return (
+        hook_input.get("hook_event_name") == "PreToolUse"
+        and hook_input.get("tool_name") in {"AskUserQuestion", "ExitPlanMode"}
+    )
+
+
+def _parse_failure_response(raw: str, message: str) -> Dict[str, Any]:
+    if any(marker in raw for marker in ("PreToolUse", "AskUserQuestion", "ExitPlanMode")):
+        return pretooluse_denied_response(message)
+    return permission_denied_response(message)
+
+
 def _load_hook_input(raw: str) -> Dict[str, Any]:
     payload = json.loads(raw or "{}")
     if not isinstance(payload, dict):
@@ -93,10 +116,11 @@ async def run_hook(args, hook_input: Dict[str, Any]) -> Dict[str, Any]:
 
 def main(argv=None) -> int:
     args = parse_args(argv)
+    raw_input = sys.stdin.read()
     try:
-        hook_input = _load_hook_input(sys.stdin.read())
+        hook_input = _load_hook_input(raw_input)
     except Exception as exc:
-        print(json.dumps(permission_denied_response(f"Invalid Claude hook input: {exc}")), flush=True)
+        print(json.dumps(_parse_failure_response(raw_input, f"Invalid Claude hook input: {exc}")), flush=True)
         return 0
 
     try:
@@ -104,8 +128,12 @@ def main(argv=None) -> int:
     except Exception as exc:
         if hook_input.get("hook_event_name") == "PermissionRequest":
             print(json.dumps(permission_denied_response(f"Local API hook bridge failed closed: {exc}")), flush=True)
+        elif is_controlled_pretooluse_input(hook_input):
+            print(json.dumps(pretooluse_denied_response(f"Local API hook bridge failed closed: {exc}")), flush=True)
         return 0
 
+    if not response and is_controlled_pretooluse_input(hook_input):
+        response = pretooluse_denied_response("Local API hook bridge returned no PreToolUse decision.")
     if response:
         print(json.dumps(response, ensure_ascii=False), flush=True)
     return 0

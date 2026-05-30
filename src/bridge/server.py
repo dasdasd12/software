@@ -105,6 +105,18 @@ class PendingClaudeHookDecision:
     delivered_future: asyncio.Future
 
 
+@dataclass
+class PendingClaudeHookInteraction:
+    request_id: str
+    session_id: str
+    interaction_type: str
+    hook_input: Dict[str, Any]
+    created_at: float
+    timeout_sec: int
+    result_future: asyncio.Future
+    delivered_future: asyncio.Future
+
+
 class LocalCoreServiceMVP:
     """Local Core Service MVP for local APIs, sessions, permissions, and agents."""
 
@@ -165,6 +177,7 @@ class LocalCoreServiceMVP:
         self.approval_policy_engine = ApprovalPolicyEngine()
         self.pending_permissions: Dict[str, PendingPermission] = {}
         self._claude_hook_decisions: Dict[str, PendingClaudeHookDecision] = {}
+        self._claude_hook_interactions: Dict[str, PendingClaudeHookInteraction] = {}
         self._virtual_profiles: Dict[str, Profile] = {}
         self._virtual_sessions: Dict[str, VirtualDeviceSession] = {}
         self._virtual_transports: Dict[str, SimulatedTransport] = {}
@@ -364,6 +377,10 @@ class LocalCoreServiceMVP:
             await self._cmd_virtual_input(msg, client_queue)
         elif msg_type == "permission_response":
             await self._cmd_permission_response(msg, client_queue)
+        elif msg_type == "interaction_response":
+            if not await self._require_capability(client_queue, CAP_PERMISSION_RESPOND):
+                return
+            await self._cmd_interaction_response(msg, client_queue)
         elif msg_type == "claude_hook_event":
             if not await self._require_capability(client_queue, CAP_CLAUDE_HOOK):
                 return
@@ -515,6 +532,9 @@ class LocalCoreServiceMVP:
         if command.type == "agent.permission.respond":
             await self._dispatch_permission_command(command, queue)
             return
+        if command.type == "agent.interaction.respond":
+            await self._dispatch_interaction_command(command, queue)
+            return
 
         self._sync_runtime_state()
         start_seq = self.runtime.event_bus.last_seq
@@ -563,7 +583,7 @@ class LocalCoreServiceMVP:
             value = payload.get("session_id")
             if isinstance(value, str) and value:
                 session_id = value
-        if command.type == "agent.session.close":
+        if command.type in {"agent.session.close", "agent.session.foreground_exited"}:
             if session_id:
                 owned = self._foreground_cli_session_owners.get(queue)
                 if owned is not None:
@@ -804,6 +824,24 @@ class LocalCoreServiceMVP:
         )
         await self._dispatch_permission_command(command, queue)
 
+    async def _cmd_interaction_response(self, msg: Dict[str, Any], queue: asyncio.Queue) -> None:
+        target: Dict[str, Any] = {"request_id": msg.get("request_id", "")}
+        session_id = msg.get("session_id")
+        if isinstance(session_id, str) and session_id:
+            target["session_id"] = session_id
+        payload = {
+            "approved": msg.get("approved", False),
+            "answers": msg.get("answers"),
+            "reason": msg.get("reason"),
+        }
+        command = CommandEnvelope(
+            type="agent.interaction.respond",
+            source=self._command_source_for_queue(queue),
+            target=target,
+            payload=payload,
+        )
+        await self._dispatch_interaction_command(command, queue)
+
     async def _cmd_claude_hook_event(self, msg: Dict[str, Any], queue: asyncio.Queue) -> None:
         hook_input = msg.get("hook")
         if not isinstance(hook_input, dict):
@@ -819,6 +857,9 @@ class LocalCoreServiceMVP:
         hook_event_name = hook_input.get("hook_event_name")
         if hook_event_name == "PermissionRequest":
             await self._cmd_claude_permission_hook(session_id, hook_input, queue)
+            return
+        if self._is_claude_pretooluse_interaction_hook(hook_input):
+            await self._cmd_claude_interaction_hook(session_id, hook_input, queue)
             return
 
         self._emit_claude_hook_observation(session_id, hook_input)
@@ -900,6 +941,90 @@ class LocalCoreServiceMVP:
         if not delivered_future.done():
             delivered_future.set_result(True)
 
+    async def _cmd_claude_interaction_hook(
+        self,
+        session_id: str,
+        hook_input: Dict[str, Any],
+        queue: asyncio.Queue,
+    ) -> None:
+        loop = asyncio.get_running_loop()
+        request_id = "claude_interaction_%s" % uuid_hash({
+            "session_id": session_id,
+            "hook_input": hook_input,
+            "time": time.time(),
+        })
+        interaction_type = self._claude_interaction_type(hook_input)
+        timeout_sec = int(self.cfg["unifier"].get("permission_timeout_sec", 30))
+        result_future = loop.create_future()
+        delivered_future = loop.create_future()
+        event = self._claude_hook_interaction_event(
+            session_id,
+            request_id,
+            interaction_type,
+            timeout_sec,
+            hook_input,
+        )
+        pending_key = self._pending_interaction_key(request_id, session_id)
+        self._claude_hook_interactions[pending_key] = PendingClaudeHookInteraction(
+            request_id=request_id,
+            session_id=session_id,
+            interaction_type=interaction_type,
+            hook_input=hook_input,
+            created_at=time.time(),
+            timeout_sec=timeout_sec,
+            result_future=result_future,
+            delivered_future=delivered_future,
+        )
+        self.session_mgr.update_state(session_id, AgentState.WAITING_INPUT)
+        self._persist_session(session_id)
+        self._on_agent_event(self.unifier.encode_device_message(event))
+        timed_out = None
+        try:
+            hook_response = await asyncio.wait_for(result_future, timeout=timeout_sec)
+        except asyncio.TimeoutError:
+            timed_out = self._claude_hook_interactions.pop(pending_key, None)
+            hook_response = self._claude_hook_interaction_response(
+                hook_input,
+                approved=False,
+                answers={},
+                reason=f"Local API interaction request {request_id} timed out.",
+            )
+            if not self._is_terminal_session(session_id):
+                self.session_mgr.update_state(session_id, AgentState.WORKING)
+                self._persist_session(session_id)
+        await queue.put(json.dumps({
+            "type": "claude_hook_result",
+            "session_id": session_id,
+            "request_id": request_id,
+            "hook_event_name": "PreToolUse",
+            "hook_response": hook_response,
+            "timestamp": int(time.time()),
+        }, ensure_ascii=False))
+        if not delivered_future.done():
+            delivered_future.set_result(True)
+        if timed_out is not None:
+            self._on_agent_event(self.unifier.encode_device_message({
+                "type": "interaction_ack",
+                "request_id": timed_out.request_id,
+                "session_id": timed_out.session_id,
+                "agent": AgentType.CLAUDE.value,
+                "interaction_type": timed_out.interaction_type,
+                "approved": False,
+                "forwarded": True,
+                "evidence": {
+                    "adapter": "claude_code_hook",
+                    "native_channel": "PreToolUse",
+                    "decision_delivered": True,
+                    "queued_to_hook_client": True,
+                    "response_written": True,
+                    "session_id": timed_out.session_id,
+                    "request_id": timed_out.request_id,
+                    "interaction_type": timed_out.interaction_type,
+                    "reason": "interaction_timeout",
+                    "age_ms": int((time.time() - timed_out.created_at) * 1000),
+                },
+            }))
+
     async def _dispatch_permission_command(
         self,
         command: CommandEnvelope,
@@ -930,6 +1055,18 @@ class LocalCoreServiceMVP:
         self._sync_runtime_state()
         await queue.put(self.unifier.encode_device_message(dict(event.payload)))
         self._broadcast_core_events(self._events_to_broadcast(start_seq, event))
+
+    async def _dispatch_interaction_command(
+        self,
+        command: CommandEnvelope,
+        queue: asyncio.Queue,
+    ) -> None:
+        try:
+            ack = await self._handle_interaction_command(command)
+        except AgentLifecycleError as exc:
+            await self._send_error(queue, exc.code, exc.message)
+            return
+        self._on_agent_event(self.unifier.encode_device_message(ack))
 
     async def _handle_permission_command(self, command: CommandEnvelope) -> Dict[str, Any]:
         target = command.target
@@ -1025,6 +1162,60 @@ class LocalCoreServiceMVP:
         if decision == "always_allow":
             ack["decision"] = decision
         return ack
+
+    async def _handle_interaction_command(self, command: CommandEnvelope) -> Dict[str, Any]:
+        target = command.target
+        if target is None:
+            target = {}
+        if not isinstance(target, dict):
+            raise AgentLifecycleError("INVALID_COMMAND", "command target must be an object")
+
+        request_id = (
+            target.get("request_id")
+            or target.get("interaction_id")
+            or command.payload.get("request_id")
+            or command.payload.get("interaction_id")
+        )
+        if not isinstance(request_id, str) or not request_id:
+            raise AgentLifecycleError("INVALID_COMMAND", "target.request_id is required")
+        session_id = target.get("session_id") or command.payload.get("session_id")
+        if not isinstance(session_id, str):
+            session_id = None
+        try:
+            approved = self._parse_approved(command.payload.get("approved", False))
+        except ValueError as exc:
+            raise AgentLifecycleError("INVALID_INTERACTION_RESPONSE", str(exc)) from exc
+
+        pending_key, pending = self._find_pending_interaction(request_id, session_id)
+        if pending is None:
+            raise AgentLifecycleError("REQUEST_NOT_FOUND", f"Interaction request {request_id} not found")
+
+        answers = command.payload.get("answers")
+        if not isinstance(answers, dict):
+            answers = {}
+        reason = command.payload.get("reason")
+        if not isinstance(reason, str):
+            reason = ""
+        result = await self._deliver_claude_hook_interaction(
+            pending_key,
+            pending,
+            approved,
+            answers,
+            reason,
+        )
+        if pending.session_id and not self._is_terminal_session(pending.session_id):
+            self.session_mgr.update_state(pending.session_id, AgentState.WORKING)
+            self._persist_session(pending.session_id)
+        return {
+            "type": "interaction_ack",
+            "request_id": pending.request_id,
+            "session_id": pending.session_id,
+            "agent": AgentType.CLAUDE.value,
+            "interaction_type": pending.interaction_type,
+            "approved": approved,
+            "forwarded": bool(result.get("forwarded", False)),
+            "evidence": result.get("evidence", {}),
+        }
 
     async def _cmd_interrupt(self, msg: Dict[str, Any], queue: asyncio.Queue) -> None:
         if not await self._require_capability(queue, CAP_AGENT_LAUNCH):
@@ -1318,10 +1509,15 @@ class LocalCoreServiceMVP:
             else:
                 projection_key = self._projected_permission_key(pending_key)
             permissions[projection_key] = permission_record
+        interactions = {
+            pending.request_id: self._pending_interaction_record(pending)
+            for pending in self._claude_hook_interactions.values()
+        }
 
         store.sessions = sessions
         store.runs = runs
         store.permissions = permissions
+        store.interactions = interactions
         devices = {
             device_id: dict(record)
             for device_id, record in store.devices.items()
@@ -1376,6 +1572,38 @@ class LocalCoreServiceMVP:
         )
         if instance_id:
             record["instance_id"] = instance_id
+        return record
+
+    def _pending_interaction_record(self, pending: PendingClaudeHookInteraction) -> Dict[str, Any]:
+        hook_input = pending.hook_input
+        tool_name = str(hook_input.get("tool_name") or "unknown")
+        tool_input = hook_input.get("tool_input") if isinstance(hook_input.get("tool_input"), dict) else {}
+        record = {
+            "interaction_id": pending.request_id,
+            "request_id": pending.request_id,
+            "session_id": pending.session_id,
+            "provider_id": AgentType.CLAUDE.value,
+            "agent": AgentType.CLAUDE.value,
+            "interaction_type": pending.interaction_type,
+            "tool_name": tool_name,
+            "tool_input": tool_input,
+            "timeout_sec": pending.timeout_sec,
+            "created_at": int(pending.created_at),
+            "native": {
+                "adapter": "claude_code_hook",
+                "native_channel": "PreToolUse",
+                "hook_event_name": "PreToolUse",
+                "tool_name": tool_name,
+            },
+        }
+        if pending.interaction_type == "ask_user_question":
+            questions = tool_input.get("questions")
+            record["questions"] = questions if isinstance(questions, list) else []
+        elif pending.interaction_type == "exit_plan_mode":
+            record["plan"] = tool_input.get("plan")
+            record["planFilePath"] = tool_input.get("planFilePath")
+            allowed = tool_input.get("allowedPrompts")
+            record["allowedPrompts"] = allowed if isinstance(allowed, list) else []
         return record
 
     @staticmethod
@@ -1757,6 +1985,55 @@ class LocalCoreServiceMVP:
             },
         }
 
+    def _claude_hook_interaction_event(
+        self,
+        session_id: str,
+        request_id: str,
+        interaction_type: str,
+        timeout_sec: int,
+        hook_input: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        tool_name = str(hook_input.get("tool_name") or "unknown")
+        tool_input = hook_input.get("tool_input") if isinstance(hook_input.get("tool_input"), dict) else {}
+        event = {
+            "type": "interaction_request",
+            "request_id": request_id,
+            "session_id": session_id,
+            "agent": AgentType.CLAUDE.value,
+            "interaction_type": interaction_type,
+            "tool_name": tool_name,
+            "tool_input": tool_input,
+            "timeout_sec": timeout_sec,
+            "native": {
+                "adapter": "claude_code_hook",
+                "native_channel": "PreToolUse",
+                "hook_event_name": "PreToolUse",
+                "tool_name": tool_name,
+            },
+        }
+        if interaction_type == "ask_user_question":
+            questions = tool_input.get("questions")
+            event["questions"] = questions if isinstance(questions, list) else []
+        elif interaction_type == "exit_plan_mode":
+            event["plan"] = tool_input.get("plan")
+            event["planFilePath"] = tool_input.get("planFilePath")
+            allowed = tool_input.get("allowedPrompts")
+            event["allowedPrompts"] = allowed if isinstance(allowed, list) else []
+        return event
+
+    @staticmethod
+    def _is_claude_pretooluse_interaction_hook(hook_input: Dict[str, Any]) -> bool:
+        return (
+            hook_input.get("hook_event_name") == "PreToolUse"
+            and hook_input.get("tool_name") in {"AskUserQuestion", "ExitPlanMode"}
+        )
+
+    @staticmethod
+    def _claude_interaction_type(hook_input: Dict[str, Any]) -> str:
+        if hook_input.get("tool_name") == "AskUserQuestion":
+            return "ask_user_question"
+        return "exit_plan_mode"
+
     @staticmethod
     def _describe_claude_hook_tool(tool_name: str, tool_input: Dict[str, Any]) -> str:
         if tool_name == "Bash":
@@ -1827,10 +2104,69 @@ class LocalCoreServiceMVP:
                 "adapter": "claude_code_hook",
                 "native_channel": "PermissionRequest",
                 "decision_delivered": True,
+                "queued_to_hook_client": True,
                 "response_written": True,
                 "session_id": pending.session_id,
                 "request_id": pending.request_id,
                 "decision": decision,
+                "age_ms": int((time.time() - waiter.created_at) * 1000),
+            },
+        }
+
+    async def _deliver_claude_hook_interaction(
+        self,
+        pending_key: str,
+        pending: PendingClaudeHookInteraction,
+        approved: bool,
+        answers: Dict[str, Any],
+        reason: str,
+    ) -> Dict[str, Any]:
+        waiter = self._claude_hook_interactions.get(pending_key)
+        if waiter is None:
+            return {
+                "accepted": True,
+                "forwarded": False,
+                "evidence": {
+                    "adapter": "claude_code_hook",
+                    "reason": "hook_waiter_not_registered",
+                    "session_id": pending.session_id,
+                    "request_id": pending.request_id,
+                },
+            }
+        if not waiter.result_future.done():
+            waiter.result_future.set_result(self._claude_hook_interaction_response(
+                waiter.hook_input,
+                approved=approved,
+                answers=answers,
+                reason=reason,
+            ))
+        try:
+            await asyncio.wait_for(waiter.delivered_future, timeout=10.0)
+        except asyncio.TimeoutError:
+            return {
+                "accepted": True,
+                "forwarded": False,
+                "evidence": {
+                    "adapter": "claude_code_hook",
+                    "reason": "hook_response_delivery_timeout",
+                    "session_id": pending.session_id,
+                    "request_id": pending.request_id,
+                },
+            }
+        finally:
+            self._claude_hook_interactions.pop(pending_key, None)
+        return {
+            "accepted": True,
+            "forwarded": True,
+            "evidence": {
+                "adapter": "claude_code_hook",
+                "native_channel": "PreToolUse",
+                "decision_delivered": True,
+                "queued_to_hook_client": True,
+                "response_written": True,
+                "session_id": pending.session_id,
+                "request_id": pending.request_id,
+                "interaction_type": pending.interaction_type,
                 "age_ms": int((time.time() - waiter.created_at) * 1000),
             },
         }
@@ -1860,6 +2196,40 @@ class LocalCoreServiceMVP:
                 "decision": hook_decision,
             }
         }
+
+    @staticmethod
+    def _claude_hook_interaction_response(
+        hook_input: Dict[str, Any],
+        approved: bool,
+        answers: Dict[str, Any],
+        reason: str = "",
+    ) -> Dict[str, Any]:
+        if not approved:
+            output = {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason or "Denied by Local API interaction response.",
+            }
+            return {"hookSpecificOutput": output}
+
+        tool_name = hook_input.get("tool_name")
+        tool_input = hook_input.get("tool_input") if isinstance(hook_input.get("tool_input"), dict) else {}
+        updated_input = dict(tool_input)
+        if tool_name == "AskUserQuestion":
+            questions = tool_input.get("questions")
+            updated_input["questions"] = questions if isinstance(questions, list) else []
+            updated_input["answers"] = dict(answers)
+        elif tool_name == "ExitPlanMode":
+            for key in ("plan", "planFilePath", "allowedPrompts"):
+                if key in tool_input:
+                    updated_input[key] = tool_input[key]
+            updated_input["approved"] = True
+        output = {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+            "updatedInput": updated_input,
+        }
+        return {"hookSpecificOutput": output}
 
     @staticmethod
     def _permission_decision_from_payload(payload: Dict[str, Any], approved: bool) -> str:
@@ -2001,6 +2371,41 @@ class LocalCoreServiceMVP:
             f"run={run_id or ''}",
         ))
 
+    def _pending_interaction_key(
+        self,
+        request_id: str,
+        session_id: Optional[str] = None,
+    ) -> str:
+        for key, pending in self._claude_hook_interactions.items():
+            if pending.request_id == request_id and pending.session_id == session_id:
+                return key
+        return "|".join((
+            "interaction",
+            f"request={request_id}",
+            f"session={session_id or ''}",
+        ))
+
+    def _find_pending_interaction(
+        self,
+        request_id: str,
+        session_id: Any = None,
+    ) -> Tuple[str, Optional[PendingClaudeHookInteraction]]:
+        has_session = isinstance(session_id, str) and bool(session_id)
+        matches = [
+            (key, pending)
+            for key, pending in self._claude_hook_interactions.items()
+            if pending.request_id == request_id
+        ]
+        if has_session:
+            matches = [
+                (key, pending)
+                for key, pending in matches
+                if pending.session_id == session_id
+            ]
+        if len(matches) == 1:
+            return matches[0]
+        return "", None
+
     @staticmethod
     def _projected_permission_key(pending_key: str) -> str:
         digest = hashlib.sha256(pending_key.encode("utf-8")).hexdigest()[:16]
@@ -2118,6 +2523,8 @@ class LocalCoreServiceMVP:
             "agent.session.input": CAP_AGENT_LAUNCH,
             "agent.run.interrupt": CAP_AGENT_LAUNCH,
             "agent.session.close": CAP_AGENT_LAUNCH,
+            "agent.session.foreground_exited": CAP_AGENT_LAUNCH,
+            "agent.interaction.respond": CAP_PERMISSION_RESPOND,
             "system.snapshot.request": CAP_SESSION_LIST,
             "notification.create": CAP_NOTIFICATION_CREATE,
         }.get(command_type)

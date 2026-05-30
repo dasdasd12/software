@@ -38,6 +38,7 @@ class StateStore:
         self.profiles: Dict[str, Any] = {}
         self.notifications: Dict[str, Any] = {}
         self.permissions: Dict[str, Any] = {}
+        self.interactions: Dict[str, Any] = {}
         self.focus: Dict[str, Any] = {}
         self.active_tools: Dict[str, str] = {}
 
@@ -105,6 +106,7 @@ class StateStore:
             profiles=dict(self.profiles),
             notifications=list(self.notifications.values()),
             permissions=list(self.permissions.values()),
+            interactions=list(self.interactions.values()),
             focus=dict(self.focus),
             active_tools=dict(self.active_tools),
         )

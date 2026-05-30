@@ -120,6 +120,7 @@ class Snapshot:
     profiles: Dict[str, Any] = field(default_factory=dict)
     notifications: list = field(default_factory=list)
     permissions: list = field(default_factory=list)
+    interactions: list = field(default_factory=list)
     snapshot_id: str = field(default_factory=lambda: _new_id("snap"))
 
     def to_dict(self) -> Dict[str, Any]:
@@ -133,4 +134,5 @@ class Snapshot:
             "profiles": dict(self.profiles),
             "notifications": list(self.notifications),
             "permissions": list(self.permissions),
+            "interactions": list(self.interactions),
         }

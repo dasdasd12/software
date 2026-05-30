@@ -40,6 +40,7 @@ class LocalCoreRuntime:
                 "agent.session.input": service.send_input,
                 "agent.run.interrupt": service.interrupt,
                 "agent.session.close": service.close_session,
+                "agent.session.foreground_exited": service.foreground_exited,
                 "agent.permission.respond": service.respond_permission,
             },
         )

@@ -34,6 +34,7 @@ class AgentCommandService:
         self._foreground_root_pids_by_session_id: Dict[str, int] = {}
         self._foreground_registrations_by_launch_id: Dict[str, Dict[str, Any]] = {}
         self._foreground_hook_tokens_by_session_id: Dict[str, str] = {}
+        self._foreground_exit_tokens_by_session_id: Dict[str, str] = {}
 
     async def launch_or_resume(self, command: CommandEnvelope) -> EventEnvelope:
         session_id = self._session_id(command) or "new"
@@ -144,6 +145,7 @@ class AgentCommandService:
         native_cli = bool(command.payload.get("native_cli", agent == "claude"))
         registration_token = "reg_%s" % secrets.token_urlsafe(24) if native_cli else None
         hook_token = "hook_%s" % secrets.token_urlsafe(24) if native_cli else None
+        exit_token = "exit_%s" % secrets.token_urlsafe(24) if native_cli else None
         try:
             process = self._foreground_cli_launcher.launch(
                 agent,
@@ -152,6 +154,7 @@ class AgentCommandService:
                 native_cli=native_cli,
                 registration_token=registration_token,
                 hook_token=hook_token,
+                exit_token=exit_token,
             )
         except Exception as exc:
             raise AgentLifecycleError("FOREGROUND_CLI_LAUNCH_FAILED", str(exc)) from exc
@@ -163,6 +166,7 @@ class AgentCommandService:
             self._foreground_registrations_by_launch_id[foreground_launch_id] = {
                 "registration_token": registration_token,
                 "hook_token": hook_token,
+                "exit_token": exit_token,
                 "agent": agent,
                 "workspace": workspace,
                 "bootstrap_pid": frontend_pid if type(frontend_pid) is int else None,
@@ -198,6 +202,7 @@ class AgentCommandService:
         self._foreground_root_pids_by_launch_id.pop(str(foreground_launch_id), None)
         self._foreground_root_pids_by_session_id[session_id] = frontend_pid
         self._foreground_hook_tokens_by_session_id[session_id] = str(registration["hook_token"])
+        self._foreground_exit_tokens_by_session_id[session_id] = str(registration["exit_token"])
         if hasattr(session, "frontend_pid"):
             session.frontend_pid = frontend_pid
         self.runtime.update_state(session_id, "WORKING")
@@ -213,6 +218,7 @@ class AgentCommandService:
         ):
             root_pid = self._foreground_root_pids_by_session_id.pop(session_id, None)
             self._foreground_hook_tokens_by_session_id.pop(session_id, None)
+            self._foreground_exit_tokens_by_session_id.pop(session_id, None)
             if root_pid is None:
                 raise AgentLifecycleError(
                     "FOREGROUND_CLI_NOT_OWNED",
@@ -234,6 +240,57 @@ class AgentCommandService:
         self.runtime.update_state(session_id, "CANCELLED")
         self.runtime.persist(session_id)
         return self._event("agent.session.closed", session_id, closed=True, accepted=bool(accepted))
+
+    async def foreground_exited(self, command: CommandEnvelope) -> EventEnvelope:
+        session_id = self._required_session_id(command)
+        session = self.runtime.require_session(session_id)
+        if (
+            getattr(session, "launch_surface", None) != "foreground_cli"
+            or getattr(session, "control_mode", None) != "native_cli"
+        ):
+            raise AgentLifecycleError(
+                "FOREGROUND_CLI_NOT_OWNED",
+                "only registered native foreground sessions can report foreground exit",
+            )
+
+        expected_exit_token = self._foreground_exit_tokens_by_session_id.get(session_id)
+        supplied_exit_token = command.payload.get("foreground_exit_token")
+        if not (
+            isinstance(expected_exit_token, str)
+            and expected_exit_token
+            and isinstance(supplied_exit_token, str)
+            and secrets.compare_digest(supplied_exit_token, expected_exit_token)
+        ):
+            raise AgentLifecycleError(
+                "FOREGROUND_CLI_EXIT_DENIED",
+                "foreground exit token is invalid",
+            )
+
+        root_pid = self._foreground_root_pids_by_session_id.get(session_id)
+        if root_pid is None:
+            raise AgentLifecycleError(
+                "FOREGROUND_CLI_NOT_OWNED",
+                "native foreground session was not launched by Local API",
+            )
+
+        self._foreground_root_pids_by_session_id.pop(session_id, None)
+        self._foreground_hook_tokens_by_session_id.pop(session_id, None)
+        self._foreground_exit_tokens_by_session_id.pop(session_id, None)
+
+        exit_code = command.payload.get("exit_code")
+        try:
+            exit_code_int = int(exit_code)
+        except (TypeError, ValueError, OverflowError):
+            exit_code_int = None
+        state = "COMPLETED" if exit_code_int == 0 else "FAILED"
+        self.runtime.update_state(session_id, state)
+        self.runtime.persist(session_id)
+        return self._event(
+            "agent.session.exited",
+            session_id,
+            exited=True,
+            exit_code=exit_code_int,
+        )
 
     async def respond_permission(self, command: CommandEnvelope) -> EventEnvelope:
         if self._permission_responder is None:
@@ -284,6 +341,11 @@ class AgentCommandService:
             raise AgentLifecycleError(
                 "FOREGROUND_CLI_REGISTRATION_DENIED",
                 "foreground native CLI registration agent does not match launch",
+            )
+        if not isinstance(registration.get("exit_token"), str) or not registration.get("exit_token"):
+            raise AgentLifecycleError(
+                "FOREGROUND_CLI_REGISTRATION_DENIED",
+                "foreground native CLI exit token is missing",
             )
         return self._foreground_registrations_by_launch_id.pop(foreground_launch_id)
 
@@ -399,4 +461,5 @@ def register_agent_lifecycle_handlers(
     router.register("agent.session.input", service.send_input)
     router.register("agent.run.interrupt", service.interrupt)
     router.register("agent.session.close", service.close_session)
+    router.register("agent.session.foreground_exited", service.foreground_exited)
     router.register("agent.permission.respond", service.respond_permission)

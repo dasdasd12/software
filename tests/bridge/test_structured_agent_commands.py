@@ -107,9 +107,16 @@ def read_error(queue):
     return payload
 
 
-def prime_foreground_registration(server, launch_id="fg_native", agent="claude", token="reg-token"):
+def prime_foreground_registration(
+    server,
+    launch_id="fg_native",
+    agent="claude",
+    token="reg-token",
+    exit_token="exit-token",
+):
     server.agent_commands._foreground_registrations_by_launch_id[launch_id] = {
         "registration_token": token,
+        "exit_token": exit_token,
         "hook_token": "hook-token",
         "agent": agent,
         "workspace": "C:/repo",
@@ -242,6 +249,7 @@ def test_structured_register_foreground_session_does_not_launch_provider():
     assert server.session_mgr.get(session_id).control_mode == "native_cli"
     assert server.agent_commands._foreground_root_pids_by_session_id[session_id] == 2468
     assert server.agent_commands.hook_token_for_session(session_id) == "hook-token"
+    assert server.agent_commands._foreground_exit_tokens_by_session_id[session_id] == "exit-token"
 
 
 def test_structured_close_native_foreground_session_terminates_root_process(monkeypatch):
@@ -282,6 +290,140 @@ def test_structured_close_native_foreground_session_terminates_root_process(monk
     assert close_event["type"] == "agent.session.closed"
     assert terminated == [2468]
     assert server.agent_commands.hook_token_for_session(session_id) is None
+
+
+def test_structured_foreground_exited_completes_native_session_without_terminating(monkeypatch):
+    server = make_server()
+    queue = CaptureQueue()
+    server.connected_clients.add(queue)
+    terminated = []
+    monkeypatch.setattr(
+        server.agent_commands,
+        "_terminate_process_tree",
+        lambda pid: terminated.append(pid),
+    )
+    prime_foreground_registration(server)
+
+    asyncio.run(server._cmd_structured_command(command_message(
+        "agent.session.register_foreground",
+        target={"session_id": "new"},
+        payload={
+            "agent": "claude",
+            "launch_surface": "foreground_cli",
+            "control_mode": "native_cli",
+            "frontend_pid": 2468,
+            "foreground_launch_id": "fg_native",
+            "foreground_registration_token": "reg-token",
+        },
+        command_id="cmd_register_native_foreground",
+    ), queue))
+    event = read_event(queue)
+    session_id = event["payload"]["session_id"]
+
+    asyncio.run(server._cmd_structured_command(command_message(
+        "agent.session.foreground_exited",
+        target={"session_id": session_id},
+        payload={"exit_code": 0, "foreground_exit_token": "exit-token"},
+        command_id="cmd_foreground_exited",
+    ), queue))
+
+    exited_event = read_event(queue)
+    assert exited_event["type"] == "agent.session.exited"
+    assert exited_event["payload"]["exit_code"] == 0
+    assert server.session_mgr.get(session_id).state == AgentState.COMPLETED
+    assert server.agent_commands.hook_token_for_session(session_id) is None
+    assert session_id not in server.agent_commands._foreground_root_pids_by_session_id
+    assert terminated == []
+
+
+def test_structured_foreground_exited_rejects_missing_exit_token():
+    server = make_server()
+    queue = CaptureQueue()
+    server.connected_clients.add(queue)
+    prime_foreground_registration(server)
+
+    asyncio.run(server._cmd_structured_command(command_message(
+        "agent.session.register_foreground",
+        target={"session_id": "new"},
+        payload={
+            "agent": "claude",
+            "launch_surface": "foreground_cli",
+            "control_mode": "native_cli",
+            "frontend_pid": 2468,
+            "foreground_launch_id": "fg_native",
+            "foreground_registration_token": "reg-token",
+        },
+        command_id="cmd_register_native_foreground",
+    ), queue))
+    event = read_event(queue)
+    session_id = event["payload"]["session_id"]
+
+    asyncio.run(server._cmd_structured_command(command_message(
+        "agent.session.foreground_exited",
+        target={"session_id": session_id},
+        payload={"exit_code": 0},
+        command_id="cmd_foreground_exited_missing_token",
+    ), queue))
+
+    error = read_error(queue)
+    assert error["code"] == "FOREGROUND_CLI_EXIT_DENIED"
+    assert server.session_mgr.get(session_id).state == AgentState.WORKING
+    assert server.agent_commands.hook_token_for_session(session_id) == "hook-token"
+    assert server.agent_commands._foreground_root_pids_by_session_id[session_id] == 2468
+
+
+def test_structured_foreground_exited_rejects_bad_exit_token():
+    server = make_server()
+    queue = CaptureQueue()
+    server.connected_clients.add(queue)
+    prime_foreground_registration(server)
+
+    asyncio.run(server._cmd_structured_command(command_message(
+        "agent.session.register_foreground",
+        target={"session_id": "new"},
+        payload={
+            "agent": "claude",
+            "launch_surface": "foreground_cli",
+            "control_mode": "native_cli",
+            "frontend_pid": 2468,
+            "foreground_launch_id": "fg_native",
+            "foreground_registration_token": "reg-token",
+        },
+        command_id="cmd_register_native_foreground",
+    ), queue))
+    event = read_event(queue)
+    session_id = event["payload"]["session_id"]
+
+    asyncio.run(server._cmd_structured_command(command_message(
+        "agent.session.foreground_exited",
+        target={"session_id": session_id},
+        payload={"exit_code": 0, "foreground_exit_token": "wrong"},
+        command_id="cmd_foreground_exited_bad_token",
+    ), queue))
+
+    error = read_error(queue)
+    assert error["code"] == "FOREGROUND_CLI_EXIT_DENIED"
+    assert server.session_mgr.get(session_id).state == AgentState.WORKING
+    assert server.agent_commands.hook_token_for_session(session_id) == "hook-token"
+    assert server.agent_commands._foreground_root_pids_by_session_id[session_id] == 2468
+
+
+def test_structured_foreground_exited_rejects_managed_session():
+    server = make_server()
+    queue = CaptureQueue()
+    server.connected_clients.add(queue)
+    session = server.session_mgr.create(AgentType.CLAUDE)
+
+    asyncio.run(server._cmd_structured_command(command_message(
+        "agent.session.foreground_exited",
+        target={"session_id": session.session_id},
+        payload={"exit_code": 0},
+        command_id="cmd_foreground_exited_managed",
+    ), queue))
+
+    error = read_error(queue)
+    assert error["code"] == "FOREGROUND_CLI_NOT_OWNED"
+    assert server.session_mgr.get(session.session_id).state == AgentState.IDLE
 
 
 def test_structured_register_foreground_rejects_unrecognized_launch_id():

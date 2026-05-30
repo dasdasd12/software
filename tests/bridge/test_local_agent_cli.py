@@ -1,6 +1,7 @@
 import importlib.util
 import asyncio
 import io
+import threading
 from pathlib import Path
 
 
@@ -24,6 +25,7 @@ def test_local_agent_cli_parser_defaults_to_managed_session():
             module.LAUNCH_TOKEN_ENV: "env-token",
             module.CLAUDE_HOOK_TOKEN_ENV: "hook-token",
             module.FOREGROUND_REGISTRATION_TOKEN_ENV: "registration-token",
+            module.FOREGROUND_EXIT_TOKEN_ENV: "exit-token",
         },
     )
 
@@ -34,6 +36,7 @@ def test_local_agent_cli_parser_defaults_to_managed_session():
     assert args.token == "env-token"
     assert args.hook_token == "hook-token"
     assert args.registration_token == "registration-token"
+    assert args.exit_token == "exit-token"
     assert args.launch_id == ""
     assert args.native_cli is False
 
@@ -100,6 +103,12 @@ def test_cli_builds_permission_interrupt_and_close_commands():
     close = module.build_close_command("sess_1")
     assert close["command"]["type"] == "agent.session.close"
     assert close["command"]["target"] == {"session_id": "sess_1"}
+
+    exited = module.build_foreground_exited_command("sess_1", 0, "exit-token")
+    assert exited["command"]["type"] == "agent.session.foreground_exited"
+    assert exited["command"]["target"] == {"session_id": "sess_1"}
+    assert exited["command"]["payload"]["exit_code"] == 0
+    assert exited["command"]["payload"]["foreground_exit_token"] == "exit-token"
 
 
 def test_stdin_reader_thread_posts_lines_without_default_executor():
@@ -179,14 +188,103 @@ def test_native_claude_env_removes_launch_token_and_keeps_hook_token(monkeypatch
             module.LAUNCH_TOKEN_ENV: "launch-token",
             module.CLAUDE_HOOK_TOKEN_ENV: "hook-token",
             module.FOREGROUND_REGISTRATION_TOKEN_ENV: "registration-token",
+            module.FOREGROUND_EXIT_TOKEN_ENV: "exit-token",
         },
     )
     monkeypatch.setenv(module.LAUNCH_TOKEN_ENV, "launch-token")
     monkeypatch.setenv(module.CLAUDE_HOOK_TOKEN_ENV, "hook-token")
     monkeypatch.setenv(module.FOREGROUND_REGISTRATION_TOKEN_ENV, "registration-token")
+    monkeypatch.setenv(module.FOREGROUND_EXIT_TOKEN_ENV, "exit-token")
 
     env = module._native_claude_env(args)
 
     assert module.LAUNCH_TOKEN_ENV not in env
     assert module.FOREGROUND_REGISTRATION_TOKEN_ENV not in env
+    assert module.FOREGROUND_EXIT_TOKEN_ENV not in env
     assert env[module.CLAUDE_HOOK_TOKEN_ENV] == "hook-token"
+
+
+def test_native_claude_cli_notifies_foreground_exit_without_leaking_tokens(monkeypatch, tmpdir):
+    module = load_cli_module()
+    settings_path = tmpdir.join("settings.json")
+    settings_path.write("{}")
+    captured_popen = {}
+    drained_event = threading.Event()
+
+    class FakeWebSocket:
+        def __init__(self):
+            self.sent = []
+            self.recv_messages = [
+                module.json.dumps({
+                    "type": "event",
+                    "event": {
+                        "type": "agent.session.created",
+                        "payload": {"session_id": "sess_native"},
+                    },
+                }),
+                module.json.dumps({
+                    "type": "event",
+                    "event": {
+                        "type": "agent_hook_event",
+                        "payload": {"session_id": "sess_native"},
+                    },
+                }),
+            ]
+            self.recv_count = 0
+
+        async def send(self, raw):
+            self.sent.append(module.json.loads(raw))
+
+        async def recv(self):
+            if self.recv_messages:
+                self.recv_count += 1
+                if self.recv_count > 1:
+                    drained_event.set()
+                return self.recv_messages.pop(0)
+            await module.asyncio.Future()
+
+    class FakeProcess:
+        def wait(self):
+            return 0 if drained_event.wait(1.0) else 3
+
+    def fake_popen(command, cwd=None, env=None):
+        captured_popen["command"] = command
+        captured_popen["cwd"] = cwd
+        captured_popen["env"] = env
+        return FakeProcess()
+
+    monkeypatch.setattr(module, "write_claude_hook_settings", lambda api_url, session_id: str(settings_path))
+    monkeypatch.setattr(module, "build_native_claude_command", lambda path: ["claude", "--settings", path])
+    monkeypatch.setattr(module.subprocess, "Popen", fake_popen)
+    monkeypatch.setenv(module.LAUNCH_TOKEN_ENV, "launch-token")
+    monkeypatch.setenv(module.FOREGROUND_REGISTRATION_TOKEN_ENV, "registration-token")
+    monkeypatch.setenv(module.FOREGROUND_EXIT_TOKEN_ENV, "exit-token")
+    monkeypatch.setenv(module.CLAUDE_HOOK_TOKEN_ENV, "hook-token")
+    args = module.parse_args(
+        ["--agent", "claude", "--workspace", "C:/project", "--native-cli", "--launch-id", "fg_native"],
+        env={
+            module.LAUNCH_TOKEN_ENV: "launch-token",
+            module.CLAUDE_HOOK_TOKEN_ENV: "hook-token",
+            module.FOREGROUND_REGISTRATION_TOKEN_ENV: "registration-token",
+            module.FOREGROUND_EXIT_TOKEN_ENV: "exit-token",
+        },
+    )
+    state = {}
+    ws = FakeWebSocket()
+
+    result = asyncio.run(module._run_native_claude_cli(ws, args, state))
+
+    assert result == 0
+    assert captured_popen["env"][module.CLAUDE_HOOK_TOKEN_ENV] == "hook-token"
+    assert module.LAUNCH_TOKEN_ENV not in captured_popen["env"]
+    assert module.FOREGROUND_REGISTRATION_TOKEN_ENV not in captured_popen["env"]
+    assert module.FOREGROUND_EXIT_TOKEN_ENV not in captured_popen["env"]
+    assert ws.recv_count >= 2
+    sent_types = [message["command"]["type"] for message in ws.sent if message.get("type") == "command"]
+    assert sent_types == [
+        "agent.session.register_foreground",
+        "agent.session.foreground_exited",
+    ]
+    assert ws.sent[-1]["command"]["target"] == {"session_id": "sess_native"}
+    assert ws.sent[-1]["command"]["payload"]["exit_code"] == 0
+    assert ws.sent[-1]["command"]["payload"]["foreground_exit_token"] == "exit-token"

@@ -20,6 +20,7 @@ DEFAULT_API_URL = "ws://127.0.0.1:8765"
 LAUNCH_TOKEN_ENV = "AI_KEYB_LAUNCH_TOKEN"
 CLAUDE_HOOK_TOKEN_ENV = "AI_KEYB_CLAUDE_HOOK_TOKEN"
 FOREGROUND_REGISTRATION_TOKEN_ENV = "AI_KEYB_FOREGROUND_REGISTRATION_TOKEN"
+FOREGROUND_EXIT_TOKEN_ENV = "AI_KEYB_FOREGROUND_EXIT_TOKEN"
 DEFAULT_CAPABILITIES = ["agent:launch", "permission:respond", "session:list"]
 PRINT_EVENT_TYPES = {
     "agent_message_delta",
@@ -49,6 +50,7 @@ def parse_args(argv, env=None):
     args.token = (env or os.environ).get(LAUNCH_TOKEN_ENV, "")
     args.hook_token = (env or os.environ).get(CLAUDE_HOOK_TOKEN_ENV, "")
     args.registration_token = (env or os.environ).get(FOREGROUND_REGISTRATION_TOKEN_ENV, "")
+    args.exit_token = (env or os.environ).get(FOREGROUND_EXIT_TOKEN_ENV, "")
     return args
 
 
@@ -147,6 +149,17 @@ def build_interrupt_command(session_id: str):
 
 def build_close_command(session_id: str):
     return _command("agent.session.close", target={"session_id": session_id})
+
+
+def build_foreground_exited_command(session_id: str, exit_code: int, exit_token: str = ""):
+    payload = {"exit_code": int(exit_code)}
+    if exit_token:
+        payload["foreground_exit_token"] = exit_token
+    return _command(
+        "agent.session.foreground_exited",
+        payload=payload,
+        target={"session_id": session_id},
+    )
 
 
 async def _send_json(ws, payload: Dict[str, Any]) -> None:
@@ -305,6 +318,25 @@ async def _receiver(ws, state: Dict[str, Any], stop_event: asyncio.Event) -> Non
         _print_relevant(payload)
 
 
+async def _drain_receiver(ws, stop_event: asyncio.Event) -> None:
+    while not stop_event.is_set():
+        try:
+            raw = await ws.recv()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if not stop_event.is_set():
+                print(f"Local API control connection closed: {exc}", file=sys.stderr, flush=True)
+            return
+        try:
+            payload = _load_json(raw)
+        except Exception as exc:
+            print(f"Ignoring invalid Local API message while draining: {exc}", file=sys.stderr, flush=True)
+            continue
+        if payload.get("type") == "error":
+            print(json.dumps(payload, ensure_ascii=False), flush=True)
+
+
 async def _sender(ws, state: Dict[str, Any], lines: asyncio.Queue, stop_event: asyncio.Event) -> None:
     while not stop_event.is_set():
         line = await lines.get()
@@ -406,10 +438,22 @@ async def _run_native_claude_cli(ws, args, state: Dict[str, Any]) -> int:
         cwd=args.workspace,
         env=_native_claude_env(args),
     )
+    drain_stop = asyncio.Event()
+    drain_task = asyncio.create_task(_drain_receiver(ws, drain_stop))
     loop = asyncio.get_event_loop()
     try:
-        return await loop.run_in_executor(None, process.wait)
+        exit_code = await loop.run_in_executor(None, process.wait)
+        drain_stop.set()
+        drain_task.cancel()
+        try:
+            await drain_task
+        except asyncio.CancelledError:
+            pass
+        await _send_json(ws, build_foreground_exited_command(state["session_id"], exit_code, args.exit_token))
+        return exit_code
     finally:
+        drain_stop.set()
+        drain_task.cancel()
         try:
             Path(settings_path).unlink()
         except OSError:
@@ -420,6 +464,7 @@ def _native_claude_env(args) -> Dict[str, str]:
     env = dict(os.environ)
     env.pop(LAUNCH_TOKEN_ENV, None)
     env.pop(FOREGROUND_REGISTRATION_TOKEN_ENV, None)
+    env.pop(FOREGROUND_EXIT_TOKEN_ENV, None)
     if args.hook_token:
         env[CLAUDE_HOOK_TOKEN_ENV] = args.hook_token
     else:
