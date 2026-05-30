@@ -179,6 +179,22 @@ def test_foreground_cli_scenario_sends_structured_cli_launch(monkeypatch, tmpdir
                     "agent": "claude",
                     "workspace": workspace,
                     "frontend_pid": 4321,
+                    "foreground_launch_id": "fg_test",
+                    "launch_surface": "foreground_cli",
+                    "control_mode": "managed_native",
+                },
+            },
+        },
+        {
+            "type": "event",
+            "event": {
+                "type": "agent.session.created",
+                "payload": {
+                    "agent": "claude",
+                    "session_id": "sess_foreground",
+                    "workspace": workspace,
+                    "frontend_pid": 4321,
+                    "foreground_launch_id": "fg_test",
                     "launch_surface": "foreground_cli",
                     "control_mode": "managed_native",
                 },
@@ -195,6 +211,93 @@ def test_foreground_cli_scenario_sends_structured_cli_launch(monkeypatch, tmpdir
         "agent": "claude",
         "workspace": workspace,
     }
+
+
+def test_foreground_cli_scenario_requires_managed_session_created(monkeypatch, tmpdir):
+    module = load_smoke_module()
+    workspace = str(tmpdir)
+    ws = RepeatingWebSocket(
+        [
+            {"type": "hello_ack"},
+            {
+                "type": "event",
+                "event": {
+                    "type": "agent.cli.launched",
+                    "payload": {
+                        "agent": "claude",
+                        "workspace": workspace,
+                        "frontend_pid": 4321,
+                        "foreground_launch_id": "fg_test",
+                        "launch_surface": "foreground_cli",
+                        "control_mode": "managed_native",
+                    },
+                },
+            },
+        ],
+        {"type": "heartbeat_ack"},
+    )
+    monkeypatch.setattr(module.websockets, "connect", lambda url: FakeConnect(ws))
+    client = make_client(module, workspace=workspace)
+    client.timeout = 0.02
+
+    with pytest.raises(RuntimeError) as exc_info:
+        asyncio.run(client.run_foreground_cli("claude"))
+
+    message = str(exc_info.value)
+    assert "foreground CLI launch and managed session" in message
+    assert "launched=True" in message
+    assert "created=False" in message
+
+
+def test_foreground_cli_scenario_ignores_unmatched_managed_session(monkeypatch, tmpdir):
+    module = load_smoke_module()
+    workspace = str(tmpdir)
+    ws = RepeatingWebSocket(
+        [
+            {"type": "hello_ack"},
+            {
+                "type": "event",
+                "event": {
+                    "type": "agent.cli.launched",
+                    "payload": {
+                        "agent": "claude",
+                        "workspace": workspace,
+                        "frontend_pid": 4321,
+                        "foreground_launch_id": "fg_expected",
+                        "launch_surface": "foreground_cli",
+                        "control_mode": "managed_native",
+                    },
+                },
+            },
+            {
+                "type": "event",
+                "event": {
+                    "type": "agent.session.created",
+                    "payload": {
+                        "agent": "claude",
+                        "session_id": "sess_other",
+                        "workspace": workspace,
+                        "frontend_pid": 9999,
+                        "foreground_launch_id": "fg_other",
+                        "launch_surface": "foreground_cli",
+                        "control_mode": "managed_native",
+                    },
+                },
+            },
+        ],
+        {"type": "heartbeat_ack"},
+    )
+    monkeypatch.setattr(module.websockets, "connect", lambda url: FakeConnect(ws))
+    client = make_client(module, workspace=workspace)
+    client.timeout = 0.02
+
+    with pytest.raises(RuntimeError) as exc_info:
+        asyncio.run(client.run_foreground_cli("claude"))
+
+    message = str(exc_info.value)
+    assert "foreground CLI launch and managed session" in message
+    assert "launched=True" in message
+    assert "created=False" in message
 
 
 def test_approval_real_deadline_is_not_extended_by_repeated_task_updates(monkeypatch):

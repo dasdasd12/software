@@ -264,17 +264,63 @@ class LocalApiSmokeClient:
         async with websockets.connect(self.url) as ws:
             await self.hello(ws)
             await self.send(ws, self.foreground_cli_command_payload(agent))
-            payload = await self.wait_for_type(ws, "event")
-            event = payload.get("event") or {}
-            event_payload = event.get("payload") or {}
-            if event.get("type") != "agent.cli.launched":
-                raise RuntimeError(f"Foreground CLI launch returned unexpected event: {payload}")
-            if event_payload.get("agent") != agent:
-                raise RuntimeError(f"Foreground CLI launch returned wrong agent: {payload}")
-            if not event_payload.get("frontend_pid"):
-                raise RuntimeError(f"Foreground CLI launch did not include frontend_pid: {payload}")
-            if event_payload.get("launch_surface") != "foreground_cli":
-                raise RuntimeError(f"Foreground CLI launch returned wrong launch_surface: {payload}")
+            launched = None
+            created = None
+            last_payload = None
+            deadline = time.monotonic() + self.timeout
+
+            while launched is None or created is None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError(
+                        "Timed out waiting for foreground CLI launch and managed session; "
+                        f"launched={launched is not None}; "
+                        f"created={created is not None}; "
+                        f"last_payload={self._payload_summary(last_payload)}"
+                    )
+                try:
+                    payload = await self.recv_json_with_timeout(ws, remaining)
+                except asyncio.TimeoutError:
+                    raise RuntimeError(
+                        "Timed out waiting for foreground CLI launch and managed session; "
+                        f"launched={launched is not None}; "
+                        f"created={created is not None}; "
+                        f"last_payload={self._payload_summary(last_payload)}"
+                    )
+                last_payload = payload
+                if payload.get("type") == "error":
+                    raise RuntimeError(f"Local API error while waiting for foreground CLI: {payload}")
+                if payload.get("type") != "event":
+                    continue
+
+                event = payload.get("event") or {}
+                event_payload = event.get("payload") or {}
+                if event.get("type") == "agent.cli.launched":
+                    if event_payload.get("agent") != agent:
+                        raise RuntimeError(f"Foreground CLI launch returned wrong agent: {payload}")
+                    if not event_payload.get("frontend_pid"):
+                        raise RuntimeError(f"Foreground CLI launch did not include frontend_pid: {payload}")
+                    if not event_payload.get("foreground_launch_id"):
+                        raise RuntimeError(f"Foreground CLI launch did not include foreground_launch_id: {payload}")
+                    if event_payload.get("launch_surface") != "foreground_cli":
+                        raise RuntimeError(f"Foreground CLI launch returned wrong launch_surface: {payload}")
+                    launched = event_payload
+                elif event.get("type") == "agent.session.created":
+                    if event_payload.get("agent") != agent:
+                        continue
+                    if event_payload.get("launch_surface") != "foreground_cli":
+                        continue
+                    if launched is None:
+                        continue
+                    if event_payload.get("foreground_launch_id") != launched.get("foreground_launch_id"):
+                        continue
+                    launched_workspace = launched.get("workspace")
+                    created_workspace = event_payload.get("workspace")
+                    if launched_workspace and created_workspace and created_workspace != launched_workspace:
+                        raise RuntimeError(f"Foreground CLI session workspace did not match launch: {payload}")
+                    if not event_payload.get("frontend_pid"):
+                        raise RuntimeError(f"Foreground CLI session did not include frontend_pid: {payload}")
+                    created = event_payload
 
     async def run_approval_real(
         self,

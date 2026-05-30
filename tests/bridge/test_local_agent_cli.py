@@ -28,6 +28,7 @@ def test_local_agent_cli_parser_defaults_to_managed_session():
     assert args.client_kind == "desktop-ui"
     assert args.api_url == "ws://127.0.0.1:8765"
     assert args.token == "env-token"
+    assert args.launch_id == ""
 
 
 def test_cli_builds_hello_launch_and_input_commands():
@@ -39,7 +40,12 @@ def test_cli_builds_hello_launch_and_input_commands():
     assert "agent:launch" in hello["capabilities"]
     assert hello["token"] == "token-value"
 
-    launch = module.build_launch_command("codex", "C:/project", context="hello")
+    launch = module.build_launch_command(
+        "codex",
+        "C:/project",
+        context="hello",
+        foreground_launch_id="fg_test",
+    )
     assert launch["type"] == "command"
     assert launch["command"]["type"] == "agent.session.launch_or_resume"
     assert launch["command"]["payload"]["agent"] == "codex"
@@ -47,6 +53,7 @@ def test_cli_builds_hello_launch_and_input_commands():
     assert launch["command"]["payload"]["context"] == "hello"
     assert launch["command"]["payload"]["launch_surface"] == "foreground_cli"
     assert launch["command"]["payload"]["frontend_pid"] == module.os.getpid()
+    assert launch["command"]["payload"]["foreground_launch_id"] == "fg_test"
 
     input_message = module.build_input_command("sess_1", "hello")
     assert input_message["command"]["type"] == "agent.session.input"

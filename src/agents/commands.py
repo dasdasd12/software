@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Optional
+import uuid
 
 from core import CommandEnvelope, CommandRouter, EventEnvelope
 
@@ -49,7 +50,7 @@ class AgentCommandService:
                 self.runtime.persist(session_id)
                 raise AgentLifecycleError("LAUNCH_FAILED", str(exc)) from exc
             self.runtime.persist(session_id)
-            return self._event("agent.session.created", session_id)
+            return self._event("agent.session.created", session_id, **self._launch_event_extra(command, workspace))
 
         session = self.runtime.require_session(session_id)
         self._apply_launch_metadata(session, command.payload)
@@ -66,7 +67,7 @@ class AgentCommandService:
             self.runtime.persist(session_id)
             raise AgentLifecycleError("LAUNCH_FAILED", str(exc)) from exc
         self.runtime.persist(session_id)
-        return self._event("agent.session.state_changed", session_id)
+        return self._event("agent.session.state_changed", session_id, **self._launch_event_extra(command, workspace))
 
     async def interrupt(self, command: CommandEnvelope) -> EventEnvelope:
         session_id = self._required_session_id(command)
@@ -131,8 +132,9 @@ class AgentCommandService:
         self.runtime.require_controller(agent_key)
         agent = self.runtime.agent_value(agent_key)
         workspace = self._workspace_resolver(self._workspace(command))
+        foreground_launch_id = "fg_%s" % uuid.uuid4().hex
         try:
-            process = self._foreground_cli_launcher.launch(agent, workspace)
+            process = self._foreground_cli_launcher.launch(agent, workspace, foreground_launch_id)
         except Exception as exc:
             raise AgentLifecycleError("FOREGROUND_CLI_LAUNCH_FAILED", str(exc)) from exc
 
@@ -145,6 +147,7 @@ class AgentCommandService:
                 "agent": agent,
                 "workspace": workspace,
                 "frontend_pid": frontend_pid,
+                "foreground_launch_id": foreground_launch_id,
                 "launch_surface": "foreground_cli",
                 "control_mode": "managed_native",
             },
@@ -247,6 +250,16 @@ class AgentCommandService:
         frontend_pid = payload.get("frontend_pid")
         if type(frontend_pid) is int and hasattr(session, "frontend_pid"):
             session.frontend_pid = frontend_pid
+
+    @staticmethod
+    def _launch_event_extra(command: CommandEnvelope, workspace: Optional[str]) -> Dict[str, Any]:
+        extra: Dict[str, Any] = {}
+        foreground_launch_id = command.payload.get("foreground_launch_id")
+        if isinstance(foreground_launch_id, str) and foreground_launch_id:
+            extra["foreground_launch_id"] = foreground_launch_id
+        if isinstance(workspace, str) and workspace:
+            extra["workspace"] = workspace
+        return extra
 
 
 def register_agent_lifecycle_handlers(

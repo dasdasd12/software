@@ -14,6 +14,7 @@ sys.path.insert(0, str(BRIDGE_DIR))
 from agents.foreground_cli import (  # noqa: E402
     LAUNCH_TOKEN_ENV,
     ForegroundCliLauncher,
+    build_foreground_cli_env,
     build_foreground_cli_command,
 )
 from server import BridgeServer  # noqa: E402
@@ -39,8 +40,8 @@ class FakeForegroundLauncher:
         self.pid = pid
         self.launches = []
 
-    def launch(self, agent, workspace):
-        self.launches.append((agent, workspace))
+    def launch(self, agent, workspace, foreground_launch_id=None):
+        self.launches.append((agent, workspace, foreground_launch_id))
 
         class Process:
             pass
@@ -108,6 +109,7 @@ def test_foreground_cli_command_uses_repo_script_and_workspace(tmpdir):
         workspace=str(tmpdir),
         api_url="ws://127.0.0.1:8765",
         token="token-value",
+        foreground_launch_id="fg_test",
         python_executable="python",
     )
 
@@ -118,6 +120,8 @@ def test_foreground_cli_command_uses_repo_script_and_workspace(tmpdir):
     assert str(tmpdir) in command
     assert "--api-url" in command
     assert "ws://127.0.0.1:8765" in command
+    assert "--launch-id" in command
+    assert "fg_test" in command
     assert "--token" not in command
     assert "token-value" not in command
 
@@ -191,7 +195,48 @@ def test_foreground_cli_launcher_merges_custom_env_with_launch_token(monkeypatch
     assert kwargs["env"][LAUNCH_TOKEN_ENV] == "token-value"
 
 
-def test_foreground_cli_launcher_does_not_inherit_arbitrary_service_env(monkeypatch, tmpdir):
+def test_foreground_cli_env_keeps_terminal_environment_and_filters_secrets():
+    env = build_foreground_cli_env(
+        base_env={
+            "PATH": "C:/Windows/System32",
+            "WT_SESSION": "terminal-session",
+            "PROCESSOR_ARCHITECTURE": "AMD64",
+            "OPENAI_API_KEY": "secret-value",
+            "ANTHROPIC_AUTH_TOKEN": "secret-value",
+            "CODEX_TOKEN": "secret-value",
+            "AWS_ACCESS_KEY_ID": "secret-value",
+            "SSH_PRIVATE_KEY": "secret-value",
+            "NORMAL_SETTING": "visible",
+        },
+        extra_env={
+            "EXPLICIT_ENV": "present",
+            "CODEX_API_KEY": "secret-value",
+            LAUNCH_TOKEN_ENV: "old-token",
+        },
+        token="token-value",
+    )
+
+    assert env["PATH"] == "C:/Windows/System32"
+    assert env["WT_SESSION"] == "terminal-session"
+    assert env["PROCESSOR_ARCHITECTURE"] == "AMD64"
+    assert env["NORMAL_SETTING"] == "visible"
+    assert env["EXPLICIT_ENV"] == "present"
+    assert env[LAUNCH_TOKEN_ENV] == "token-value"
+    assert "OPENAI_API_KEY" not in env
+    assert "ANTHROPIC_AUTH_TOKEN" not in env
+    assert "CODEX_TOKEN" not in env
+    assert "AWS_ACCESS_KEY_ID" not in env
+    assert "SSH_PRIVATE_KEY" not in env
+    assert "CODEX_API_KEY" not in env
+
+
+def test_foreground_cli_env_respects_explicit_empty_base_env():
+    env = build_foreground_cli_env(base_env={}, extra_env=None, token=None)
+
+    assert env == {}
+
+
+def test_foreground_cli_launcher_filters_sensitive_service_env(monkeypatch, tmpdir):
     calls = []
 
     class FakeProcess:
@@ -262,9 +307,10 @@ def test_cli_launch_foreground_emits_event_with_frontend_pid(tmpdir):
     assert event["payload"]["agent"] == "claude"
     assert event["payload"]["workspace"] == workspace
     assert event["payload"]["frontend_pid"] == 4321
+    assert event["payload"]["foreground_launch_id"].startswith("fg_")
     assert event["payload"]["launch_surface"] == "foreground_cli"
     assert event["payload"]["control_mode"] == "managed_native"
-    assert launcher.launches == [("claude", workspace)]
+    assert launcher.launches == [("claude", workspace, event["payload"]["foreground_launch_id"])]
 
 
 def test_cli_launch_foreground_rejects_unavailable_agent_before_launcher(tmpdir):

@@ -37,6 +37,7 @@ def parse_args(argv, env=None):
     parser.add_argument("--client-kind", default="desktop-ui")
     parser.add_argument("--client-id", default="local-agent-cli")
     parser.add_argument("--context", default="")
+    parser.add_argument("--launch-id", default="")
     args = parser.parse_args(argv)
     args.token = (env or os.environ).get(LAUNCH_TOKEN_ENV, "")
     return args
@@ -65,16 +66,24 @@ def build_hello_message(client_kind: str = "desktop-ui", token: str = "", client
     }
 
 
-def build_launch_command(agent: str, workspace: str, context: str = ""):
+def build_launch_command(
+    agent: str,
+    workspace: str,
+    context: str = "",
+    foreground_launch_id: str = "",
+):
+    payload = {
+        "agent": agent,
+        "workspace": workspace,
+        "context": context,
+        "launch_surface": "foreground_cli",
+        "frontend_pid": os.getpid(),
+    }
+    if foreground_launch_id:
+        payload["foreground_launch_id"] = foreground_launch_id
     return _command(
         "agent.session.launch_or_resume",
-        payload={
-            "agent": agent,
-            "workspace": workspace,
-            "context": context,
-            "launch_surface": "foreground_cli",
-            "frontend_pid": os.getpid(),
-        },
+        payload=payload,
         target={"session_id": "new"},
     )
 
@@ -235,7 +244,12 @@ async def run_cli(args) -> int:
     stop_event = asyncio.Event()
     async with websockets.connect(args.api_url) as ws:
         await _send_json(ws, build_hello_message(args.client_kind, args.token, args.client_id))
-        await _send_json(ws, build_launch_command(args.agent, args.workspace, args.context))
+        await _send_json(ws, build_launch_command(
+            args.agent,
+            args.workspace,
+            args.context,
+            args.launch_id,
+        ))
         _start_stdin_reader(lines)
         receiver_task = asyncio.create_task(_receiver(ws, state, stop_event))
         sender_task = asyncio.create_task(_sender(ws, state, lines, stop_event))

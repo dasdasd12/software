@@ -9,20 +9,23 @@ from typing import List, Optional
 
 VALID_AGENTS = {"claude", "codex"}
 LAUNCH_TOKEN_ENV = "AI_KEYB_LAUNCH_TOKEN"
-SAFE_ENV_KEYS = {
-    "PATH",
-    "SYSTEMROOT",
-    "WINDIR",
-    "COMSPEC",
-    "PATHEXT",
-    "TEMP",
-    "TMP",
-    "USERPROFILE",
-    "HOME",
-    "APPDATA",
-    "LOCALAPPDATA",
-    "PYTHONPATH",
-}
+SENSITIVE_ENV_KEY_MARKERS = (
+    "API_KEY",
+    "AUTH_TOKEN",
+    "ACCESS_TOKEN",
+    "REFRESH_TOKEN",
+    "BEARER_TOKEN",
+    "ID_TOKEN",
+    "TOKEN",
+    "APIKEY",
+    "ACCESS_KEY",
+    "PRIVATE_KEY",
+    "PASSWORD",
+    "PASSWD",
+    "SECRET",
+    "CREDENTIAL",
+    "AUTHORIZATION",
+)
 
 
 def _repo_root() -> Path:
@@ -52,6 +55,7 @@ def build_foreground_cli_command(
     workspace: str,
     api_url: str,
     token: Optional[str] = None,
+    foreground_launch_id: Optional[str] = None,
     python_executable: Optional[str] = None,
 ) -> List[str]:
     """Build the argv for the known local foreground CLI host script.
@@ -76,7 +80,38 @@ def build_foreground_cli_command(
         "--api-url",
         api_url,
     ]
+    if foreground_launch_id:
+        command += ["--launch-id", str(foreground_launch_id)]
     return command
+
+
+def build_foreground_cli_env(
+    base_env: Optional[dict] = None,
+    extra_env: Optional[dict] = None,
+    token: Optional[str] = None,
+) -> dict:
+    """Build a terminal-friendly environment without provider/API secrets."""
+    source_env = os.environ if base_env is None else base_env
+    env = {
+        key: value
+        for key, value in source_env.items()
+        if not _is_sensitive_env_key(key)
+    }
+    if extra_env:
+        for key, value in extra_env.items():
+            if _is_sensitive_env_key(key):
+                continue
+            env[key] = value
+    if token is not None:
+        env[LAUNCH_TOKEN_ENV] = token
+    return env
+
+
+def _is_sensitive_env_key(key: str) -> bool:
+    normalized = str(key).upper()
+    if normalized == LAUNCH_TOKEN_ENV:
+        return True
+    return any(marker in normalized for marker in SENSITIVE_ENV_KEY_MARKERS)
 
 
 class ForegroundCliLauncher:
@@ -94,24 +129,22 @@ class ForegroundCliLauncher:
         self.python_executable = python_executable
         self.env = env
 
-    def launch(self, agent: str, workspace: str):
+    def launch(
+        self,
+        agent: str,
+        workspace: str,
+        foreground_launch_id: Optional[str] = None,
+    ):
         resolved_workspace = str(Path(workspace).resolve())
         command = build_foreground_cli_command(
             agent=agent,
             workspace=resolved_workspace,
             api_url=self.api_url,
             token=self.token,
+            foreground_launch_id=foreground_launch_id,
             python_executable=self.python_executable,
         )
-        env = {
-            key: value
-            for key, value in os.environ.items()
-            if key.upper() in SAFE_ENV_KEYS
-        }
-        if self.env:
-            env.update(self.env)
-        if self.token is not None:
-            env[LAUNCH_TOKEN_ENV] = self.token
+        env = build_foreground_cli_env(extra_env=self.env, token=self.token)
 
         kwargs = {
             "cwd": resolved_workspace,
