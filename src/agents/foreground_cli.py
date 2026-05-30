@@ -184,21 +184,12 @@ class ForegroundCliLauncher:
             "env": env,
         }
         if sys.platform == "win32":
-            bootstrap = [
-                "cmd.exe",
-                "/d",
-                "/c",
-                "start",
-                "",
-                "/D",
-                resolved_workspace,
-            ] + command
-            return subprocess.Popen(
-                bootstrap,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                **kwargs,
+            kwargs["creationflags"] = (
+                getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
             )
+            kwargs["close_fds"] = True
+            return subprocess.Popen(command, **kwargs)
         if hasattr(os, "setsid"):
             kwargs["preexec_fn"] = os.setsid
         return subprocess.Popen(command, **kwargs)

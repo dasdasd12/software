@@ -305,7 +305,7 @@ def test_foreground_cli_launcher_filters_sensitive_service_env(monkeypatch, tmpd
     assert "ANTHROPIC_API_KEY" not in kwargs["env"]
 
 
-def test_foreground_cli_launcher_uses_cmd_start_on_windows(monkeypatch, tmpdir):
+def test_foreground_cli_launcher_uses_new_console_on_windows(monkeypatch, tmpdir):
     calls = []
 
     class FakeProcess:
@@ -316,19 +316,28 @@ def test_foreground_cli_launcher_uses_cmd_start_on_windows(monkeypatch, tmpdir):
         return FakeProcess()
 
     monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(subprocess, "CREATE_NEW_CONSOLE", 0x10, raising=False)
+    monkeypatch.setattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, raising=False)
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
-    launcher = ForegroundCliLauncher(api_url="ws://127.0.0.1:8765")
+    launcher = ForegroundCliLauncher(
+        api_url="ws://127.0.0.1:8765",
+        python_executable="python",
+    )
 
     launcher.launch("codex", str(tmpdir))
 
     command, kwargs = calls[0]
-    assert command[:4] == ["cmd.exe", "/d", "/c", "start"]
-    assert command[4] == ""
-    assert "/D" in command
+    assert command[0] == "python"
+    assert command[1].endswith("scripts/local-agent-cli.py")
+    assert command[:4] != ["cmd.exe", "/d", "/c", "start"]
     assert str(Path(str(tmpdir)).resolve()) in command
     assert kwargs.get("shell") is None
-    assert kwargs["stdout"] == subprocess.DEVNULL
-    assert kwargs["stderr"] == subprocess.DEVNULL
+    assert kwargs["cwd"] == str(Path(str(tmpdir)).resolve())
+    assert kwargs["close_fds"] is True
+    assert kwargs["creationflags"] & 0x10
+    assert kwargs["creationflags"] & 0x200
+    assert "stdout" not in kwargs
+    assert "stderr" not in kwargs
 
 
 def test_cli_launch_foreground_emits_event_with_frontend_pid(tmpdir):
