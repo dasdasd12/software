@@ -26,6 +26,13 @@ NATIVE_CLAUDE_SECRET_ENV_VARS = {
     "ANTHROPIC_AUTH_TOKEN",
     "CLAUDE_CODE_OAUTH_TOKEN",
 }
+NATIVE_CLAUDE_SESSION_ENV_VARS = (
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+)
 DEFAULT_CAPABILITIES = ["agent:launch", "permission:respond", "session:list"]
 PRINT_EVENT_TYPES = {
     "agent_message_delta",
@@ -263,10 +270,13 @@ def build_claude_hook_settings(
     async_handler = dict(handler)
     async_handler["async"] = True
     async_handler["timeout"] = 30
+    settings_env = {"ANTHROPIC_AUTH_TOKEN": ""}
+    for key in NATIVE_CLAUDE_SESSION_ENV_VARS:
+        value = os.environ.get(key)
+        if value:
+            settings_env[key] = value
     return {
-        "env": {
-            "ANTHROPIC_AUTH_TOKEN": "",
-        },
+        "env": settings_env,
         "hooks": {
             "PermissionRequest": [{"matcher": "*", "hooks": [handler]}],
             "PreToolUse": [{"matcher": "AskUserQuestion|ExitPlanMode", "hooks": [handler]}],

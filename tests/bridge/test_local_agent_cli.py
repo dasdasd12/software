@@ -160,8 +160,16 @@ def test_sender_sends_close_before_exit_when_session_active():
     assert sent[0]["command"]["target"] == {"session_id": "sess_1"}
 
 
-def test_cli_builds_native_claude_hook_settings(tmpdir):
+def test_cli_builds_native_claude_hook_settings(monkeypatch, tmpdir):
     module = load_cli_module()
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.kimi.com/coding/")
+    monkeypatch.setenv("ANTHROPIC_MODEL", "kimi-k2.6")
+    monkeypatch.setenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", "kimi-k2.6")
+    monkeypatch.setenv("ANTHROPIC_DEFAULT_OPUS_MODEL", "kimi-k2.6")
+    monkeypatch.setenv("ANTHROPIC_DEFAULT_SONNET_MODEL", "kimi-k2.6")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "secret-api-key")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "secret-auth-token")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "secret-oauth-token")
     settings_path = module.write_claude_hook_settings(
         "ws://127.0.0.1:8765",
         "sess_native",
@@ -179,6 +187,13 @@ def test_cli_builds_native_claude_hook_settings(tmpdir):
     assert "PreToolUse" in data["hooks"]
     assert data["hooks"]["PreToolUse"][0]["matcher"] == "AskUserQuestion|ExitPlanMode"
     assert data["env"]["ANTHROPIC_AUTH_TOKEN"] == ""
+    assert data["env"]["ANTHROPIC_BASE_URL"] == "https://api.kimi.com/coding/"
+    assert data["env"]["ANTHROPIC_MODEL"] == "kimi-k2.6"
+    assert data["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "kimi-k2.6"
+    assert data["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "kimi-k2.6"
+    assert data["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "kimi-k2.6"
+    assert "ANTHROPIC_API_KEY" not in data["env"]
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in data["env"]
 
 
 def test_native_claude_env_removes_launch_token_and_keeps_hook_token(monkeypatch):
