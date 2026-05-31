@@ -183,7 +183,7 @@ Examples:
 
 Agent actions must pass through the command router and approval policy.
 
-They should not directly call Codex or Claude Code adapters.
+They should not directly call Claude Code or parked compatibility adapters.
 
 Supported initial targets:
 
@@ -201,7 +201,7 @@ Examples:
 ```json
 {
   "type": "agent.session.launch_or_resume",
-  "provider_id": "codex",
+  "provider_id": "claude_code",
   "instance_selector": "workspace_default"
 }
 ```

@@ -24,8 +24,8 @@ Commands use a consistent envelope regardless of source.
   "command_id": "cmd_01",
   "type": "agent.run.interrupt",
   "target": {
-    "provider_id": "codex",
-    "instance_id": "codex-software",
+    "provider_id": "claude_code",
+    "instance_id": "cc-software",
     "session_id": "sess_01",
     "run_id": "run_01"
   },
@@ -59,8 +59,8 @@ Events are append-friendly, ordered, and suitable for UI/device resync.
   "seq": 1234,
   "type": "agent.run.state_changed",
   "target": {
-    "provider_id": "codex",
-    "instance_id": "codex-software",
+    "provider_id": "claude_code",
+    "instance_id": "cc-software",
     "session_id": "sess_01",
     "run_id": "run_01"
   },

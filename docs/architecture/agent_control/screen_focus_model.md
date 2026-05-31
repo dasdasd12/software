@@ -13,8 +13,8 @@ target the current focus unless a binding explicitly targets something else.
   "device_id": "kbd_01",
   "mode": "session",
   "target": {
-    "provider_id": "codex",
-    "instance_id": "codex-software",
+    "provider_id": "claude_code",
+    "instance_id": "cc-software",
     "session_id": "sess_01",
     "run_id": null
   },
@@ -48,7 +48,7 @@ device_status
 Mode meanings:
 
 - `global_dashboard`: overview of active agents and notifications
-- `instance`: one Codex or Claude Code instance
+- `instance`: one Claude Code instance, or another enabled provider instance
 - `session`: one agent session
 - `run`: one active or historical run
 - `notification`: one selected notification

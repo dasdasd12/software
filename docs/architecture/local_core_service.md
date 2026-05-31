@@ -47,10 +47,12 @@ The current backend has moved beyond the original bridge-only MVP:
   active tool state, config sync, notification queue, profile validation,
   lighting config, profile compilation, and active profile/import-export
   persistence.
-- Codex native approval forwarding is implemented through `codex app-server`
-  JSON-RPC over the stdio listen transport.
-- Claude Code native approval forwarding is implemented through the Python Agent
-  SDK permission callback path.
+- Claude Code native approval forwarding is the active provider baseline. The
+  foreground CLI hook path is used for product-like local interaction; the
+  Python Agent SDK path remains available for headless tests and automation.
+- Codex native approval support exists but is parked as a compatibility and
+  regression path. Future backend work should not require Claude Code/Codex
+  parity.
 - The local hotkey harness connects as `desktop-ui` with client id
   `test-harness` for current high-risk real approval loopback testing. It is a
   temporary external input surface, not the product device transport.
@@ -58,8 +60,10 @@ The current backend has moved beyond the original bridge-only MVP:
   `--service-start-timeout`, and `--wait-for-hotkey-approval` for real loopback
   control.
 - Final backend virtual-input verification used the full pytest suite and
-  focused import-boundary/Local API virtual-input checks. It did not rerun
-  external real Codex or Claude CLI approval smoke.
+  focused import-boundary/Local API virtual-input checks. Later
+  provider-loopback verification recorded the full test suite as `404 passed`
+  and real Claude Code foreground approval loopback as the active acceptance
+  path.
 
 See `implementation_status_v1.md` for the current implementation checklist and
 known gaps.
@@ -68,7 +72,8 @@ known gaps.
 
 The Local Core Service owns:
 
-- process lifecycle for Codex and Claude Code adapters
+- process lifecycle for Claude Code adapters
+- parked Codex compatibility lifecycle, when that provider is enabled
 - agent provider, instance, session, and run registries
 - keyboard profile and configuration state
 - device discovery and device transport sessions
@@ -121,7 +126,8 @@ src/agents/
   sessions
   runs
   permission queue
-  Codex and Claude Code adapters
+  Claude Code foreground hook and SDK adapters
+  parked Codex compatibility adapter
 
 src/keyboard/
   profiles
@@ -242,9 +248,9 @@ The existing bridge can be migrated in phases:
 3. Separate UI clients from simulator/device clients. Done at the Local API
    identity/capability layer; product desktop shell is still deferred.
 4. Introduce snapshot and event envelopes. Done for Local API structured paths.
-5. Split `AgentProxy` into provider adapters. Partially done: Claude SDK and
-   Codex app-server approval adapters exist; broader provider/instance manager
-   extraction is still pending.
+5. Split `AgentProxy` into provider adapters. Partially done: Claude Code
+   foreground hook, Claude SDK, and parked Codex approval adapters exist;
+   broader provider/instance manager extraction is still pending.
 6. Replace the old `agent + session` model with provider, instance, session,
    and run registries. Partially done in repositories and architecture model;
    the compatibility WebSocket API still exposes `agent + session_id`.

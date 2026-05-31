@@ -46,7 +46,8 @@ Expected fields:
 - `active_profile_id`: currently selected profile
 - `profiles`: user profiles
 - `known_devices`: previously paired or connected keyboards/dongles
-- `agent_instance_presets`: reusable Codex/Claude Code instance definitions
+- `agent_instance_presets`: reusable Claude Code instance definitions; parked
+  Codex presets may exist only when that provider is enabled
 - `workspace_bindings`: workspace to profile/agent preferences
 - `global_approval_policy_id`: default approval policy
 - `ui_preferences`: UI-only settings
@@ -204,7 +205,7 @@ Workspace bindings let profiles and agent presets follow the active project.
   "workspace_id": "software",
   "path": "${PROJECT_ROOT}/software",
   "default_profile_id": "profile_coding_default",
-  "default_agent_instance_id": "codex-software",
+  "default_agent_instance_id": "cc-software",
   "focus_policy": "last_active_in_workspace"
 }
 ```

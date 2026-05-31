@@ -175,10 +175,12 @@ evidence
 native
 ```
 
-`evidence` is provider-specific but must be structured JSON. For Codex
-app-server it includes fields such as native channel, JSON-RPC id, thread id,
-turn id, item id, command, cwd, decision, and response write status. For Claude
-SDK it includes callback delivery/return evidence.
+`evidence` is provider-specific but must be structured JSON. The active
+reference provider is Claude Code: foreground hook evidence records native hook
+channel, request/session metadata, decision, and response write status; managed
+SDK evidence records callback delivery/return status. Parked Codex
+compatibility evidence may still include native channel, JSON-RPC id, thread
+id, turn id, item id, command, cwd, decision, and response write status.
 
 ## Migration
 

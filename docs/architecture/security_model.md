@@ -28,8 +28,10 @@ Current V2 status:
 - Test clients do not receive real permission approval capability by default.
 - Keyboard/device clients can directly approve only policy-allowed low-risk
   requests; high-risk requests require desktop confirmation.
-- Real Codex and Claude permission responses must be delivered through their
-  native provider channels before `forwarded=true` is returned.
+- Real Claude Code permission responses must be delivered through the native
+  hook or SDK provider channel before `forwarded=true` is returned. Parked Codex
+  compatibility requests follow the same native-forwarding rule when that path
+  is explicitly exercised.
 - Agent launch workspaces are explicit inputs to the security model. Resolution
   prefers CLI `--workspace`, then `AI_KEYB_WORKSPACE`, then a configured
   non-dot default, then the detected project root containing `software`, then

@@ -28,7 +28,8 @@ Software owns:
 - device discovery and transport adapters
 - WebHID/HIDAPI/CDC/BLE access paths
 - configuration UI and APIs
-- Codex and Claude Code process adapters
+- Claude Code process adapters as the active provider baseline
+- parked Codex compatibility adapter code, where enabled
 - agent event normalization
 - WebSocket/HTTP interface for local UI clients
 - protocol conversion between agent events and device protocol frames
@@ -44,8 +45,10 @@ Software does not own:
 ## Process Architecture
 
 ```text
-Codex / Claude Code
-  app-server, SDK-specific APIs, stdout, or JSONL fallback
+Claude Code
+  foreground CLI hooks, SDK-specific APIs, stdout, or JSONL fallback
+Codex, parked compatibility
+  app-server/proxy, stdout, or JSONL fallback
         |
         v
 Agent adapters
@@ -71,13 +74,13 @@ the same normalized agent/session state.
 ```text
 src/bridge/
   agent_proxy.py       agent process integration
-  protocol_unifier.py  Codex/Claude event normalization
+  protocol_unifier.py  Claude-first event normalization, legacy provider support
   session_manager.py   session and permission state
   server.py            local UI WebSocket/HTTP entry point
 
 src/agents/
-  codex_app_server.py  Codex app-server JSON-RPC stdio client
-  adapters.py          Claude SDK and Codex app-server permission adapters
+  adapters.py          Claude SDK and provider permission adapters
+  codex_app_server.py  parked Codex app-server compatibility client
 
 src/devices/
   manager.py           simulated/device transport manager
@@ -150,20 +153,23 @@ The bridge converts high-level state into compact device protocol messages:
 - configuration reads and writes
 - device diagnostics
 
-The bridge must shield firmware from agent-specific churn. If Codex or Claude
-Code changes its CLI, JSONL, or SDK behavior, only the software adapter layer
-should change.
+The bridge must shield firmware from agent-specific churn. Claude Code is the
+active reference provider; if its CLI, hook, JSONL, or SDK behavior changes,
+only the software adapter layer should change. Codex-specific changes should
+not drive new firmware or shared backend contracts while Codex is parked.
 
 Current V1 adapter status:
 
-- Codex command approval uses app-server JSON-RPC over stdio.
+- Claude Code foreground command/tool approval uses the Claude Code hook path.
+- Claude managed command/tool approval uses the Python Agent SDK permission
+  callback.
+- Legacy stream-json parsing remains for compatibility but is not the active
+  dynamic approval path.
+- Codex app-server/proxy approval support exists but is parked.
 - Codex `exec --json` remains a non-forwarding fallback.
-- Claude command/tool approval uses the Python Agent SDK permission callback.
-- Legacy stream-json parsing remains for compatibility but is not the dynamic
-  approval path.
 - `permission_ack.forwarded=true` remains reserved for provider-native delivery.
-  The final backend virtual-input verification pass did not rerun external real
-  Codex or Claude CLI approval smoke.
+  The active hard acceptance path is real Claude Code foreground approval
+  loopback.
 
 ## Local UI API
 
@@ -187,7 +193,7 @@ These are not current implementation targets:
 - keyboard device as a WebSocket client
 - keyboard device as an Ethernet host on the product path
 - firmware running TLS or cloud API clients
-- direct firmware integration with Codex or Claude Code
+- direct firmware integration with Claude Code, Codex, or any other agent
 
 Network-facing bridge features are PC-local unless a future product decision
 explicitly changes this.
@@ -199,10 +205,11 @@ hardware and software tasks.
 
 Suggested flow:
 
-1. Codex/GPT-5.5 defines or reviews the protocol change and acceptance criteria.
+1. Define or review the protocol change and acceptance criteria against the
+   Claude Code backend path.
 2. Hardware implements firmware support in the hardware repository.
 3. Software implements or updates the matching transport and bridge behavior.
-4. Codex/GPT-5.5 performs final integration review across both repositories.
+4. Perform final integration review across both repositories.
 
 Software PRs should report:
 
@@ -216,4 +223,4 @@ Backend-only changes should additionally report:
 
 - Local API compatibility impact
 - provider-native approval evidence, if permission handling changed
-- process cleanup behavior for app-server or SDK-backed agents
+- process cleanup behavior for foreground hook, SDK, or parked app-server agents

@@ -2,8 +2,8 @@
 
 Approval Policy controls which agent actions may run automatically, which need
 user confirmation, and which are blocked. It applies to permission requests from
-Codex, Claude Code, keyboard bindings, automation clients, and future agent
-integrations.
+Claude Code, keyboard bindings, automation clients, parked Codex compatibility,
+and future agent integrations.
 
 ## Policy Scopes
 
@@ -57,8 +57,8 @@ than scattered across UI, keyboard bindings, or agent adapters.
 {
   "permission_id": "perm_01",
   "target": {
-    "provider_id": "codex",
-    "instance_id": "codex-software",
+    "provider_id": "claude_code",
+    "instance_id": "cc-software",
     "session_id": "sess_01",
     "run_id": "run_03"
   },
@@ -238,34 +238,33 @@ Core permission decision
 The UI and keyboard should not depend on provider-specific permission formats.
 Agent adapters translate core decisions into provider-native responses.
 
-Current V1 provider paths:
+Current provider paths:
 
 ```text
-Codex:
-  codex app-server with stdio listen transport
-  item/commandExecution/requestApproval -> accept | decline
-  item/fileChange/requestApproval       -> accept | decline
-  item/permissions/requestApproval      -> accept | decline
-  execCommandApproval                   -> approved | denied
-  applyPatchApproval                    -> approved | denied
-
 Claude Code:
+  foreground CLI hooks -> hook stdout response
   Python Agent SDK can_use_tool callback -> PermissionResultAllow/Deny
+
+Codex, parked compatibility:
+  app-server/proxy JSON-RPC approval response
+  exec_json fallback remains non-forwarding
 ```
 
 `permission_ack.forwarded=true` may only be returned after the adapter has
-confirmed that the native response path completed. For Codex app-server this
-means the JSON-RPC response was written to stdin. For Claude SDK this means the
-permission callback received and returned the decision.
+confirmed that the native response path completed. For Claude Code foreground
+hooks this means the hook response was written back to Claude Code stdout. For
+Claude SDK this means the permission callback received and returned the
+decision. For the parked Codex compatibility path this means the JSON-RPC
+response was delivered through the proxy/app-server channel.
 
 If forwarding fails for a provider that requires native forwarding, the Local
 API returns `PERMISSION_FORWARD_FAILED` and keeps the request pending. Fake or
 unsupported adapters may return `forwarded=false` only in explicit test/fallback
 paths.
 
-Expired Codex app-server requests are declined through the native JSON-RPC
-channel so the provider does not remain blocked on an approval request that the
-Local Core Service has already pruned.
+Expired parked Codex app-server/proxy requests are declined through the native
+JSON-RPC channel so the provider does not remain blocked on an approval request
+that the Local Core Service has already pruned.
 
 ## Audit Trail
 

@@ -1,14 +1,16 @@
 # Agent Control Identity Model
 
-Agent Control must support multiple Codex and Claude Code instances running at
-the same time. The system cannot treat `codex` or `claude_code` as a single
-runtime.
+Agent Control must support multiple Claude Code instances running at the same
+time. The provider model still supports additional providers, including the
+parked Codex compatibility path, but the current roadmap treats Claude Code as
+the reference runtime. New behavior should not require Claude Code/Codex parity.
 
 ## Identity Hierarchy
 
 ```text
 AgentProvider
-  codex | claude_code
+  claude_code
+  codex, if the parked compatibility provider is enabled
 
 AgentInstance
   one configured or running provider instance
@@ -23,8 +25,8 @@ AgentRun
 This hierarchy allows combinations such as:
 
 ```text
-codex-software / session A / run 1
-codex-architect / session B / run 1
+cc-software / session A / run 1
+cc-architect / session B / run 1
 cc-hardware / session C / run 4
 cc-debug / session D / run 2
 ```
@@ -32,7 +34,7 @@ cc-debug / session D / run 2
 ## IDs
 
 ```text
-provider_id:   codex | claude_code
+provider_id:   claude_code | codex
 instance_id:   stable local instance identifier
 session_id:    provider-native or locally generated session identifier
 run_id:        locally generated or provider-native run/turn identifier
@@ -56,8 +58,8 @@ Provider describes a supported agent family.
 
 ```json
 {
-  "provider_id": "codex",
-  "display_name": "Codex",
+  "provider_id": "claude_code",
+  "display_name": "Claude Code",
   "adapter_kind": "cli",
   "capabilities": [
     "streaming_output",
@@ -68,27 +70,27 @@ Provider describes a supported agent family.
 }
 ```
 
-The two initial providers are:
+Current provider status:
 
 ```text
-codex
-claude_code
+claude_code: active reference provider
+codex: parked compatibility provider
 ```
 
 The adapter layer supports multiple modes behind the same provider model.
-Current V1 defaults:
+Current defaults and support status:
 
 ```text
-codex:
-  mode: app_server
-  launch: codex app-server with stdio listen transport
-  native permission forwarding: JSON-RPC response to app-server stdin
-  fallback: exec_json, read-only for approval forwarding
-
 claude_code:
-  mode: agent_sdk
-  native permission forwarding: Python Agent SDK can_use_tool callback
+  active mode: native foreground CLI with Claude Code hooks
+  managed mode: agent_sdk for headless tests and automation
+  native permission forwarding: hook stdout delivery or SDK callback return
   fallback: headless stream-json, non-native for dynamic approval forwarding
+
+codex:
+  status: parked
+  supported mode: app_server/proxy compatibility path
+  fallback: exec_json, read-only for approval forwarding
 ```
 
 Provider identity should remain stable even if a particular instance switches
@@ -100,12 +102,12 @@ An instance represents one configured runtime role.
 
 ```json
 {
-  "instance_id": "codex-software",
-  "provider_id": "codex",
-  "label": "Codex Software",
+  "instance_id": "cc-software",
+  "provider_id": "claude_code",
+  "label": "Claude Software",
   "role": "software_developer",
   "workspace": "${PROJECT_ROOT}/software",
-  "executable": "codex",
+  "executable": "claude",
   "args": [],
   "status": "idle",
   "default_policy_id": "policy_standard",
@@ -127,13 +129,13 @@ Default product assumptions:
 Recommended initial presets:
 
 ```text
-codex-software
-  provider: codex
+cc-software
+  provider: claude_code
   workspace: software repo
   role: software developer
 
-codex-architect
-  provider: codex
+cc-architect
+  provider: claude_code
   workspace: project root or both repos
   role: architecture and review
 
@@ -150,8 +152,8 @@ A session represents one conversation, thread, or ongoing work context.
 ```json
 {
   "session_id": "sess_01",
-  "provider_id": "codex",
-  "instance_id": "codex-software",
+  "provider_id": "claude_code",
+  "instance_id": "cc-software",
   "title": "Implement device transport abstraction",
   "workspace": "${PROJECT_ROOT}/software",
   "state": "active",
@@ -176,8 +178,8 @@ A run represents one task, turn, or job execution inside a session.
 ```json
 {
   "run_id": "run_03",
-  "provider_id": "codex",
-  "instance_id": "codex-software",
+  "provider_id": "claude_code",
+  "instance_id": "cc-software",
   "session_id": "sess_01",
   "state": "waiting_permission",
   "prompt_summary": "Run bridge tests",
@@ -206,8 +208,8 @@ Commands and events that target agent state use `AgentRef`.
 
 ```json
 {
-  "provider_id": "codex",
-  "instance_id": "codex-software",
+  "provider_id": "claude_code",
+  "instance_id": "cc-software",
   "session_id": "sess_01",
   "run_id": "run_03"
 }
@@ -239,7 +241,7 @@ Slot mappings are per device and include a generation counter.
   "device_id": "kbd_01",
   "generation": 7,
   "agent_slots": {
-    "1": "codex-software",
+    "1": "cc-software",
     "2": "cc-hardware"
   },
   "session_slots": {
@@ -276,7 +278,7 @@ Current MVP fields such as:
 
 ```json
 {
-  "agent": "codex",
+  "agent": "claude",
   "session_id": "sess_abc"
 }
 ```
@@ -285,8 +287,8 @@ should migrate to:
 
 ```json
 {
-  "provider_id": "codex",
-  "instance_id": "codex-default",
+  "provider_id": "claude_code",
+  "instance_id": "claude-default",
   "session_id": "sess_abc"
 }
 ```
@@ -294,8 +296,8 @@ should migrate to:
 The initial migration can create default instances:
 
 ```text
-codex-default
 claude-default
+codex-default, only if the parked provider is enabled
 ```
 
 Later, workspace-aware presets can replace these defaults.
@@ -309,13 +311,16 @@ model internally where possible.
 Current compatibility examples:
 
 ```text
-agent_launch(agent="codex", session_id="new")
+agent_launch(agent="claude", session_id="new")
+agent_launch(agent="codex", session_id="new") if the parked provider is enabled
 permission_response(agent inferred from pending request)
 interrupt(session_id="sess_...")
-list_sessions(agent="codex" | "claude" | "all")
+list_sessions(agent="claude" | "codex" | "all")
 ```
 
-Codex app-server also exposes provider-native identifiers:
+Claude Code foreground hooks expose hook request identifiers and native channel
+metadata. Codex app-server/proxy also exposes provider-native identifiers when
+the parked compatibility provider is enabled:
 
 ```text
 thread_id -> provider thread/session identifier
@@ -324,6 +329,6 @@ item_id   -> provider item/tool-call identifier
 jsonrpc_id -> native approval request id
 ```
 
-The current Local API permission request ID is the native JSON-RPC id coerced to
-a string for Codex app-server requests. This keeps the response route
-deterministic because the JSON-RPC response must target that exact id.
+For Codex app-server/proxy requests, the current Local API permission request ID
+is the native JSON-RPC id coerced to a string. This remains a compatibility
+detail and should not be treated as the shared provider identity model.

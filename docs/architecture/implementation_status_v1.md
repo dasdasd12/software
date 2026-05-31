@@ -4,6 +4,19 @@ This document records what the current backend implementation actually supports.
 It is a status companion to the architecture documents, not a replacement for
 the target architecture.
 
+## Roadmap Direction
+
+As of 2026-05-31, follow-on backend development is Claude Code first.
+Claude Code is the reference provider for foreground launch, runtime
+monitoring, user interaction, permission approval, interrupt, close, focus, and
+device/virtual-input workflows.
+
+Codex support remains in the repository as a parked compatibility and
+regression path. It should not be advanced further in this phase, and shared
+backend contracts should not be changed merely to preserve feature parity with
+Codex. When a provider-specific choice is needed, prefer the Claude Code
+behavior unless a later product decision reactivates Codex.
+
 ## Implemented
 
 - Local Core Service runs as the software-side state owner for tests and local
@@ -54,85 +67,77 @@ the target architecture.
 
 ## Agent Adapters and Loopback
 
-### Codex
-
-Codex defaults to app-server mode using the stdio listen transport:
-
-```text
-codex app-server
-```
-
-The app-server adapter uses newline-delimited JSON-RPC over stdio:
-
-1. send `initialize`
-2. send `initialized`
-3. send `thread/start` with untrusted approval policy and user approvals
-4. send `turn/start` with the user prompt
-5. translate native approval requests into Local API `permission_request`
-6. write the JSON-RPC response after a Local API `permission_response`
-
-Supported native approval request methods:
-
-```text
-item/commandExecution/requestApproval -> accept | decline
-item/fileChange/requestApproval       -> accept | decline
-item/permissions/requestApproval      -> accept | decline
-execCommandApproval                   -> approved | denied
-applyPatchApproval                    -> approved | denied
-```
-
-`permission_ack.forwarded=true` is returned only after the JSON-RPC response has
-been written to the app-server stdin. Evidence includes the adapter name, native
-channel, JSON-RPC id, thread id, turn id, item id, command, cwd, decision, and
-write confirmation.
-
-Codex `exec --json` remains a fallback/legacy read-only path. It does not
-support native approval forwarding and therefore must not be used for hard
-approval acceptance tests.
-
-Current real loopback smoke shape:
-
-```text
-python scripts/local-api-smoke.py --scenario approval-real --agent codex --decision approve --require-forwarded --workspace <workspace> --auto-start-service --wait-for-hotkey-approval
-python scripts/local-hotkey-harness.py --workspace <workspace> --json-log
-```
-
-The smoke client launches Codex through the Local Core Service and waits for the
-hotkey harness or another authorized client to submit the approval response when
-`--wait-for-hotkey-approval` is set.
-
 ### Claude Code
 
-Claude Code uses the Python Agent SDK mode for native permission callbacks.
-The old headless `-p --output-format stream-json` path remains useful for
-streaming compatibility, but it is not the approval-forwarding path.
+Claude Code has two implemented integration paths:
 
-`permission_ack.forwarded=true` for Claude is returned only after the SDK
-permission callback has received and returned the decision.
+```text
+foreground native CLI + Claude Code hooks
+managed Python Agent SDK
+```
 
-Current real loopback smoke shape:
+The foreground native CLI path is the active product-like path. It starts a
+visible Claude Code terminal through `scripts/local-agent-cli.py --native-cli`,
+registers the session with Local API, and uses `scripts/claude-code-hook.py` to
+turn Claude Code hook events into Local API permission and interaction events.
+
+`permission_ack.forwarded=true` for the foreground path is returned only after
+the hook process reports `claude_hook_delivered`, meaning the response has been
+written back to Claude Code stdout. Evidence includes:
+
+- `adapter: "claude_code_hook"`
+- native hook channel
+- session and request identifiers
+- decision
+- `response_written: true`
+
+Current Claude Code foreground smoke shape:
+
+```text
+python scripts/local-api-smoke.py --scenario foreground-approval-real --agent claude --decision approve --require-forwarded --workspace <workspace> --auto-start-service --timeout 120 --json-log
+python scripts/local-api-smoke.py --scenario foreground-approval-real --agent claude --decision deny    --require-forwarded --workspace <workspace> --auto-start-service --timeout 120 --json-log
+```
+
+The managed Agent SDK path remains available for headless service tests and
+automation:
 
 ```text
 python scripts/local-api-smoke.py --scenario approval-real --agent claude --decision approve --require-forwarded --workspace <workspace> --auto-start-service --wait-for-hotkey-approval
 python scripts/local-hotkey-harness.py --workspace <workspace> --json-log
 ```
 
-Claude real loopback requires the Python Claude Agent SDK dependency to be
-installed and provider authentication to be available in the local environment.
-If either is missing, the real Claude loopback path is expected to fail before
-native permission forwarding evidence can be produced.
+For the SDK path, `permission_ack.forwarded=true` is returned only after the SDK
+permission callback has received and returned the decision. The SDK path
+requires the Python Claude Agent SDK dependency and local provider
+authentication.
+
+### Codex Parked Compatibility
+
+Codex native approval and foreground CLI support exists, including app-server
+JSON-RPC/proxy forwarding and real approve/deny smoke coverage. This path is no
+longer a hard acceptance target for the next backend phase.
+
+Codex `exec --json` remains a fallback/legacy read-only path. It does not
+support native approval forwarding and must not be used for hard approval
+acceptance tests.
+
+Keep Codex tests and compatibility code healthy when touching shared surfaces,
+but do not expand Codex behavior, do not require Claude Code to match Codex, and
+do not block Claude Code work on Codex parity.
 
 ## Permission Semantics
 
-- Real native forwarding is required for Codex app-server and Claude SDK
-  permission requests.
+- Real native forwarding is required for Claude Code foreground hook and Claude
+  SDK permission requests.
+- Codex native forwarding remains required only when the parked Codex
+  compatibility path is explicitly exercised.
 - Fake and unsupported adapters may return `forwarded=false` only for tests,
   explicit fallback modes, or providers that do not expose a writable native
   permission channel.
 - If native forwarding fails for a provider that requires forwarding, the Local
   API returns `PERMISSION_FORWARD_FAILED` and leaves the permission pending.
-- Expired Codex app-server permission requests are declined through the native
-  JSON-RPC channel so the provider does not wait forever.
+- Expired parked Codex app-server/proxy permission requests are declined through
+  the native JSON-RPC channel so the provider does not wait forever.
 - The Local API does not regress a session from a terminal state back to
   `WORKING` if a provider completes immediately after a permission response.
 
@@ -179,6 +184,8 @@ basic
 permission
 real-agent
 approval-real
+foreground-approval-real
+foreground-cli
 virtual-input
 ```
 
@@ -192,51 +199,41 @@ The smoke script also supports real loopback controls:
 --wait-for-hotkey-approval
 ```
 
-Focused final backend virtual-input checks:
+Latest full backend/provider-loopback verification:
+
+```text
+pytest tests -q -> 404 passed
+```
+
+Earlier focused backend virtual-input checks:
 
 ```text
 pytest tests/architecture/test_import_boundaries.py -q -> 4 passed
 pytest tests/bridge/test_virtual_input_local_api.py -q -> 8 passed
 ```
 
-The full final implementation suite result was:
+The active real approval scenario is Claude Code foreground:
 
 ```text
-pytest tests -q -> 265 passed, 1 skipped in 3.49s
+python scripts/local-api-smoke.py --scenario foreground-approval-real --agent claude --decision approve --require-forwarded --workspace <workspace> --auto-start-service --timeout 120 --json-log
+python scripts/local-api-smoke.py --scenario foreground-approval-real --agent claude --decision deny    --require-forwarded --workspace <workspace> --auto-start-service --timeout 120 --json-log
 ```
 
-The smoke script also supports real approval scenarios:
+The Claude Code smoke uses a harmless stdout command:
 
 ```text
-python scripts/local-api-smoke.py --scenario approval-real --agent codex  --decision approve --require-forwarded
-python scripts/local-api-smoke.py --scenario approval-real --agent codex  --decision deny    --require-forwarded
-python scripts/local-api-smoke.py --scenario approval-real --agent claude --decision approve --require-forwarded
+python -c "print('claude approval smoke')"
 ```
 
-The Codex smoke uses a harmless stdout command:
-
-```text
-python -c "print('codex approval smoke')"
-```
-
-Earlier backend approval work verified the hard Codex acceptance path with the
-local Codex CLI:
+Earlier backend approval work also verified Codex approve/deny loopback with
+the local Codex CLI, but that evidence is now regression-only:
 
 - Local API receives `permission_request`
 - smoke sends `permission_response`
-- adapter writes the JSON-RPC response
+- adapter writes the native response
 - Local API returns `permission_ack.forwarded=true`
-- Codex either executes the command after approval or reports that it was not
-  run after denial
-- app-server child processes are cleaned up after turn completion
-
-The final backend virtual-input verification pass did not rerun real external
-Codex or Claude CLI approval smoke. Current repository evidence from that pass
-is limited to the final full pytest suite, focused import-boundary checks,
-focused virtual-input Local API checks, and smoke help coverage for the
-`virtual-input` scenario. Do not describe Codex or Claude real loopback smoke as
-having been run in final integration unless new evidence is produced in the
-same session.
+- the provider either executes the harmless command after approval or reports
+  that it was not run after denial
 
 ## Known Gaps
 
@@ -246,8 +243,10 @@ same session.
   packaging still needs a product-owned workspace/config selection flow.
 - POSIX process-tree cleanup should be revisited before Linux/macOS packaging.
 - USB HID, CDC, BLE, and 2.4G hardware transports are not implemented yet.
-- Codex app-server is the hard acceptance provider for command approval. Codex
-  fallback `exec --json` remains non-forwarding.
+- Claude Code foreground CLI with hooks is the active hard acceptance provider
+  for command approval. The managed SDK path remains a headless support path.
+- Codex app-server/proxy support is parked. Codex fallback `exec --json`
+  remains non-forwarding.
 - Physical keyboard interaction is still represented by simulator/virtual input
   paths in this backend scope. The local hotkey harness is a temporary external
   test input surface, not formal product device transport.

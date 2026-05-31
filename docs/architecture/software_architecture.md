@@ -62,28 +62,31 @@ Implemented backend capabilities:
   slot mapping, projected snapshots, focus state, active tool state,
   notification queue, config sync, and profile validation.
 - Diagnostics, redaction, import-boundary, and path guard coverage.
-- Claude Code native approval forwarding through the Python Agent SDK.
-- Codex native approval forwarding through `codex app-server` JSON-RPC over the
-  stdio listen transport.
+- Claude Code is the active reference provider for launch, monitoring,
+  interaction, and native approval loopback. The product-like path is the
+  foreground Claude Code CLI with Local API hooks; the managed Python Agent SDK
+  path remains useful for headless tests and automation.
+- Codex native/foreground approval support exists in the repository and has
+  produced real loopback evidence, but it is parked as a compatibility and
+  regression path. New backend work should not require Codex parity or let
+  Codex-specific behavior drive shared contracts.
 - Smoke support for real loopback controls: `--workspace`,
   `--auto-start-service`, `--config`, `--service-start-timeout`, and
   `--wait-for-hotkey-approval`.
-- Earlier real Codex approval and denial smoke tests produced
-  `permission_ack.forwarded=true` evidence. The final backend virtual-input
-  verification pass did not rerun external real Codex or Claude CLI smoke, and
-  current docs must not claim final real external smoke coverage without fresh
-  same-session evidence.
+- Earlier real Claude Code foreground approve/deny smoke tests and Codex
+  approve/deny smoke tests produced `permission_ack.forwarded=true` evidence.
+  After the current roadmap reset, Claude Code is the active acceptance target
+  and Codex evidence is regression-only.
 
-Final backend virtual-input verification recorded `pytest tests -q` as
-`265 passed, 1 skipped in 3.49s`, with focused import-boundary and virtual-input
-Local API checks passing.
+Latest full backend verification after provider-loopback work recorded
+`pytest tests -q` as `404 passed`.
 
 Deferred from V2:
 
 - formal frontend and desktop shell
 - physical USB HID, CDC, BLE, and 2.4G device transports
 - packaged service lifecycle and installer
-- POSIX process-tree hardening for Codex app-server cleanup
+- packaged lifecycle hardening for foreground/provider process cleanup
 
 See `implementation_status_v1.md` for operational acceptance details.
 
@@ -97,7 +100,8 @@ The application owns:
 - keyboard configuration
 - profiles, layers, keymaps, macros, magnetic switch settings, screen settings
 - device discovery, diagnostics, and firmware-facing control
-- Codex and Claude Code instance management
+- Claude Code instance management
+- parked Codex compatibility instance management, where enabled
 - agent sessions, runs, permissions, notifications, and logs
 - local APIs used by the UI and tests
 - protocol conversion between UI, agent adapters, and keyboard devices
@@ -144,7 +148,7 @@ Keyboard Domain        Agent Domain
                   v
 Adapters
   Device transports: USB Vendor HID, CDC, BLE GATT, 2.4G dongle, simulator
-  Agent adapters: Codex, Claude Code
+  Agent adapters: Claude Code primary, Codex parked compatibility
 ```
 
 ## Core Principle
@@ -206,8 +210,8 @@ src/agents/
   session registry
   run registry
   permission queue
-  Codex app-server adapter
-  Claude Code SDK adapter
+  Claude Code foreground hook and SDK adapters
+  Codex compatibility adapter, parked
 
 src/local_api/
   WebSocket API
@@ -225,9 +229,13 @@ but new code should move toward these responsibilities.
 
 Current implementation note:
 
-- `src/agents/codex_app_server.py` owns the Codex JSON-RPC stdio client.
-- `src/agents/adapters.py` owns native permission adapters for Codex app-server
-  and Claude SDK.
+- `scripts/local-agent-cli.py` and `scripts/claude-code-hook.py` own the
+  current foreground Claude Code CLI loopback path used for product-like local
+  interaction.
+- `src/agents/adapters.py` still contains managed Claude SDK permission
+  support for headless service tests and automation.
+- Codex adapter and proxy code remains in the tree for regression coverage, but
+  it is not an active development baseline.
 - `src/bridge/agent_proxy.py` still orchestrates process lifecycle and legacy
   stream paths. It should be split further when provider/instance management is
   promoted out of the bridge compatibility layer.
@@ -245,7 +253,7 @@ Examples:
 - `Fn+Enter` approves a permission request for the focused agent session.
 - `Fn+Esc` interrupts the focused agent run.
 - A rotary encoder scrolls the focused session output.
-- A screen layout shows the current Codex or Claude Code session state.
+- A screen layout shows the current Claude Code session state.
 - A coding profile binds keys and screen cards to specific agent roles.
 
 This means agent control is not an optional overlay. It is a first-class domain
@@ -253,16 +261,20 @@ inside the keyboard software.
 
 ## Agent Identity Model
 
-Agent control must support multiple concurrent Codex and Claude Code instances.
+Agent control must support multiple concurrent Claude Code instances. The
+provider model still allows additional providers, including the parked Codex
+compatibility path, but new product behavior should be validated against
+Claude Code first.
 
 The identity hierarchy is:
 
 ```text
 AgentProvider
-  codex | claude_code
+  claude_code
+  codex, if the parked compatibility provider is enabled
 
 AgentInstance
-  one running or launchable Codex/Claude Code process or connection
+  one running or launchable provider process or connection
 
 AgentSession
   one conversation/thread/session owned by an instance
@@ -275,8 +287,8 @@ Software-facing events use a full agent reference:
 
 ```json
 {
-  "provider_id": "codex",
-  "instance_id": "codex-software",
+  "provider_id": "claude_code",
+  "instance_id": "cc-software",
   "session_id": "thread-001",
   "run_id": "turn-012"
 }
@@ -358,14 +370,15 @@ permission_ack.forwarded=true
   only after the provider-native permission response has been delivered
 ```
 
-Codex app-server evidence includes JSON-RPC id and response write status.
-Claude SDK evidence includes callback delivery and return status.
+Claude Code foreground hook evidence includes hook delivery and response write
+status. Claude SDK evidence includes callback delivery and return status.
+Codex evidence is retained for the parked compatibility path and is no longer
+the reference acceptance model.
 
-Real loopback acceptance currently uses the Local API smoke client plus the
-temporary hotkey harness. Codex approval smoke launches through
-`codex app-server`. Claude approval smoke launches through the Python Claude
-Agent SDK path and requires the SDK dependency and provider authentication to be
-available locally before native callback evidence can be produced.
+Real loopback acceptance currently uses the Local API smoke client plus, when
+needed, the temporary hotkey harness. The active acceptance path launches a
+foreground Claude Code CLI session and verifies that the hook response has been
+written back before `permission_ack.forwarded=true` is emitted.
 
 ## Snapshot and Event Model
 
