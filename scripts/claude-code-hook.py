@@ -48,6 +48,26 @@ def build_hook_event(args, hook_input: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def build_hook_delivered(
+    args,
+    request_id: str,
+    hook_event_name: str,
+    response_written: bool,
+    error: str = "",
+) -> Dict[str, Any]:
+    payload = {
+        "type": "claude_hook_delivered",
+        "session_id": args.session_id,
+        "request_id": request_id,
+        "hook_event_name": hook_event_name,
+        "response_written": bool(response_written),
+        "timestamp": now_ts(),
+    }
+    if error:
+        payload["error"] = error
+    return payload
+
+
 def permission_denied_response(message: str) -> Dict[str, Any]:
     return {
         "hookSpecificOutput": {
@@ -109,9 +129,37 @@ async def run_hook(args, hook_input: Dict[str, Any]) -> Dict[str, Any]:
             payload = json.loads(await asyncio.wait_for(ws.recv(), timeout=args.timeout))
             if payload.get("type") == "claude_hook_result":
                 response = payload.get("hook_response")
-                return response if isinstance(response, dict) else {}
+                return {
+                    "hook_response": response if isinstance(response, dict) else {},
+                    "request_id": payload.get("request_id"),
+                    "hook_event_name": payload.get("hook_event_name"),
+                }
             if payload.get("type") == "error":
                 raise RuntimeError(payload.get("message") or payload.get("code") or "hook failed")
+
+
+async def mark_hook_delivered(
+    args,
+    request_id: str,
+    hook_event_name: str,
+    response_written: bool,
+    error: str = "",
+) -> None:
+    import websockets
+
+    token = os.environ.get(CLAUDE_HOOK_TOKEN_ENV, "")
+    async with websockets.connect(args.api_url) as ws:
+        await ws.send(json.dumps(build_hello(args, token), ensure_ascii=False))
+        while True:
+            hello_ack = json.loads(await asyncio.wait_for(ws.recv(), timeout=args.timeout))
+            if hello_ack.get("type") == "hello_ack":
+                break
+            if hello_ack.get("type") == "error":
+                raise RuntimeError(hello_ack.get("message") or hello_ack.get("code") or "hello failed")
+        await ws.send(json.dumps(
+            build_hook_delivered(args, request_id, hook_event_name, response_written, error),
+            ensure_ascii=False,
+        ))
 
 
 def main(argv=None) -> int:
@@ -124,18 +172,38 @@ def main(argv=None) -> int:
         return 0
 
     try:
-        response = asyncio.run(run_hook(args, hook_input))
+        result = asyncio.run(run_hook(args, hook_input))
     except Exception as exc:
         if hook_input.get("hook_event_name") == "PermissionRequest":
             print(json.dumps(permission_denied_response(f"Local API hook bridge failed closed: {exc}")), flush=True)
         elif is_controlled_pretooluse_input(hook_input):
             print(json.dumps(pretooluse_denied_response(f"Local API hook bridge failed closed: {exc}")), flush=True)
         return 0
+    if isinstance(result, dict) and (
+        "hook_response" in result or "request_id" in result or "hook_event_name" in result
+    ):
+        response = result.get("hook_response") if isinstance(result.get("hook_response"), dict) else {}
+        request_id = result.get("request_id")
+        hook_event_name = result.get("hook_event_name")
+    else:
+        response = result if isinstance(result, dict) else {}
+        request_id = None
+        hook_event_name = None
 
     if not response and is_controlled_pretooluse_input(hook_input):
         response = pretooluse_denied_response("Local API hook bridge returned no PreToolUse decision.")
     if response:
         print(json.dumps(response, ensure_ascii=False), flush=True)
+    if isinstance(request_id, str) and request_id and isinstance(hook_event_name, str) and hook_event_name:
+        try:
+            asyncio.run(mark_hook_delivered(
+                args,
+                request_id,
+                hook_event_name,
+                response_written=bool(response),
+            ))
+        except Exception:
+            pass
     return 0
 
 

@@ -84,6 +84,16 @@ async def wait_for_payload(queue, payload_type, timeout=1.0):
     return None
 
 
+async def mark_claude_hook_delivered(server, hook_queue, session_id, hook_result):
+    await server._cmd_claude_hook_delivered({
+        "type": "claude_hook_delivered",
+        "session_id": session_id,
+        "request_id": hook_result["request_id"],
+        "hook_event_name": hook_result.get("hook_event_name", ""),
+        "response_written": True,
+    }, hook_queue)
+
+
 def test_hook_script_builds_fail_closed_permission_response():
     module = load_hook_module()
 
@@ -93,6 +103,29 @@ def test_hook_script_builds_fail_closed_permission_response():
     assert output["hookEventName"] == "PermissionRequest"
     assert output["decision"]["behavior"] == "deny"
     assert output["decision"]["interrupt"] is True
+
+
+def test_hook_script_builds_delivery_ack():
+    module = load_hook_module()
+    args = module.parse_args([
+        "--session-id",
+        "sess_native",
+        "--client-id",
+        "claude-code-hook:sess_native",
+    ])
+
+    payload = module.build_hook_delivered(
+        args,
+        "req_1",
+        "PermissionRequest",
+        response_written=True,
+    )
+
+    assert payload["type"] == "claude_hook_delivered"
+    assert payload["session_id"] == "sess_native"
+    assert payload["request_id"] == "req_1"
+    assert payload["hook_event_name"] == "PermissionRequest"
+    assert payload["response_written"] is True
 
 
 def test_hook_script_fails_closed_for_pretooluse_bridge_error(monkeypatch, capsys):
@@ -157,19 +190,23 @@ def test_claude_permission_hook_round_trips_to_permission_response():
                 break
         assert request is not None
 
-        await server._cmd_permission_response({
+        response_task = asyncio.create_task(server._cmd_permission_response({
             "type": "permission_response",
             "request_id": request["request_id"],
             "session_id": session.session_id,
             "approved": True,
             "decision": "always_allow",
-        }, desktop_queue)
+        }, desktop_queue))
+        hook_result = await wait_for_payload(hook_queue, "claude_hook_result")
+        assert hook_result is not None
+        assert not response_task.done()
+        await mark_claude_hook_delivered(server, hook_queue, session.session_id, hook_result)
+        await response_task
         await hook_task
-        return request
+        return request, hook_result
 
-    request = asyncio.run(run())
+    request, hook_result = asyncio.run(run())
 
-    hook_result = [json.loads(raw) for raw in hook_queue.items if json.loads(raw).get("type") == "claude_hook_result"][-1]
     hook_response = hook_result["hook_response"]["hookSpecificOutput"]
     assert hook_response["hookEventName"] == "PermissionRequest"
     assert hook_response["decision"]["behavior"] == "allow"
@@ -224,19 +261,23 @@ def test_claude_ask_user_question_hook_round_trips_to_interaction_response():
         assert snapshot["interactions"][0]["request_id"] == request["request_id"]
         assert snapshot["interactions"][0]["questions"] == hook["tool_input"]["questions"]
 
-        await server._handle_local_api_message({
+        response_task = asyncio.create_task(server._handle_local_api_message({
             "type": "interaction_response",
             "session_id": session.session_id,
             "request_id": request["request_id"],
             "approved": True,
             "answers": {question_text: "Continue"},
-        }, desktop_queue)
+        }, desktop_queue))
+        hook_result = await wait_for_payload(hook_queue, "claude_hook_result")
+        assert hook_result is not None
+        assert not response_task.done()
+        await mark_claude_hook_delivered(server, hook_queue, session.session_id, hook_result)
+        await response_task
         await hook_task
-        return request
+        return request, hook_result
 
-    request = asyncio.run(run())
+    request, hook_result = asyncio.run(run())
 
-    hook_result = [json.loads(raw) for raw in hook_queue.items if json.loads(raw).get("type") == "claude_hook_result"][-1]
     hook_response = hook_result["hook_response"]["hookSpecificOutput"]
     assert hook_response["hookEventName"] == "PreToolUse"
     assert hook_response["permissionDecision"] == "allow"
@@ -283,17 +324,21 @@ def test_claude_exit_plan_mode_hook_approve_echoes_plan_input():
         assert request["interaction_type"] == "exit_plan_mode"
         assert request["plan"] == hook["tool_input"]["plan"]
         assert request["allowedPrompts"] == hook["tool_input"]["allowedPrompts"]
-        await server._handle_local_api_message({
+        response_task = asyncio.create_task(server._handle_local_api_message({
             "type": "interaction_response",
             "session_id": session.session_id,
             "request_id": request["request_id"],
             "approved": True,
-        }, desktop_queue)
+        }, desktop_queue))
+        hook_result = await wait_for_payload(hook_queue, "claude_hook_result")
+        assert hook_result is not None
+        await mark_claude_hook_delivered(server, hook_queue, session.session_id, hook_result)
+        await response_task
         await hook_task
+        return hook_result
 
-    asyncio.run(run())
+    hook_result = asyncio.run(run())
 
-    hook_result = [json.loads(raw) for raw in hook_queue.items if json.loads(raw).get("type") == "claude_hook_result"][-1]
     hook_response = hook_result["hook_response"]["hookSpecificOutput"]
     assert hook_response["hookEventName"] == "PreToolUse"
     assert hook_response["permissionDecision"] == "allow"
@@ -325,18 +370,22 @@ def test_claude_exit_plan_mode_hook_deny_returns_denial_reason():
         }, hook_queue))
         request = await wait_for_payload(desktop_queue, "interaction_request")
         assert request is not None
-        await server._handle_local_api_message({
+        response_task = asyncio.create_task(server._handle_local_api_message({
             "type": "interaction_response",
             "session_id": session.session_id,
             "request_id": request["request_id"],
             "approved": False,
             "reason": "Need a safer plan",
-        }, desktop_queue)
+        }, desktop_queue))
+        hook_result = await wait_for_payload(hook_queue, "claude_hook_result")
+        assert hook_result is not None
+        await mark_claude_hook_delivered(server, hook_queue, session.session_id, hook_result)
+        await response_task
         await hook_task
+        return hook_result
 
-    asyncio.run(run())
+    hook_result = asyncio.run(run())
 
-    hook_result = [json.loads(raw) for raw in hook_queue.items if json.loads(raw).get("type") == "claude_hook_result"][-1]
     hook_response = hook_result["hook_response"]["hookSpecificOutput"]
     assert hook_response["hookEventName"] == "PreToolUse"
     assert hook_response["permissionDecision"] == "deny"
@@ -374,12 +423,12 @@ def test_claude_pretooluse_interaction_times_out_fail_closed():
     ack = [json.loads(raw) for raw in desktop_queue.items if json.loads(raw).get("type") == "interaction_ack"][-1]
     assert ack["request_id"] == request["request_id"]
     assert ack["approved"] is False
-    assert ack["forwarded"] is True
+    assert ack["forwarded"] is False
     assert ack["evidence"]["adapter"] == "claude_code_hook"
     assert ack["evidence"]["native_channel"] == "PreToolUse"
-    assert ack["evidence"]["decision_delivered"] is True
+    assert ack["evidence"]["decision_delivered"] is False
     assert ack["evidence"]["queued_to_hook_client"] is True
-    assert ack["evidence"]["response_written"] is True
+    assert ack["evidence"]["response_written"] is False
 
 
 def test_structured_agent_interaction_respond_round_trips_to_pretooluse_hook():
@@ -405,7 +454,7 @@ def test_structured_agent_interaction_respond_round_trips_to_pretooluse_hook():
         request = await wait_for_payload(desktop_queue, "interaction_request")
         assert request is not None
 
-        await server._handle_local_api_message({
+        response_task = asyncio.create_task(server._handle_local_api_message({
             "type": "command",
             "command": {
                 "command_id": "cmd_interaction_respond",
@@ -420,13 +469,16 @@ def test_structured_agent_interaction_respond_round_trips_to_pretooluse_hook():
                     "answers": {"Pick": "A"},
                 },
             },
-        }, desktop_queue)
+        }, desktop_queue))
+        hook_result = await wait_for_payload(hook_queue, "claude_hook_result")
+        assert hook_result is not None
+        await mark_claude_hook_delivered(server, hook_queue, session.session_id, hook_result)
+        await response_task
         await hook_task
-        return request
+        return request, hook_result
 
-    request = asyncio.run(run())
+    request, hook_result = asyncio.run(run())
 
-    hook_result = [json.loads(raw) for raw in hook_queue.items if json.loads(raw).get("type") == "claude_hook_result"][-1]
     hook_response = hook_result["hook_response"]["hookSpecificOutput"]
     assert hook_response["permissionDecision"] == "allow"
     assert hook_response["updatedInput"]["answers"] == {"Pick": "A"}
@@ -549,6 +601,56 @@ def test_claude_hook_event_rejects_non_native_session():
     payload = hook_queue.pop_json()
     assert payload["type"] == "error"
     assert payload["code"] == "INVALID_HOOK_SESSION"
+
+
+def test_claude_message_display_projects_to_agent_message_delta():
+    server = make_server()
+    hook_queue = CaptureQueue()
+    desktop_queue = CaptureQueue()
+    server.connected_clients.add(desktop_queue)
+    register_desktop(server, desktop_queue)
+    session = create_native_claude_session(server)
+    register_hook(server, hook_queue, session.session_id)
+
+    asyncio.run(server._cmd_claude_hook_event({
+        "type": "claude_hook_event",
+        "session_id": session.session_id,
+        "hook": {
+            "hook_event_name": "MessageDisplay",
+            "delta": "claude approval smoke",
+        },
+    }, hook_queue))
+
+    payloads = [json.loads(raw) for raw in desktop_queue.items]
+    delta = [payload for payload in payloads if payload.get("type") == "agent_message_delta"][-1]
+    assert delta["session_id"] == session.session_id
+    assert delta["agent"] == "claude"
+    assert delta["delta"] == "claude approval smoke"
+
+
+def test_claude_stop_projects_to_task_completed():
+    server = make_server()
+    hook_queue = CaptureQueue()
+    desktop_queue = CaptureQueue()
+    server.connected_clients.add(desktop_queue)
+    register_desktop(server, desktop_queue)
+    session = create_native_claude_session(server)
+    register_hook(server, hook_queue, session.session_id)
+
+    asyncio.run(server._cmd_claude_hook_event({
+        "type": "claude_hook_event",
+        "session_id": session.session_id,
+        "hook": {
+            "hook_event_name": "Stop",
+            "last_assistant_message": "done",
+        },
+    }, hook_queue))
+
+    payloads = [json.loads(raw) for raw in desktop_queue.items]
+    completed = [payload for payload in payloads if payload.get("type") == "task_completed"][-1]
+    assert completed["session_id"] == session.session_id
+    assert completed["agent"] == "claude"
+    assert completed["summary"] == "done"
 
 
 def test_claude_hook_event_requires_agent_hook_identity_even_with_capability():

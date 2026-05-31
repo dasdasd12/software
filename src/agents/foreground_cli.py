@@ -68,6 +68,9 @@ def build_foreground_cli_command(
     foreground_launch_id: Optional[str] = None,
     native_cli: bool = False,
     permission_mode: str = "default",
+    context: str = "",
+    model: str = "",
+    reasoning_effort: str = "",
     python_executable: Optional[str] = None,
 ) -> List[str]:
     """Build the argv for the known local foreground CLI host script.
@@ -95,6 +98,12 @@ def build_foreground_cli_command(
     ]
     if foreground_launch_id:
         command += ["--launch-id", str(foreground_launch_id)]
+    if context:
+        command += ["--context", str(context)]
+    if model:
+        command += ["--model", str(model)]
+    if reasoning_effort:
+        command += ["--reasoning-effort", str(reasoning_effort)]
     if native_cli:
         command.append("--native-cli")
         command += ["--permission-mode", permission_mode]
@@ -168,6 +177,9 @@ class ForegroundCliLauncher:
         foreground_launch_id: Optional[str] = None,
         native_cli: bool = False,
         permission_mode: str = "default",
+        context: str = "",
+        model: str = "",
+        reasoning_effort: str = "",
         registration_token: Optional[str] = None,
         hook_token: Optional[str] = None,
         exit_token: Optional[str] = None,
@@ -181,6 +193,9 @@ class ForegroundCliLauncher:
             foreground_launch_id=foreground_launch_id,
             native_cli=native_cli,
             permission_mode=permission_mode,
+            context=context,
+            model=model,
+            reasoning_effort=reasoning_effort,
             python_executable=self.python_executable,
         )
         env = build_foreground_cli_env(

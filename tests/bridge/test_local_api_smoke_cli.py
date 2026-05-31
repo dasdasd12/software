@@ -103,6 +103,7 @@ def test_local_api_smoke_help_exposes_loopback_flags():
     assert "--wait-for-hotkey-approval" in result.stdout
     assert "--service-start-timeout" in result.stdout
     assert "foreground-cli" in result.stdout
+    assert "foreground-approval-real" in result.stdout
 
 
 def test_real_agent_launch_payload_includes_workspace(monkeypatch, tmpdir):
@@ -225,6 +226,145 @@ def test_foreground_cli_scenario_sends_structured_cli_launch(monkeypatch, tmpdir
     close = [message for message in ws.sent if message["type"] == "command"][-1]
     assert close["command"]["type"] == "agent.session.close"
     assert close["command"]["target"] == {"session_id": "sess_foreground"}
+
+
+def test_foreground_approval_real_sends_context_and_responds_to_permission(monkeypatch, tmpdir):
+    module = load_smoke_module()
+    workspace = str(tmpdir)
+    ws = FakeWebSocket([
+        {"type": "hello_ack"},
+        {
+            "type": "event",
+            "event": {
+                "type": "agent.cli.launched",
+                "payload": {
+                    "agent": "codex",
+                    "workspace": workspace,
+                    "frontend_pid": 4321,
+                    "foreground_launch_id": "fg_test",
+                    "launch_surface": "foreground_cli",
+                    "control_mode": "native_cli",
+                },
+            },
+        },
+        {
+            "type": "event",
+            "event": {
+                "type": "agent.session.created",
+                "payload": {
+                    "agent": "codex",
+                    "session_id": "sess_foreground",
+                    "workspace": workspace,
+                    "frontend_pid": 4321,
+                    "foreground_launch_id": "fg_test",
+                    "launch_surface": "foreground_cli",
+                    "control_mode": "native_cli",
+                },
+            },
+        },
+        {
+            "type": "permission_request",
+            "session_id": "sess_foreground",
+            "request_id": "req_codex",
+            "agent": "codex",
+        },
+        {
+            "type": "permission_ack",
+            "session_id": "sess_foreground",
+            "request_id": "req_codex",
+            "approved": True,
+            "forwarded": True,
+            "evidence": {
+                "adapter": "codex_cli_proxy",
+                "response_written": True,
+                "decision_delivered": True,
+            },
+        },
+        {
+            "type": "agent_message_delta",
+            "session_id": "sess_foreground",
+            "agent": "codex",
+            "delta": "codex approval smoke",
+        },
+    ])
+    monkeypatch.setattr(module.websockets, "connect", lambda url: FakeConnect(ws))
+
+    asyncio.run(make_client(module, workspace=workspace).run_foreground_approval_real(
+        "codex",
+        "approval prompt",
+        True,
+        True,
+    ))
+
+    launch = next(message for message in ws.sent if message.get("type") == "command")
+    assert launch["command"]["type"] == "agent.cli.launch_foreground"
+    assert launch["command"]["payload"] == {
+        "agent": "codex",
+        "context": "approval prompt",
+        "workspace": workspace,
+    }
+    permission = next(message for message in ws.sent if message.get("type") == "permission_response")
+    assert permission["request_id"] == "req_codex"
+    assert permission["session_id"] == "sess_foreground"
+    assert permission["approved"] is True
+    close = [message for message in ws.sent if message.get("type") == "command"][-1]
+    assert close["command"]["type"] == "agent.session.close"
+    assert close["command"]["target"] == {"session_id": "sess_foreground"}
+
+
+def test_foreground_approval_real_fails_when_cli_exits_before_ack(monkeypatch, tmpdir):
+    module = load_smoke_module()
+    workspace = str(tmpdir)
+    ws = FakeWebSocket([
+        {"type": "hello_ack"},
+        {
+            "type": "event",
+            "event": {
+                "type": "agent.cli.launched",
+                "payload": {
+                    "agent": "codex",
+                    "workspace": workspace,
+                    "frontend_pid": 4321,
+                    "foreground_launch_id": "fg_test",
+                    "launch_surface": "foreground_cli",
+                    "control_mode": "native_cli",
+                },
+            },
+        },
+        {
+            "type": "event",
+            "event": {
+                "type": "agent.session.created",
+                "payload": {
+                    "agent": "codex",
+                    "session_id": "sess_foreground",
+                    "workspace": workspace,
+                    "launch_surface": "foreground_cli",
+                    "control_mode": "native_cli",
+                },
+            },
+        },
+        {
+            "type": "event",
+            "event": {
+                "type": "agent.session.exited",
+                "payload": {
+                    "agent": "codex",
+                    "session_id": "sess_foreground",
+                    "exit_code": 1,
+                },
+            },
+        },
+    ])
+    monkeypatch.setattr(module.websockets, "connect", lambda url: FakeConnect(ws))
+
+    with pytest.raises(RuntimeError, match="exited before permission ack"):
+        asyncio.run(make_client(module, workspace=workspace).run_foreground_approval_real(
+            "codex",
+            "approval prompt",
+            True,
+            True,
+        ))
 
 
 def test_foreground_cli_scenario_requires_managed_session_created(monkeypatch, tmpdir):

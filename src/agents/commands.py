@@ -141,9 +141,23 @@ class AgentCommandService:
         self.runtime.require_controller(agent_key)
         agent = self.runtime.agent_value(agent_key)
         workspace = self._workspace_resolver(self._workspace(command))
+        context = command.payload.get("context")
+        if not isinstance(context, str):
+            context = ""
+        model = command.payload.get("model")
+        if not isinstance(model, str):
+            model = ""
+        reasoning_effort = command.payload.get("reasoning_effort")
+        if not isinstance(reasoning_effort, str):
+            reasoning_effort = ""
         foreground_launch_id = "fg_%s" % uuid.uuid4().hex
-        native_cli = bool(command.payload.get("native_cli", agent == "claude"))
+        native_cli = bool(command.payload.get("native_cli", agent in {"claude", "codex"}))
         permission_mode = self._permission_mode(command.payload, native_cli=native_cli)
+        if agent != "claude" and permission_mode == "plan":
+            raise AgentLifecycleError(
+                "INVALID_PERMISSION_MODE",
+                "permission_mode=plan is only supported for native foreground Claude",
+            )
         registration_token = "reg_%s" % secrets.token_urlsafe(24) if native_cli else None
         hook_token = "hook_%s" % secrets.token_urlsafe(24) if native_cli else None
         exit_token = "exit_%s" % secrets.token_urlsafe(24) if native_cli else None
@@ -154,6 +168,9 @@ class AgentCommandService:
                 foreground_launch_id,
                 native_cli=native_cli,
                 permission_mode=permission_mode,
+                context=context,
+                model=model,
+                reasoning_effort=reasoning_effort,
                 registration_token=registration_token,
                 hook_token=hook_token,
                 exit_token=exit_token,
@@ -314,6 +331,15 @@ class AgentCommandService:
 
     def hook_token_for_session(self, session_id: str) -> Optional[str]:
         return self._foreground_hook_tokens_by_session_id.get(session_id)
+
+    def cleanup_unregistered_foreground_launch(self, foreground_launch_id: str) -> bool:
+        if not isinstance(foreground_launch_id, str) or not foreground_launch_id:
+            return False
+        registration = self._foreground_registrations_by_launch_id.pop(foreground_launch_id, None)
+        root_pid = self._foreground_root_pids_by_launch_id.pop(foreground_launch_id, None)
+        if root_pid is not None:
+            self._terminate_process_tree(root_pid)
+        return registration is not None or root_pid is not None
 
     def _validated_foreground_registration(self, command: CommandEnvelope) -> Dict[str, Any]:
         foreground_launch_id = command.payload.get("foreground_launch_id")

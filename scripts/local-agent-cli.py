@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,9 @@ from typing import Any, Dict, Optional
 
 DEFAULT_API_URL = "ws://127.0.0.1:8765"
 NATIVE_CLAUDE_PERMISSION_MODES = ("default", "plan")
+CODEX_PROXY_CAPABILITY = "codex:hook"
+CODEX_PROXY_LOG_ENV = "AI_KEYB_CODEX_PROXY_LOG"
+CODEX_CONFIG_OVERRIDES_ENV = "AI_KEYB_CODEX_CONFIG_OVERRIDES"
 LAUNCH_TOKEN_ENV = "AI_KEYB_LAUNCH_TOKEN"
 CLAUDE_HOOK_TOKEN_ENV = "AI_KEYB_CLAUDE_HOOK_TOKEN"
 FOREGROUND_REGISTRATION_TOKEN_ENV = "AI_KEYB_FOREGROUND_REGISTRATION_TOKEN"
@@ -43,6 +47,19 @@ PRINT_EVENT_TYPES = {
     "task_completed",
     "task_failed",
 }
+CODEX_PROXY_METHODS = {
+    "item/commandExecution/requestApproval",
+    "item/fileChange/requestApproval",
+    "item/permissions/requestApproval",
+    "execCommandApproval",
+    "applyPatchApproval",
+    "item/tool/requestUserInput",
+    "mcpServer/elicitation/request",
+}
+CODEX_TUI_SAFE_MESSAGE_BYTES = 900 * 1024
+CODEX_OPTIONAL_LARGE_NOTIFICATION_METHODS = {
+    "app/list/updated",
+}
 
 
 def now_ts() -> float:
@@ -57,6 +74,8 @@ def parse_args(argv, env=None):
     parser.add_argument("--client-kind", default="desktop-ui")
     parser.add_argument("--client-id", default="local-agent-cli")
     parser.add_argument("--context", default="")
+    parser.add_argument("--model", default="")
+    parser.add_argument("--reasoning-effort", default="")
     parser.add_argument("--launch-id", default="")
     parser.add_argument("--native-cli", action="store_true")
     parser.add_argument("--permission-mode", choices=NATIVE_CLAUDE_PERMISSION_MODES, default="default")
@@ -312,11 +331,15 @@ def write_claude_hook_settings(
     return str(path)
 
 
-def build_native_claude_command(settings_path: str, permission_mode: str = "default"):
+def build_native_claude_command(
+    settings_path: str,
+    permission_mode: str = "default",
+    context: str = "",
+):
     if permission_mode not in NATIVE_CLAUDE_PERMISSION_MODES:
         raise ValueError("permission_mode must be one of: default, plan")
     executable = shutil.which("claude") or "claude"
-    return [
+    command = [
         executable,
         "--permission-mode",
         permission_mode,
@@ -325,6 +348,41 @@ def build_native_claude_command(settings_path: str, permission_mode: str = "defa
         "--name",
         "AI Keyboard Claude",
     ]
+    if context:
+        command.append(context)
+    return command
+
+
+def build_native_codex_command(
+    remote_url: str,
+    workspace: str,
+    context: str = "",
+    model: str = "",
+    reasoning_effort: str = "",
+    config_overrides: Optional[list] = None,
+):
+    executable = shutil.which("codex.cmd") or shutil.which("codex") or "codex"
+    command = [
+        executable,
+        "--no-alt-screen",
+        "--remote",
+        remote_url,
+        "--cd",
+        str(Path(workspace).resolve()),
+        "--ask-for-approval",
+        "untrusted",
+        "--sandbox",
+        "workspace-write",
+    ]
+    if model:
+        command.extend(["--model", model])
+    if reasoning_effort:
+        command.extend(["--config", f'model_reasoning_effort="{reasoning_effort}"'])
+    for override in config_overrides or []:
+        command.extend(["--config", str(override)])
+    if context:
+        command.append(context)
+    return command
 
 
 async def _receiver(ws, state: Dict[str, Any], stop_event: asyncio.Event) -> None:
@@ -357,6 +415,417 @@ async def _drain_receiver(ws, stop_event: asyncio.Event) -> None:
             continue
         if payload.get("type") == "error":
             print(json.dumps(payload, ensure_ascii=False), flush=True)
+
+
+def _free_tcp_port() -> int:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+    finally:
+        sock.close()
+
+
+def _start_pipe_printer(pipe, prefix: str, log_path: Optional[Path] = None) -> threading.Thread:
+    def read_pipe() -> None:
+        while True:
+            line = pipe.readline()
+            if not line:
+                return
+            print(f"{prefix}{line.rstrip()}", file=sys.stderr, flush=True)
+            if log_path is not None:
+                try:
+                    with log_path.open("a", encoding="utf-8") as handle:
+                        handle.write(str(line))
+                except OSError:
+                    pass
+
+    thread = threading.Thread(target=read_pipe)
+    thread.daemon = True
+    thread.start()
+    return thread
+
+
+def _native_codex_env() -> Dict[str, str]:
+    env = dict(os.environ)
+    env.pop(LAUNCH_TOKEN_ENV, None)
+    env.pop(CLAUDE_HOOK_TOKEN_ENV, None)
+    env.pop(FOREGROUND_REGISTRATION_TOKEN_ENV, None)
+    env.pop(FOREGROUND_EXIT_TOKEN_ENV, None)
+    return env
+
+
+def _native_codex_config_overrides() -> list:
+    raw = os.environ.get(CODEX_CONFIG_OVERRIDES_ENV, "")
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return [raw]
+    if isinstance(parsed, list):
+        return [str(item) for item in parsed if str(item)]
+    if isinstance(parsed, str) and parsed:
+        return [parsed]
+    return []
+
+
+class CodexLocalApiBridge:
+    def __init__(self, api_url: str, session_id: str, hook_token: str):
+        self.api_url = api_url
+        self.session_id = session_id
+        self.hook_token = hook_token
+        self._ws = None
+        self._lock = asyncio.Lock()
+
+    async def close(self) -> None:
+        ws = self._ws
+        self._ws = None
+        if ws is not None:
+            await ws.close()
+
+    async def send_notification(self, notification: Dict[str, Any]) -> None:
+        async with self._lock:
+            ws = await self._ensure_connected()
+            await _send_json(ws, {
+                "type": "codex_rpc_notification",
+                "session_id": self.session_id,
+                "notification": notification,
+                "timestamp": now_ts(),
+            })
+
+    async def request_native_response(self, native_request: Dict[str, Any]) -> Dict[str, Any]:
+        request_id = str(native_request.get("id"))
+        async with self._lock:
+            ws = await self._ensure_connected()
+            await _send_json(ws, {
+                "type": "codex_rpc_request",
+                "session_id": self.session_id,
+                "request": native_request,
+                "timestamp": now_ts(),
+            })
+            while True:
+                payload = _load_json(await ws.recv())
+                if payload.get("type") == "codex_rpc_result" and payload.get("request_id") == request_id:
+                    response = payload.get("native_response")
+                    return response if isinstance(response, dict) else {
+                        "id": native_request.get("id"),
+                        "error": {"code": -32603, "message": "Local API returned an invalid Codex RPC response"},
+                    }
+                if payload.get("type") == "error":
+                    return {
+                        "id": native_request.get("id"),
+                        "error": {
+                            "code": -32603,
+                            "message": payload.get("message") or payload.get("code") or "Local API Codex bridge failed",
+                        },
+                    }
+
+    async def mark_delivered(self, request_id: str, response_written: bool, error: str = "") -> None:
+        async with self._lock:
+            ws = await self._ensure_connected()
+            payload: Dict[str, Any] = {
+                "type": "codex_rpc_delivered",
+                "session_id": self.session_id,
+                "request_id": request_id,
+                "response_written": bool(response_written),
+                "timestamp": now_ts(),
+            }
+            if error:
+                payload["error"] = error
+            await _send_json(ws, payload)
+
+    async def _ensure_connected(self):
+        if self._ws is not None:
+            return self._ws
+        import websockets
+
+        self._ws = await websockets.connect(self.api_url)
+        await _send_json(self._ws, {
+            "type": "hello",
+            "token": self.hook_token or None,
+            "client_kind": "agent-hook",
+            "client_id": f"codex-cli-proxy:{self.session_id}",
+            "capabilities": [CODEX_PROXY_CAPABILITY],
+            "timestamp": now_ts(),
+        })
+        while True:
+            payload = _load_json(await self._ws.recv())
+            if payload.get("type") == "hello_ack":
+                return self._ws
+            if payload.get("type") == "error":
+                raise RuntimeError(payload.get("message") or payload.get("code") or "Codex proxy auth failed")
+
+
+class CodexNativeProxy:
+    def __init__(
+        self,
+        api_url: str,
+        session_id: str,
+        hook_token: str,
+        workspace: str,
+        initial_context: str = "",
+        model: str = "",
+        reasoning_effort: str = "",
+    ):
+        self.api_url = api_url
+        self.session_id = session_id
+        self.hook_token = hook_token
+        self.workspace = str(Path(workspace).resolve())
+        self.initial_context = initial_context
+        self.model = model
+        self.reasoning_effort = reasoning_effort
+        self._initial_turn_sent = False
+        self.backend_uri = ""
+        self.proxy_uri = ""
+        self.backend_process = None
+        self.proxy_server = None
+        self.local_api = CodexLocalApiBridge(api_url, session_id, hook_token)
+        self.rpc_log_path = None
+        self.stderr_log_path = None
+        self.tui_stderr_log_path = None
+        if os.environ.get(CODEX_PROXY_LOG_ENV):
+            safe_session_id = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in session_id)
+            temp_dir = Path(tempfile.gettempdir())
+            self.rpc_log_path = temp_dir / f"ai-keyb-codex-proxy-{safe_session_id}.jsonl"
+            self.stderr_log_path = temp_dir / f"ai-keyb-codex-app-server-{safe_session_id}.log"
+            self.tui_stderr_log_path = temp_dir / f"ai-keyb-codex-tui-{safe_session_id}.log"
+
+    async def start(self) -> str:
+        import websockets
+
+        backend_port = _free_tcp_port()
+        self.backend_uri = f"ws://127.0.0.1:{backend_port}"
+        executable = shutil.which("codex.cmd") or shutil.which("codex") or "codex"
+        self.backend_process = subprocess.Popen(
+            [executable, "app-server", "--listen", self.backend_uri],
+            cwd=self.workspace,
+            env=_native_codex_env(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE if self.stderr_log_path is not None else subprocess.DEVNULL,
+            text=True,
+        )
+        if self.backend_process.stderr is not None:
+            _start_pipe_printer(self.backend_process.stderr, "[codex app-server] ", self.stderr_log_path)
+
+        proxy_port = _free_tcp_port()
+        self.proxy_uri = f"ws://127.0.0.1:{proxy_port}"
+        self.proxy_server = await websockets.serve(
+            self._handle_tui_client,
+            "127.0.0.1",
+            proxy_port,
+            max_size=None,
+        )
+        if self.rpc_log_path is not None or self.stderr_log_path is not None:
+            print(
+                f"Codex proxy diagnostics: rpc={self.rpc_log_path} stderr={self.stderr_log_path} tui={self.tui_stderr_log_path}",
+                file=sys.stderr,
+                flush=True,
+            )
+        return self.proxy_uri
+
+    async def stop(self) -> None:
+        if self.proxy_server is not None:
+            self.proxy_server.close()
+            await self.proxy_server.wait_closed()
+            self.proxy_server = None
+        await self.local_api.close()
+        process = self.backend_process
+        self.backend_process = None
+        if process is None:
+            return
+        if process.poll() is not None:
+            return
+        if sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            return
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+
+    async def _handle_tui_client(self, client_ws) -> None:
+        import websockets
+
+        backend_ws = await self._connect_backend(websockets)
+        tasks = [
+            asyncio.create_task(self._pipe_client_to_backend(client_ws, backend_ws)),
+            asyncio.create_task(self._pipe_backend_to_client(backend_ws, client_ws)),
+        ]
+        try:
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            for task in done:
+                exc = task.exception()
+                if exc is not None:
+                    raise exc
+        except asyncio.CancelledError:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        except Exception as exc:
+            self._log_proxy_status("tui_proxy_pipe_error", error=str(exc))
+            raise
+        finally:
+            self._log_proxy_status("tui_proxy_closing")
+            await asyncio.gather(
+                backend_ws.close(),
+                client_ws.close(),
+                return_exceptions=True,
+            )
+
+    async def _connect_backend(self, websockets_module):
+        last_exc = None
+        for _ in range(80):
+            try:
+                return await websockets_module.connect(self.backend_uri, max_size=None)
+            except Exception as exc:
+                last_exc = exc
+                await asyncio.sleep(0.1)
+        raise RuntimeError(f"Codex app-server did not accept WebSocket connection: {last_exc}")
+
+    async def _pipe_client_to_backend(self, client_ws, backend_ws) -> None:
+        try:
+            async for raw in client_ws:
+                self._log_rpc("client_to_backend", raw)
+                await backend_ws.send(raw)
+        except Exception as exc:
+            self._log_proxy_status("client_to_backend_error", error=str(exc))
+            raise
+        finally:
+            self._log_proxy_status("client_to_backend_closed")
+
+    async def _pipe_backend_to_client(self, backend_ws, client_ws) -> None:
+        try:
+            async for raw in backend_ws:
+                self._log_rpc("backend_to_client", raw)
+                try:
+                    message = json.loads(raw)
+                except Exception:
+                    await client_ws.send(raw)
+                    continue
+                if not isinstance(message, dict):
+                    await client_ws.send(raw)
+                    continue
+                method = message.get("method")
+                if isinstance(method, str) and "id" not in message:
+                    if self._should_suppress_backend_message_for_tui(message, raw):
+                        continue
+                    await self.local_api.send_notification(message)
+                    await client_ws.send(raw)
+                    continue
+                if isinstance(method, str) and "id" in message and method in CODEX_PROXY_METHODS:
+                    response_written = False
+                    error = ""
+                    request_id = str(message.get("id"))
+                    try:
+                        native_response = await self.local_api.request_native_response(message)
+                        self._log_rpc("proxy_to_backend_response", native_response)
+                        await backend_ws.send(json.dumps(native_response, ensure_ascii=False))
+                        response_written = True
+                    except Exception as exc:
+                        error = str(exc)
+                        fallback = {
+                            "id": message.get("id"),
+                            "error": {"code": -32603, "message": f"Local API Codex proxy failed: {exc}"},
+                        }
+                        self._log_rpc("proxy_to_backend_response", fallback)
+                        await backend_ws.send(json.dumps(fallback, ensure_ascii=False))
+                        response_written = True
+                    finally:
+                        await self.local_api.mark_delivered(request_id, response_written, error)
+                    continue
+                await client_ws.send(raw)
+                await self._maybe_start_initial_turn(message, backend_ws)
+        except Exception as exc:
+            self._log_proxy_status("backend_to_client_error", error=str(exc))
+            raise
+        finally:
+            self._log_proxy_status("backend_to_client_closed")
+
+    async def _maybe_start_initial_turn(self, message: Dict[str, Any], backend_ws) -> None:
+        if self._initial_turn_sent or not self.initial_context:
+            return
+        result = message.get("result") if isinstance(message.get("result"), dict) else {}
+        thread = result.get("thread") if isinstance(result.get("thread"), dict) else {}
+        thread_id = thread.get("id")
+        if not isinstance(thread_id, str) or not thread_id:
+            return
+        self._initial_turn_sent = True
+        request = self._initial_turn_request(thread_id)
+        self._log_rpc("proxy_to_backend_initial_turn", request)
+        await backend_ws.send(json.dumps(request, ensure_ascii=False))
+
+    def _initial_turn_request(self, thread_id: str) -> Dict[str, Any]:
+        params: Dict[str, Any] = {
+            "threadId": thread_id,
+            "input": [{"type": "text", "text": self.initial_context, "text_elements": []}],
+            "cwd": self.workspace,
+            "approvalPolicy": "untrusted",
+            "approvalsReviewer": "user",
+        }
+        if self.model:
+            params["model"] = self.model
+        if self.reasoning_effort:
+            params["effort"] = self.reasoning_effort
+        return {
+            "id": f"ai-keyb-initial-turn-{uuid.uuid4().hex}",
+            "method": "turn/start",
+            "params": params,
+        }
+
+    def _log_rpc(self, direction: str, raw: Any) -> None:
+        if self.rpc_log_path is None:
+            return
+        try:
+            if isinstance(raw, str):
+                payload = json.loads(raw)
+            else:
+                payload = raw
+            record = {
+                "direction": direction,
+                "payload": payload,
+                "timestamp": now_ts(),
+            }
+            with self.rpc_log_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
+    def _log_proxy_status(self, status: str, error: str = "") -> None:
+        payload: Dict[str, Any] = {"status": status}
+        if error:
+            payload["error"] = error
+        self._log_rpc("proxy_status", payload)
+
+    def _should_suppress_backend_message_for_tui(self, message: Dict[str, Any], raw: str) -> bool:
+        method = message.get("method")
+        if method not in CODEX_OPTIONAL_LARGE_NOTIFICATION_METHODS:
+            return False
+        size_bytes = len(raw.encode("utf-8"))
+        if size_bytes <= CODEX_TUI_SAFE_MESSAGE_BYTES:
+            return False
+        self._log_rpc(
+            "proxy_suppressed_backend_to_client",
+            {
+                "method": method,
+                "size_bytes": size_bytes,
+                "reason": "optional notification exceeds Codex TUI WebSocket receive limit",
+            },
+        )
+        return True
 
 
 async def _sender(ws, state: Dict[str, Any], lines: asyncio.Queue, stop_event: asyncio.Event) -> None:
@@ -410,6 +879,8 @@ async def run_cli(args) -> int:
         await _send_json(ws, build_hello_message(args.client_kind, args.token, args.client_id))
         if args.native_cli and args.agent == "claude":
             return await _run_native_claude_cli(ws, args, state)
+        if args.native_cli and args.agent == "codex":
+            return await _run_native_codex_cli(ws, args, state)
         await _send_json(ws, build_launch_command(
             args.agent,
             args.workspace,
@@ -454,7 +925,11 @@ async def _run_native_claude_cli(ws, args, state: Dict[str, Any]) -> int:
             return 1
 
     settings_path = write_claude_hook_settings(args.api_url, state["session_id"])
-    command = build_native_claude_command(settings_path, permission_mode=args.permission_mode)
+    command = build_native_claude_command(
+        settings_path,
+        permission_mode=args.permission_mode,
+        context=args.context,
+    )
     process = subprocess.Popen(
         command,
         cwd=args.workspace,
@@ -480,6 +955,75 @@ async def _run_native_claude_cli(ws, args, state: Dict[str, Any]) -> int:
             Path(settings_path).unlink()
         except OSError:
             pass
+
+
+async def _run_native_codex_cli(ws, args, state: Dict[str, Any]) -> int:
+    await _send_json(ws, build_register_foreground_command(
+        args.agent,
+        args.workspace,
+        args.launch_id,
+        args.registration_token,
+    ))
+
+    while True:
+        payload = _load_json(await ws.recv())
+        session_id = _extract_session_id(payload)
+        if session_id:
+            state["session_id"] = session_id
+        event = _event_payload(payload)
+        if event.get("type") == "agent.session.created" and state.get("session_id"):
+            break
+        if payload.get("type") == "error":
+            print(json.dumps(payload, ensure_ascii=False), flush=True)
+            return 1
+
+    proxy = CodexNativeProxy(
+        args.api_url,
+        state["session_id"],
+        args.hook_token,
+        args.workspace,
+        initial_context=args.context,
+        model=args.model,
+        reasoning_effort=args.reasoning_effort,
+    )
+    remote_url = await proxy.start()
+    command = build_native_codex_command(
+        remote_url,
+        args.workspace,
+        model=args.model,
+        reasoning_effort=args.reasoning_effort,
+        config_overrides=_native_codex_config_overrides(),
+    )
+    popen_kwargs = {
+        "cwd": args.workspace,
+        "env": _native_codex_env(),
+    }
+    tui_stderr_log_path = getattr(proxy, "tui_stderr_log_path", None)
+    if tui_stderr_log_path is not None:
+        popen_kwargs.update({
+            "stderr": subprocess.PIPE,
+            "text": True,
+        })
+    process = subprocess.Popen(command, **popen_kwargs)
+    if tui_stderr_log_path is not None and process.stderr is not None:
+        _start_pipe_printer(process.stderr, "[codex tui] ", tui_stderr_log_path)
+    drain_stop = asyncio.Event()
+    drain_task = asyncio.create_task(_drain_receiver(ws, drain_stop))
+    loop = asyncio.get_event_loop()
+    try:
+        exit_code = await loop.run_in_executor(None, process.wait)
+        drain_stop.set()
+        drain_task.cancel()
+        try:
+            await drain_task
+        except asyncio.CancelledError:
+            pass
+        await _send_json(ws, build_foreground_exited_command(state["session_id"], exit_code, args.exit_token))
+        return exit_code
+    finally:
+        drain_stop.set()
+        drain_task.cancel()
+        await proxy.stop()
 
 
 def _native_claude_env(args) -> Dict[str, str]:

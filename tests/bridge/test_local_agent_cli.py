@@ -70,7 +70,11 @@ def test_local_agent_cli_parser_rejects_bypass_permission_mode():
 def test_build_native_claude_command_uses_requested_permission_mode():
     module = load_cli_module()
 
-    command = module.build_native_claude_command("settings.json", permission_mode="plan")
+    command = module.build_native_claude_command(
+        "settings.json",
+        permission_mode="plan",
+        context="run approval smoke",
+    )
 
     assert command[1:] == [
         "--permission-mode",
@@ -79,7 +83,217 @@ def test_build_native_claude_command_uses_requested_permission_mode():
         "settings.json",
         "--name",
         "AI Keyboard Claude",
+        "run approval smoke",
     ]
+
+
+def test_build_native_codex_command_uses_remote_workspace_and_prompt(monkeypatch):
+    module = load_cli_module()
+    monkeypatch.setattr(module.shutil, "which", lambda name: "codex.cmd" if name == "codex.cmd" else None)
+
+    command = module.build_native_codex_command("ws://127.0.0.1:12345", "C:/project", "hello")
+
+    assert command[0] == "codex.cmd"
+    assert command[1:] == [
+        "--no-alt-screen",
+        "--remote",
+        "ws://127.0.0.1:12345",
+        "--cd",
+        "C:\\project",
+        "--ask-for-approval",
+        "untrusted",
+        "--sandbox",
+        "workspace-write",
+        "hello",
+    ]
+
+
+def test_build_native_codex_command_can_override_model_and_effort(monkeypatch):
+    module = load_cli_module()
+    monkeypatch.setattr(module.shutil, "which", lambda name: "codex.cmd" if name == "codex.cmd" else None)
+
+    command = module.build_native_codex_command(
+        "ws://127.0.0.1:12345",
+        "C:/project",
+        "hello",
+        model="gpt-5.3-codex-spark",
+        reasoning_effort="low",
+    )
+
+    assert "--model" in command
+    assert command[command.index("--model") + 1] == "gpt-5.3-codex-spark"
+    assert "--config" in command
+    assert command[command.index("--config") + 1] == 'model_reasoning_effort="low"'
+    assert command[-1] == "hello"
+
+
+def test_build_native_codex_command_appends_env_config_overrides(monkeypatch):
+    module = load_cli_module()
+    monkeypatch.setattr(module.shutil, "which", lambda name: "codex.cmd" if name == "codex.cmd" else None)
+
+    command = module.build_native_codex_command(
+        "ws://127.0.0.1:12345",
+        "C:/project",
+        "hello",
+        config_overrides=["chatgpt_base_url=\"https://chatgpt.com\""],
+    )
+
+    assert "--config" in command
+    assert "chatgpt_base_url=\"https://chatgpt.com\"" in command
+    assert command[-1] == "hello"
+
+
+def test_native_codex_config_overrides_parse_json_env(monkeypatch):
+    module = load_cli_module()
+    monkeypatch.setenv(
+        module.CODEX_CONFIG_OVERRIDES_ENV,
+        '["chatgpt_base_url=\\"https://chatgpt.com\\"", "model_reasoning_effort=\\"low\\""]',
+    )
+
+    assert module._native_codex_config_overrides() == [
+        'chatgpt_base_url="https://chatgpt.com"',
+        'model_reasoning_effort="low"',
+    ]
+
+
+def test_codex_native_proxy_builds_initial_turn_request():
+    module = load_cli_module()
+    proxy = module.CodexNativeProxy(
+        "ws://127.0.0.1:8765",
+        "sess_codex",
+        "hook-token",
+        "C:/project",
+        initial_context="approval prompt",
+        model="gpt-5.3-codex-spark",
+        reasoning_effort="low",
+    )
+
+    request = proxy._initial_turn_request("thread_1")
+
+    assert request["method"] == "turn/start"
+    assert request["id"].startswith("ai-keyb-initial-turn-")
+    params = request["params"]
+    assert params["threadId"] == "thread_1"
+    assert params["input"] == [{"type": "text", "text": "approval prompt", "text_elements": []}]
+    assert params["cwd"].endswith("project")
+    assert params["approvalPolicy"] == "untrusted"
+    assert params["approvalsReviewer"] == "user"
+    assert params["model"] == "gpt-5.3-codex-spark"
+    assert params["effort"] == "low"
+
+
+def test_codex_native_proxy_backend_connection_allows_large_messages():
+    module = load_cli_module()
+    captured = {}
+
+    class FakeWebSockets:
+        async def connect(self, uri, **kwargs):
+            captured["uri"] = uri
+            captured["kwargs"] = kwargs
+            return object()
+
+    proxy = module.CodexNativeProxy(
+        "ws://127.0.0.1:8765",
+        "sess_codex",
+        "hook-token",
+        "C:/project",
+    )
+    proxy.backend_uri = "ws://127.0.0.1:12345"
+
+    result = asyncio.run(proxy._connect_backend(FakeWebSockets()))
+
+    assert result is not None
+    assert captured == {
+        "uri": "ws://127.0.0.1:12345",
+        "kwargs": {"max_size": None},
+    }
+
+
+def test_codex_native_proxy_suppresses_only_optional_large_tui_notifications():
+    module = load_cli_module()
+    proxy = module.CodexNativeProxy(
+        "ws://127.0.0.1:8765",
+        "sess_codex",
+        "hook-token",
+        "C:/project",
+    )
+    large_payload = "x" * (module.CODEX_TUI_SAFE_MESSAGE_BYTES + 1)
+
+    assert proxy._should_suppress_backend_message_for_tui(
+        {"method": "app/list/updated"},
+        large_payload,
+    )
+    assert not proxy._should_suppress_backend_message_for_tui(
+        {"method": "turn/started"},
+        large_payload,
+    )
+    assert not proxy._should_suppress_backend_message_for_tui(
+        {"method": "app/list/updated"},
+        "small",
+    )
+
+
+def test_codex_native_proxy_closes_both_sockets_when_one_pipe_ends():
+    module = load_cli_module()
+
+    class ClosingClientWebSocket:
+        def __init__(self):
+            self.closed = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+        async def send(self, raw):
+            raise AssertionError(f"unexpected send: {raw}")
+
+        async def close(self):
+            self.closed = True
+
+    class WaitingBackendWebSocket:
+        def __init__(self):
+            self.closed = False
+            self.iter_cancelled = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                self.iter_cancelled = True
+                raise
+
+        async def send(self, raw):
+            raise AssertionError(f"unexpected send: {raw}")
+
+        async def close(self):
+            self.closed = True
+
+    async def run():
+        proxy = module.CodexNativeProxy(
+            "ws://127.0.0.1:8765",
+            "sess_codex",
+            "hook-token",
+            "C:/project",
+        )
+        client_ws = ClosingClientWebSocket()
+        backend_ws = WaitingBackendWebSocket()
+
+        async def fake_connect_backend(_websockets):
+            return backend_ws
+
+        proxy._connect_backend = fake_connect_backend
+
+        await asyncio.wait_for(proxy._handle_tui_client(client_ws), timeout=1.0)
+        assert client_ws.closed is True
+        assert backend_ws.closed is True
+        assert backend_ws.iter_cancelled is True
+
+    asyncio.run(run())
 
 
 def test_cli_builds_hello_launch_and_input_commands():
@@ -356,7 +570,14 @@ def test_native_claude_cli_notifies_foreground_exit_without_leaking_tokens(monke
     monkeypatch.setattr(
         module,
         "build_native_claude_command",
-        lambda path, permission_mode="default": ["claude", "--settings", path, "--permission-mode", permission_mode],
+        lambda path, permission_mode="default", context="": [
+            "claude",
+            "--settings",
+            path,
+            "--permission-mode",
+            permission_mode,
+            context,
+        ],
     )
     monkeypatch.setattr(module.subprocess, "Popen", fake_popen)
     monkeypatch.setenv(module.LAUNCH_TOKEN_ENV, "launch-token")
@@ -364,7 +585,19 @@ def test_native_claude_cli_notifies_foreground_exit_without_leaking_tokens(monke
     monkeypatch.setenv(module.FOREGROUND_EXIT_TOKEN_ENV, "exit-token")
     monkeypatch.setenv(module.CLAUDE_HOOK_TOKEN_ENV, "hook-token")
     args = module.parse_args(
-        ["--agent", "claude", "--workspace", "C:/project", "--native-cli", "--launch-id", "fg_native", "--permission-mode", "plan"],
+        [
+            "--agent",
+            "claude",
+            "--workspace",
+            "C:/project",
+            "--native-cli",
+            "--launch-id",
+            "fg_native",
+            "--permission-mode",
+            "plan",
+            "--context",
+            "run approval smoke",
+        ],
         env={
             module.LAUNCH_TOKEN_ENV: "launch-token",
             module.CLAUDE_HOOK_TOKEN_ENV: "hook-token",
@@ -380,6 +613,7 @@ def test_native_claude_cli_notifies_foreground_exit_without_leaking_tokens(monke
     assert result == 0
     assert "--permission-mode" in captured_popen["command"]
     assert captured_popen["command"][captured_popen["command"].index("--permission-mode") + 1] == "plan"
+    assert captured_popen["command"][-1] == "run approval smoke"
     assert captured_popen["env"][module.CLAUDE_HOOK_TOKEN_ENV] == "hook-token"
     assert module.LAUNCH_TOKEN_ENV not in captured_popen["env"]
     assert module.FOREGROUND_REGISTRATION_TOKEN_ENV not in captured_popen["env"]
@@ -392,4 +626,141 @@ def test_native_claude_cli_notifies_foreground_exit_without_leaking_tokens(monke
     ]
     assert ws.sent[-1]["command"]["target"] == {"session_id": "sess_native"}
     assert ws.sent[-1]["command"]["payload"]["exit_code"] == 0
+    assert ws.sent[-1]["command"]["payload"]["foreground_exit_token"] == "exit-token"
+
+
+def test_native_codex_cli_starts_remote_proxy_and_notifies_foreground_exit(monkeypatch):
+    module = load_cli_module()
+    captured_popen = {}
+    stopped = []
+    drained_event = threading.Event()
+
+    class FakeWebSocket:
+        def __init__(self):
+            self.sent = []
+            self.recv_messages = [
+                module.json.dumps({
+                    "type": "event",
+                    "event": {
+                        "type": "agent.session.created",
+                        "payload": {"session_id": "sess_codex"},
+                    },
+                }),
+                module.json.dumps({
+                    "type": "event",
+                    "event": {
+                        "type": "task_update",
+                        "session_id": "sess_codex",
+                        "agent": "codex",
+                        "state": "WORKING",
+                    },
+                }),
+            ]
+            self.recv_count = 0
+
+        async def send(self, raw):
+            self.sent.append(module.json.loads(raw))
+
+        async def recv(self):
+            if self.recv_messages:
+                self.recv_count += 1
+                if self.recv_count > 1:
+                    drained_event.set()
+                return self.recv_messages.pop(0)
+            await module.asyncio.Future()
+
+    class FakeProxy:
+        def __init__(
+            self,
+            api_url,
+            session_id,
+            hook_token,
+            workspace,
+            initial_context="",
+            model="",
+            reasoning_effort="",
+        ):
+            assert api_url == "ws://127.0.0.1:8765"
+            assert session_id == "sess_codex"
+            assert hook_token == "hook-token"
+            assert workspace == "C:/project"
+            assert initial_context == "hello"
+            assert model == ""
+            assert reasoning_effort == ""
+
+        async def start(self):
+            return "ws://127.0.0.1:12345"
+
+        async def stop(self):
+            stopped.append(True)
+
+    class FakeProcess:
+        def wait(self):
+            return 0 if drained_event.wait(1.0) else 4
+
+    def fake_popen(command, cwd=None, env=None):
+        captured_popen["command"] = command
+        captured_popen["cwd"] = cwd
+        captured_popen["env"] = env
+        return FakeProcess()
+
+    monkeypatch.setattr(module, "CodexNativeProxy", FakeProxy)
+    monkeypatch.setattr(
+        module,
+        "build_native_codex_command",
+        lambda remote_url, workspace, context="", model="", reasoning_effort="", config_overrides=None: [
+            "codex",
+            "--remote",
+            remote_url,
+            "--cd",
+            workspace,
+            model,
+            reasoning_effort,
+            ",".join(config_overrides or []),
+            context,
+        ],
+    )
+    monkeypatch.setattr(module.subprocess, "Popen", fake_popen)
+    monkeypatch.setenv(module.LAUNCH_TOKEN_ENV, "launch-token")
+    monkeypatch.setenv(module.FOREGROUND_REGISTRATION_TOKEN_ENV, "registration-token")
+    monkeypatch.setenv(module.FOREGROUND_EXIT_TOKEN_ENV, "exit-token")
+    monkeypatch.setenv(module.CLAUDE_HOOK_TOKEN_ENV, "hook-token")
+    args = module.parse_args(
+        ["--agent", "codex", "--workspace", "C:/project", "--native-cli", "--launch-id", "fg_codex", "--context", "hello"],
+        env={
+            module.LAUNCH_TOKEN_ENV: "launch-token",
+            module.CLAUDE_HOOK_TOKEN_ENV: "hook-token",
+            module.FOREGROUND_REGISTRATION_TOKEN_ENV: "registration-token",
+            module.FOREGROUND_EXIT_TOKEN_ENV: "exit-token",
+        },
+    )
+    state = {}
+    ws = FakeWebSocket()
+
+    result = asyncio.run(module._run_native_codex_cli(ws, args, state))
+
+    assert result == 0
+    assert captured_popen["command"] == [
+        "codex",
+        "--remote",
+        "ws://127.0.0.1:12345",
+        "--cd",
+        "C:/project",
+        "",
+        "",
+        "",
+        "",
+    ]
+    assert captured_popen["cwd"] == "C:/project"
+    assert module.LAUNCH_TOKEN_ENV not in captured_popen["env"]
+    assert module.FOREGROUND_REGISTRATION_TOKEN_ENV not in captured_popen["env"]
+    assert module.FOREGROUND_EXIT_TOKEN_ENV not in captured_popen["env"]
+    assert module.CLAUDE_HOOK_TOKEN_ENV not in captured_popen["env"]
+    assert stopped == [True]
+    sent_types = [message["command"]["type"] for message in ws.sent if message.get("type") == "command"]
+    assert sent_types == [
+        "agent.session.register_foreground",
+        "agent.session.foreground_exited",
+    ]
+    assert ws.sent[-1]["command"]["target"] == {"session_id": "sess_codex"}
     assert ws.sent[-1]["command"]["payload"]["foreground_exit_token"] == "exit-token"

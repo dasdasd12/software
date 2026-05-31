@@ -214,8 +214,20 @@ class LocalApiSmokeClient:
             payload["workspace"] = self.workspace
         return payload
 
-    def foreground_cli_command_payload(self, agent: str) -> Dict[str, Any]:
+    def foreground_cli_command_payload(
+        self,
+        agent: str,
+        context: str = "",
+        model: str = "",
+        reasoning_effort: str = "",
+    ) -> Dict[str, Any]:
         payload = {"agent": agent}
+        if context:
+            payload["context"] = context
+        if model:
+            payload["model"] = model
+        if reasoning_effort:
+            payload["reasoning_effort"] = reasoning_effort
         if self.workspace:
             payload["workspace"] = self.workspace
         return {
@@ -351,6 +363,121 @@ class LocalApiSmokeClient:
                     and (event.get("payload") or {}).get("session_id") == created["session_id"]
                 ):
                     return
+
+    async def run_foreground_approval_real(
+        self,
+        agent: str,
+        context: str,
+        approved: bool,
+        require_forwarded: bool,
+        model: str = "",
+        reasoning_effort: str = "",
+    ) -> None:
+        async with websockets.connect(self.url) as ws:
+            await self.hello(ws)
+            await self.send(ws, self.foreground_cli_command_payload(
+                agent,
+                context,
+                model=model,
+                reasoning_effort=reasoning_effort,
+            ))
+            deadline = time.monotonic() + self.timeout
+            launched = None
+            created = None
+            session_id = None
+            request_id = None
+            ack_seen = False
+            last_payload = None
+
+            async def recv_for_stage(stage: str) -> Dict[str, Any]:
+                nonlocal last_payload
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError(
+                        f"Timed out waiting for foreground approval {stage}; "
+                        f"session_id={session_id}; last_payload={self._payload_summary(last_payload)}"
+                    )
+                try:
+                    payload = await self.recv_json_with_timeout(ws, remaining)
+                except asyncio.TimeoutError:
+                    raise RuntimeError(
+                        f"Timed out waiting for foreground approval {stage}; "
+                        f"session_id={session_id}; last_payload={self._payload_summary(last_payload)}"
+                    )
+                last_payload = payload
+                return payload
+
+            try:
+                while not ack_seen:
+                    payload = await recv_for_stage("permission_ack")
+                    if payload.get("type") == "error":
+                        raise RuntimeError(f"Local API error during foreground approval: {payload}")
+                    event = payload.get("event") if payload.get("type") == "event" else payload
+                    if not isinstance(event, dict):
+                        continue
+                    event_payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+                    event_type = event.get("type")
+                    if event_type == "agent.cli.launched":
+                        launched = event_payload
+                        continue
+                    if event_type == "agent.session.created" and event_payload.get("agent") == agent:
+                        created = event_payload
+                        session_id = event_payload.get("session_id")
+                        continue
+                    current_session_id = event.get("session_id") or event_payload.get("session_id")
+                    if session_id and current_session_id and current_session_id != session_id:
+                        continue
+                    if event_type == "permission_request":
+                        request_id = event.get("request_id")
+                        if not session_id:
+                            session_id = event.get("session_id")
+                        await self.send(ws, {
+                            "type": "permission_response",
+                            "request_id": request_id,
+                            "session_id": session_id,
+                            "approved": approved,
+                            "timestamp": now_ts(),
+                        })
+                        continue
+                    if event_type == "permission_ack":
+                        if request_id and event.get("request_id") != request_id:
+                            continue
+                        if require_forwarded and not event.get("forwarded"):
+                            raise RuntimeError(f"Foreground permission was not forwarded: {event}")
+                        evidence = event.get("evidence") or {}
+                        expected_adapter = "codex_cli_proxy" if agent == "codex" else "claude_code_hook"
+                        if evidence.get("adapter") != expected_adapter or not evidence.get("response_written"):
+                            raise RuntimeError(f"Foreground permission ack did not include native evidence: {event}")
+                        ack_seen = True
+                        continue
+                    if event_type == "agent.session.exited":
+                        raise RuntimeError(f"Foreground CLI exited before permission ack: {event}")
+                    if event_type in {"task_failed", "error"}:
+                        raise RuntimeError(f"Foreground approval scenario failed before ack: {event}")
+
+                while True:
+                    payload = await recv_for_stage("task output or completion")
+                    event = payload.get("event") if payload.get("type") == "event" else payload
+                    if not isinstance(event, dict):
+                        continue
+                    event_type = event.get("type")
+                    current_session_id = event.get("session_id")
+                    if session_id and current_session_id and current_session_id != session_id:
+                        continue
+                    if event_type == "agent_message_delta":
+                        delta = str(event.get("delta", ""))
+                        if "approval smoke" in delta:
+                            return
+                    if event_type == "task_completed":
+                        return
+                    if event_type in {"task_failed", "error"}:
+                        raise RuntimeError(f"Foreground approval scenario ended with failure: {event}")
+            finally:
+                if isinstance(session_id, str) and session_id:
+                    try:
+                        await self.send(ws, self.session_close_command_payload(session_id))
+                    except Exception:
+                        pass
 
     async def run_approval_real(
         self,
@@ -655,11 +782,25 @@ async def amain() -> None:
     parser.add_argument("--url", default="ws://127.0.0.1:8765", help="Local Core Service WebSocket URL")
     parser.add_argument(
         "--scenario",
-        choices=("basic", "permission", "real-agent", "approval-real", "virtual-input", "foreground-cli"),
+        choices=(
+            "basic",
+            "permission",
+            "real-agent",
+            "approval-real",
+            "foreground-approval-real",
+            "virtual-input",
+            "foreground-cli",
+        ),
         default="basic",
     )
     parser.add_argument("--agent", choices=("codex", "claude"), default="codex")
     parser.add_argument("--context", default=DEFAULT_CONTEXT, help="Prompt used by the real-agent smoke scenario")
+    parser.add_argument("--model", default="", help="Optional model override for foreground CLI launch")
+    parser.add_argument(
+        "--reasoning-effort",
+        default="",
+        help="Optional reasoning effort override for foreground CLI launch",
+    )
     parser.add_argument("--timeout", type=float, default=10.0, help="Receive timeout in seconds")
     parser.add_argument("--json-log", action="store_true", help="Print each send/receive as JSON")
     parser.add_argument("--workspace", default=None, help="Workspace path to include in agent launch payloads")
@@ -719,7 +860,7 @@ async def amain() -> None:
         workspace=args.workspace,
     )
     context = args.context
-    if args.scenario == "approval-real" and context == DEFAULT_CONTEXT:
+    if args.scenario in {"approval-real", "foreground-approval-real"} and context == DEFAULT_CONTEXT:
         context = (
             DEFAULT_CODEX_APPROVAL_CONTEXT
             if args.agent == "codex"
@@ -747,6 +888,16 @@ async def amain() -> None:
                 approved,
                 args.require_forwarded,
                 wait_for_hotkey_approval=args.wait_for_hotkey_approval,
+            )
+        elif args.scenario == "foreground-approval-real":
+            approved = args.decision == "approve" if args.decision else parse_bool(args.approved)
+            await client.run_foreground_approval_real(
+                args.agent,
+                context,
+                approved,
+                args.require_forwarded,
+                model=args.model,
+                reasoning_effort=args.reasoning_effort,
             )
         elif args.scenario == "virtual-input":
             await client.run_virtual_input(args.agent, context)

@@ -20,6 +20,7 @@ from agents.foreground_cli import (  # noqa: E402
     build_foreground_cli_env,
     build_foreground_cli_command,
 )
+from agents.commands import AgentCommandService  # noqa: E402
 from server import BridgeServer  # noqa: E402
 from session_manager import AgentType  # noqa: E402
 
@@ -50,6 +51,9 @@ class FakeForegroundLauncher:
         foreground_launch_id=None,
         native_cli=False,
         permission_mode="default",
+        context="",
+        model="",
+        reasoning_effort="",
         registration_token=None,
         hook_token=None,
         exit_token=None,
@@ -60,6 +64,9 @@ class FakeForegroundLauncher:
             foreground_launch_id,
             native_cli,
             permission_mode,
+            context,
+            model,
+            reasoning_effort,
             registration_token,
             hook_token,
             exit_token,
@@ -163,6 +170,38 @@ def test_foreground_cli_command_can_request_claude_plan_mode(tmpdir):
     assert "--native-cli" in command
     assert "--permission-mode" in command
     assert command[command.index("--permission-mode") + 1] == "plan"
+
+
+def test_foreground_cli_command_passes_context_as_argument(tmpdir):
+    context = "Run python -c \"print('codex approval smoke')\""
+    command = build_foreground_cli_command(
+        agent="codex",
+        workspace=str(tmpdir),
+        api_url="ws://127.0.0.1:8765",
+        native_cli=True,
+        context=context,
+        python_executable="python",
+    )
+
+    assert "--context" in command
+    assert command[command.index("--context") + 1] == context
+
+
+def test_foreground_cli_command_passes_model_overrides(tmpdir):
+    command = build_foreground_cli_command(
+        agent="codex",
+        workspace=str(tmpdir),
+        api_url="ws://127.0.0.1:8765",
+        native_cli=True,
+        model="gpt-5.3-codex-spark",
+        reasoning_effort="low",
+        python_executable="python",
+    )
+
+    assert "--model" in command
+    assert command[command.index("--model") + 1] == "gpt-5.3-codex-spark"
+    assert "--reasoning-effort" in command
+    assert command[command.index("--reasoning-effort") + 1] == "low"
 
 
 def test_foreground_cli_command_rejects_bypass_permission_mode(tmpdir):
@@ -399,9 +438,12 @@ def test_cli_launch_foreground_emits_event_with_frontend_pid(tmpdir):
     launch = launcher.launches[0]
     assert launch[:4] == ("claude", workspace, event["payload"]["foreground_launch_id"], True)
     assert launch[4] == "default"
-    assert launch[5].startswith("reg_")
-    assert launch[6].startswith("hook_")
-    assert launch[7].startswith("exit_")
+    assert launch[5] == ""
+    assert launch[6] == ""
+    assert launch[7] == ""
+    assert launch[8].startswith("reg_")
+    assert launch[9].startswith("hook_")
+    assert launch[10].startswith("exit_")
 
 
 def test_cli_launch_foreground_passes_plan_permission_mode(tmpdir):
@@ -423,6 +465,82 @@ def test_cli_launch_foreground_passes_plan_permission_mode(tmpdir):
     assert event["payload"]["permission_mode"] == "plan"
     launch = launcher.launches[0]
     assert launch[4] == "plan"
+
+
+def test_cli_launch_foreground_passes_context_to_terminal_host(tmpdir):
+    workspace = str(Path(str(tmpdir)).resolve())
+    server = make_server(tmpdir)
+    launcher = FakeForegroundLauncher(pid=4321)
+    server.agent_commands._foreground_cli_launcher = launcher
+    queue = CaptureQueue()
+    server.connected_clients.add(queue)
+    context = "Run python -c \"print('codex approval smoke')\""
+
+    asyncio.run(server._cmd_structured_command(command_message(
+        "agent.cli.launch_foreground",
+        payload={"agent": "codex", "workspace": workspace, "context": context},
+        command_id="cmd_cli_launch_context",
+    ), queue))
+
+    event = read_event(queue)
+    assert event["type"] == "agent.cli.launched"
+    launch = launcher.launches[0]
+    assert launch[0] == "codex"
+    assert launch[5] == context
+
+
+def test_cli_launch_foreground_passes_model_overrides_to_terminal_host(tmpdir):
+    workspace = str(Path(str(tmpdir)).resolve())
+    server = make_server(tmpdir)
+    launcher = FakeForegroundLauncher(pid=4321)
+    server.agent_commands._foreground_cli_launcher = launcher
+    queue = CaptureQueue()
+    server.connected_clients.add(queue)
+
+    asyncio.run(server._cmd_structured_command(command_message(
+        "agent.cli.launch_foreground",
+        payload={
+            "agent": "codex",
+            "workspace": workspace,
+            "model": "gpt-5.3-codex-spark",
+            "reasoning_effort": "low",
+        },
+        command_id="cmd_cli_launch_model",
+    ), queue))
+
+    event = read_event(queue)
+    assert event["type"] == "agent.cli.launched"
+    launch = launcher.launches[0]
+    assert launch[6] == "gpt-5.3-codex-spark"
+    assert launch[7] == "low"
+
+
+def test_cli_launch_foreground_codex_defaults_to_native_cli(tmpdir):
+    workspace = str(Path(str(tmpdir)).resolve())
+    server = make_server(tmpdir)
+    launcher = FakeForegroundLauncher(pid=4321)
+    server.agent_commands._foreground_cli_launcher = launcher
+    queue = CaptureQueue()
+    server.connected_clients.add(queue)
+
+    asyncio.run(server._cmd_structured_command(command_message(
+        "agent.cli.launch_foreground",
+        payload={"agent": "codex", "workspace": workspace},
+        command_id="cmd_cli_launch_codex",
+    ), queue))
+
+    event = read_event(queue)
+    assert event["type"] == "agent.cli.launched"
+    assert event["payload"]["agent"] == "codex"
+    assert event["payload"]["control_mode"] == "native_cli"
+    launch = launcher.launches[0]
+    assert launch[:4] == ("codex", workspace, event["payload"]["foreground_launch_id"], True)
+    assert launch[5] == ""
+    assert launch[6] == ""
+    assert launch[7] == ""
+    assert launch[8].startswith("reg_")
+    assert launch[9].startswith("hook_")
+    assert launch[10].startswith("exit_")
 
 
 def test_cli_launch_foreground_rejects_bypass_permission_mode_payload(tmpdir):
@@ -562,3 +680,35 @@ def test_disconnect_cleanup_terminates_owned_foreground_cli_session(tmpdir):
     asyncio.run(server._cleanup_foreground_cli_sessions_for_queue(queue))
 
     assert controller.terminated == [session_id]
+
+
+def test_disconnect_cleanup_terminates_unregistered_native_foreground_launch(monkeypatch, tmpdir):
+    workspace = str(Path(str(tmpdir)).resolve())
+    server = make_server(tmpdir)
+    launcher = FakeForegroundLauncher(pid=4321)
+    server.agent_commands._foreground_cli_launcher = launcher
+    terminated = []
+    monkeypatch.setattr(
+        AgentCommandService,
+        "_terminate_process_tree",
+        staticmethod(lambda pid: terminated.append(pid)),
+    )
+    queue = CaptureQueue()
+    server.connected_clients.add(queue)
+
+    asyncio.run(server._cmd_structured_command(command_message(
+        "agent.cli.launch_foreground",
+        payload={"agent": "codex", "workspace": workspace},
+        command_id="cmd_cli_launch_cleanup",
+    ), queue))
+
+    event = read_event(queue)
+    launch_id = event["payload"]["foreground_launch_id"]
+    assert launch_id in server.agent_commands._foreground_registrations_by_launch_id
+    assert launch_id in server.agent_commands._foreground_root_pids_by_launch_id
+
+    asyncio.run(server._cleanup_foreground_cli_sessions_for_queue(queue))
+
+    assert terminated == [4321]
+    assert launch_id not in server.agent_commands._foreground_registrations_by_launch_id
+    assert launch_id not in server.agent_commands._foreground_root_pids_by_launch_id

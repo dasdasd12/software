@@ -54,6 +54,7 @@ from security import (
     ApprovalPolicyEngine,
     CAP_AGENT_LAUNCH,
     CAP_CLAUDE_HOOK,
+    CAP_CODEX_HOOK,
     CAP_NOTIFICATION_CREATE,
     CAP_PERMISSION_RESPOND,
     CAP_PERMISSION_RESPOND_LOW_RISK,
@@ -111,6 +112,19 @@ class PendingClaudeHookInteraction:
     session_id: str
     interaction_type: str
     hook_input: Dict[str, Any]
+    created_at: float
+    timeout_sec: int
+    result_future: asyncio.Future
+    delivered_future: asyncio.Future
+
+
+@dataclass
+class PendingCodexNativeRequest:
+    request_id: str
+    session_id: str
+    request_kind: str
+    interaction_type: str
+    native_request: Dict[str, Any]
     created_at: float
     timeout_sec: int
     result_future: asyncio.Future
@@ -178,11 +192,14 @@ class LocalCoreServiceMVP:
         self.pending_permissions: Dict[str, PendingPermission] = {}
         self._claude_hook_decisions: Dict[str, PendingClaudeHookDecision] = {}
         self._claude_hook_interactions: Dict[str, PendingClaudeHookInteraction] = {}
+        self._codex_native_permissions: Dict[str, PendingCodexNativeRequest] = {}
+        self._codex_native_interactions: Dict[str, PendingCodexNativeRequest] = {}
         self._virtual_profiles: Dict[str, Profile] = {}
         self._virtual_sessions: Dict[str, VirtualDeviceSession] = {}
         self._virtual_transports: Dict[str, SimulatedTransport] = {}
         self._virtual_session_owners: Dict[str, asyncio.Queue] = {}
         self._foreground_cli_session_owners: Dict[asyncio.Queue, Set[str]] = {}
+        self._foreground_cli_launch_owners: Dict[asyncio.Queue, Set[str]] = {}
         self._server = None
         self._shutdown_event: Optional[asyncio.Event] = None
 
@@ -387,6 +404,30 @@ class LocalCoreServiceMVP:
             if not await self._require_client_kind(client_queue, ClientKind.AGENT_HOOK):
                 return
             await self._cmd_claude_hook_event(msg, client_queue)
+        elif msg_type == "claude_hook_delivered":
+            if not await self._require_capability(client_queue, CAP_CLAUDE_HOOK):
+                return
+            if not await self._require_client_kind(client_queue, ClientKind.AGENT_HOOK):
+                return
+            await self._cmd_claude_hook_delivered(msg, client_queue)
+        elif msg_type == "codex_rpc_request":
+            if not await self._require_capability(client_queue, CAP_CODEX_HOOK):
+                return
+            if not await self._require_client_kind(client_queue, ClientKind.AGENT_HOOK):
+                return
+            await self._cmd_codex_rpc_request(msg, client_queue)
+        elif msg_type == "codex_rpc_notification":
+            if not await self._require_capability(client_queue, CAP_CODEX_HOOK):
+                return
+            if not await self._require_client_kind(client_queue, ClientKind.AGENT_HOOK):
+                return
+            await self._cmd_codex_rpc_notification(msg, client_queue)
+        elif msg_type == "codex_rpc_delivered":
+            if not await self._require_capability(client_queue, CAP_CODEX_HOOK):
+                return
+            if not await self._require_client_kind(client_queue, ClientKind.AGENT_HOOK):
+                return
+            await self._cmd_codex_rpc_delivered(msg, client_queue)
         elif msg_type == "interrupt":
             await self._cmd_interrupt(msg, client_queue)
         elif msg_type == "list_sessions":
@@ -492,9 +533,9 @@ class LocalCoreServiceMVP:
         if client_kind != ClientKind.AGENT_HOOK.value:
             return None
         if not isinstance(token, str) or not token:
-            raise ValueError("invalid Claude hook token")
+            raise ValueError("invalid agent hook token")
         if not is_loopback_peer:
-            raise ValueError("Claude hook token is valid only on loopback clients")
+            raise ValueError("agent hook token is valid only on loopback clients")
         session_id = self._session_id_from_hook_client_id(client_id)
         expected = self.agent_commands.hook_token_for_session(session_id) if session_id else None
         if not (
@@ -502,18 +543,28 @@ class LocalCoreServiceMVP:
             and expected
             and secrets.compare_digest(token, expected)
         ):
-            raise ValueError("invalid Claude hook token")
+            raise ValueError("invalid agent hook token")
         requested = {cap for cap in requested_capabilities if isinstance(cap, str)}
-        capabilities = requested.intersection({CAP_CLAUDE_HOOK})
+        capabilities = requested.intersection(self._hook_capabilities_for_client_id(client_id))
         return build_client_identity(client_kind, client_id, capabilities)
 
     @staticmethod
     def _session_id_from_hook_client_id(client_id: str) -> Optional[str]:
-        prefix = "claude-code-hook:"
-        if not isinstance(client_id, str) or not client_id.startswith(prefix):
+        if not isinstance(client_id, str):
             return None
-        session_id = client_id[len(prefix):]
-        return session_id or None
+        for prefix in ("claude-code-hook:", "codex-cli-proxy:"):
+            if client_id.startswith(prefix):
+                session_id = client_id[len(prefix):]
+                return session_id or None
+        return None
+
+    @staticmethod
+    def _hook_capabilities_for_client_id(client_id: str) -> Set[str]:
+        if isinstance(client_id, str) and client_id.startswith("codex-cli-proxy:"):
+            return {CAP_CODEX_HOOK}
+        if isinstance(client_id, str) and client_id.startswith("claude-code-hook:"):
+            return {CAP_CLAUDE_HOOK}
+        return set()
 
     async def _cmd_structured_command(self, msg: Dict[str, Any], queue: asyncio.Queue) -> None:
         try:
@@ -591,10 +642,30 @@ class LocalCoreServiceMVP:
                     if not owned:
                         self._foreground_cli_session_owners.pop(queue, None)
             return
+        if command.type == "agent.cli.launch_foreground":
+            launch_id = None
+            if isinstance(payload, dict):
+                value = payload.get("foreground_launch_id")
+                if isinstance(value, str) and value:
+                    launch_id = value
+            if launch_id:
+                self._foreground_cli_launch_owners.setdefault(queue, set()).add(launch_id)
+            return
         if command.type not in {"agent.session.launch_or_resume", "agent.session.register_foreground"}:
             return
         if command.payload.get("launch_surface") != "foreground_cli":
             return
+        foreground_launch_id = None
+        if isinstance(payload, dict):
+            value = payload.get("foreground_launch_id")
+            if isinstance(value, str) and value:
+                foreground_launch_id = value
+        if foreground_launch_id:
+            launch_ids = self._foreground_cli_launch_owners.get(queue)
+            if launch_ids is not None:
+                launch_ids.discard(foreground_launch_id)
+                if not launch_ids:
+                    self._foreground_cli_launch_owners.pop(queue, None)
         if not session_id:
             return
         session = self.session_mgr.get(session_id)
@@ -603,6 +674,12 @@ class LocalCoreServiceMVP:
         self._foreground_cli_session_owners.setdefault(queue, set()).add(session_id)
 
     async def _cleanup_foreground_cli_sessions_for_queue(self, queue: asyncio.Queue) -> None:
+        launch_ids = self._foreground_cli_launch_owners.pop(queue, set())
+        for launch_id in list(launch_ids):
+            try:
+                self.agent_commands.cleanup_unregistered_foreground_launch(launch_id)
+            except Exception as exc:
+                self.logger.warning(f"Foreground CLI launch cleanup failed for {launch_id}: {exc}")
         session_ids = self._foreground_cli_session_owners.pop(queue, set())
         for session_id in list(session_ids):
             session = self.session_mgr.get(session_id)
@@ -891,6 +968,176 @@ class LocalCoreServiceMVP:
             return False
         return True
 
+    async def _validate_codex_hook_session(self, session_id: str, queue: asyncio.Queue) -> bool:
+        client = self._client_for_queue(queue)
+        if client.client_id != f"codex-cli-proxy:{session_id}":
+            await self._send_error(queue, "INVALID_HOOK_SESSION", "Codex proxy client is not bound to session_id")
+            return False
+        session = self.session_mgr.get(session_id)
+        if session is None:
+            await self._send_error(queue, "INVALID_HOOK_SESSION", "session_id is not registered")
+            return False
+        if session.agent != AgentType.CODEX:
+            await self._send_error(queue, "INVALID_HOOK_SESSION", "session is not a Codex session")
+            return False
+        if (
+            getattr(session, "launch_surface", None) != "foreground_cli"
+            or getattr(session, "control_mode", None) != "native_cli"
+        ):
+            await self._send_error(queue, "INVALID_HOOK_SESSION", "session is not a native foreground Codex session")
+            return False
+        return True
+
+    async def _cmd_codex_rpc_request(self, msg: Dict[str, Any], queue: asyncio.Queue) -> None:
+        session_id = msg.get("session_id")
+        native_request = msg.get("request")
+        if not isinstance(session_id, str) or not session_id:
+            await self._send_error(queue, "INVALID_CODEX_RPC", "session_id is required")
+            return
+        if not isinstance(native_request, dict):
+            await self._send_error(queue, "INVALID_CODEX_RPC", "request must be an object")
+            return
+        if not await self._validate_codex_hook_session(session_id, queue):
+            return
+
+        method = native_request.get("method")
+        if not isinstance(method, str) or "id" not in native_request:
+            await self._send_error(queue, "INVALID_CODEX_RPC", "JSON-RPC request id and method are required")
+            return
+        if self._is_codex_permission_method(method):
+            await self._cmd_codex_permission_rpc(session_id, native_request, queue)
+            return
+        if self._is_codex_interaction_method(method):
+            await self._cmd_codex_interaction_rpc(session_id, native_request, queue)
+            return
+        await self._send_error(queue, "UNSUPPORTED_CODEX_RPC", f"Unsupported Codex RPC interception: {method}")
+
+    async def _cmd_codex_permission_rpc(
+        self,
+        session_id: str,
+        native_request: Dict[str, Any],
+        queue: asyncio.Queue,
+    ) -> None:
+        loop = asyncio.get_running_loop()
+        request_id = str(native_request.get("id"))
+        timeout_sec = int(self.cfg["unifier"].get("permission_timeout_sec", 30))
+        result_future = loop.create_future()
+        delivered_future = loop.create_future()
+        permission_event = self._codex_rpc_permission_event(session_id, request_id, timeout_sec, native_request)
+        pending_key = self._pending_permission_key(request_id, session_id, None, None)
+        self._codex_native_permissions[pending_key] = PendingCodexNativeRequest(
+            request_id=request_id,
+            session_id=session_id,
+            request_kind="permission",
+            interaction_type="",
+            native_request=native_request,
+            created_at=time.time(),
+            timeout_sec=timeout_sec,
+            result_future=result_future,
+            delivered_future=delivered_future,
+        )
+        self._on_agent_event(self.unifier.encode_device_message(permission_event))
+        try:
+            native_response = await asyncio.wait_for(result_future, timeout=timeout_sec)
+        except asyncio.TimeoutError:
+            self.pending_permissions.pop(pending_key, None)
+            self._codex_native_permissions.pop(pending_key, None)
+            native_response = self._codex_rpc_permission_response(native_request, False, "deny")
+        await queue.put(json.dumps({
+            "type": "codex_rpc_result",
+            "session_id": session_id,
+            "request_id": request_id,
+            "request_kind": "permission",
+            "native_response": native_response,
+            "timestamp": int(time.time()),
+        }, ensure_ascii=False))
+
+    async def _cmd_codex_interaction_rpc(
+        self,
+        session_id: str,
+        native_request: Dict[str, Any],
+        queue: asyncio.Queue,
+    ) -> None:
+        loop = asyncio.get_running_loop()
+        request_id = str(native_request.get("id"))
+        method = str(native_request.get("method"))
+        interaction_type = self._codex_interaction_type(method)
+        timeout_sec = int(self.cfg["unifier"].get("permission_timeout_sec", 30))
+        result_future = loop.create_future()
+        delivered_future = loop.create_future()
+        event = self._codex_rpc_interaction_event(
+            session_id,
+            request_id,
+            interaction_type,
+            timeout_sec,
+            native_request,
+        )
+        pending_key = self._pending_interaction_key(request_id, session_id)
+        self._codex_native_interactions[pending_key] = PendingCodexNativeRequest(
+            request_id=request_id,
+            session_id=session_id,
+            request_kind="interaction",
+            interaction_type=interaction_type,
+            native_request=native_request,
+            created_at=time.time(),
+            timeout_sec=timeout_sec,
+            result_future=result_future,
+            delivered_future=delivered_future,
+        )
+        self.session_mgr.update_state(session_id, AgentState.WAITING_INPUT)
+        self._persist_session(session_id)
+        self._on_agent_event(self.unifier.encode_device_message(event))
+        try:
+            native_response = await asyncio.wait_for(result_future, timeout=timeout_sec)
+        except asyncio.TimeoutError:
+            self._codex_native_interactions.pop(pending_key, None)
+            native_response = self._codex_rpc_interaction_response(native_request, False, {}, "interaction_timeout")
+            if not self._is_terminal_session(session_id):
+                self.session_mgr.update_state(session_id, AgentState.WORKING)
+                self._persist_session(session_id)
+        await queue.put(json.dumps({
+            "type": "codex_rpc_result",
+            "session_id": session_id,
+            "request_id": request_id,
+            "request_kind": "interaction",
+            "native_response": native_response,
+            "timestamp": int(time.time()),
+        }, ensure_ascii=False))
+
+    async def _cmd_codex_rpc_notification(self, msg: Dict[str, Any], queue: asyncio.Queue) -> None:
+        session_id = msg.get("session_id")
+        notification = msg.get("notification")
+        if not isinstance(session_id, str) or not session_id:
+            await self._send_error(queue, "INVALID_CODEX_RPC", "session_id is required")
+            return
+        if not isinstance(notification, dict):
+            await self._send_error(queue, "INVALID_CODEX_RPC", "notification must be an object")
+            return
+        if not await self._validate_codex_hook_session(session_id, queue):
+            return
+        event = self._codex_rpc_notification_to_event(session_id, notification)
+        if event:
+            self._on_agent_event(self.unifier.encode_device_message(event))
+
+    async def _cmd_codex_rpc_delivered(self, msg: Dict[str, Any], queue: asyncio.Queue) -> None:
+        session_id = msg.get("session_id")
+        request_id = msg.get("request_id")
+        if not isinstance(session_id, str) or not session_id or not isinstance(request_id, str) or not request_id:
+            await self._send_error(queue, "INVALID_CODEX_RPC", "session_id and request_id are required")
+            return
+        if not await self._validate_codex_hook_session(session_id, queue):
+            return
+        pending_key = self._pending_permission_key(request_id, session_id, None, None)
+        pending = self._codex_native_permissions.get(pending_key)
+        if pending is None:
+            pending_key = self._pending_interaction_key(request_id, session_id)
+            pending = self._codex_native_interactions.get(pending_key)
+        if pending is not None and not pending.delivered_future.done():
+            pending.delivered_future.set_result({
+                "response_written": bool(msg.get("response_written", False)),
+                "error": msg.get("error"),
+            })
+
     async def _cmd_claude_permission_hook(
         self,
         session_id: str,
@@ -938,7 +1185,7 @@ class LocalCoreServiceMVP:
             "hook_response": hook_response,
             "timestamp": int(time.time()),
         }, ensure_ascii=False))
-        if not delivered_future.done():
+        if pending_key not in self._claude_hook_decisions and not delivered_future.done():
             delivered_future.set_result(True)
 
     async def _cmd_claude_interaction_hook(
@@ -1000,7 +1247,7 @@ class LocalCoreServiceMVP:
             "hook_response": hook_response,
             "timestamp": int(time.time()),
         }, ensure_ascii=False))
-        if not delivered_future.done():
+        if pending_key not in self._claude_hook_interactions and not delivered_future.done():
             delivered_future.set_result(True)
         if timed_out is not None:
             self._on_agent_event(self.unifier.encode_device_message({
@@ -1010,13 +1257,13 @@ class LocalCoreServiceMVP:
                 "agent": AgentType.CLAUDE.value,
                 "interaction_type": timed_out.interaction_type,
                 "approved": False,
-                "forwarded": True,
+                "forwarded": False,
                 "evidence": {
                     "adapter": "claude_code_hook",
                     "native_channel": "PreToolUse",
-                    "decision_delivered": True,
+                    "decision_delivered": False,
                     "queued_to_hook_client": True,
-                    "response_written": True,
+                    "response_written": False,
                     "session_id": timed_out.session_id,
                     "request_id": timed_out.request_id,
                     "interaction_type": timed_out.interaction_type,
@@ -1024,6 +1271,26 @@ class LocalCoreServiceMVP:
                     "age_ms": int((time.time() - timed_out.created_at) * 1000),
                 },
             }))
+
+    async def _cmd_claude_hook_delivered(self, msg: Dict[str, Any], queue: asyncio.Queue) -> None:
+        session_id = msg.get("session_id")
+        request_id = msg.get("request_id")
+        if not isinstance(session_id, str) or not session_id or not isinstance(request_id, str) or not request_id:
+            await self._send_error(queue, "INVALID_HOOK_DELIVERY", "session_id and request_id are required")
+            return
+        if not await self._validate_claude_hook_session(session_id, queue):
+            return
+        delivered = {
+            "response_written": bool(msg.get("response_written", False)),
+            "error": msg.get("error"),
+        }
+        pending_key = self._pending_permission_key(request_id, session_id, None, None)
+        pending = self._claude_hook_decisions.get(pending_key)
+        if pending is None:
+            pending_key = self._pending_interaction_key(request_id, session_id)
+            pending = self._claude_hook_interactions.get(pending_key)
+        if pending is not None and not pending.delivered_future.done():
+            pending.delivered_future.set_result(delivered)
 
     async def _dispatch_permission_command(
         self,
@@ -1122,6 +1389,8 @@ class LocalCoreServiceMVP:
         result = {"accepted": True, "forwarded": False, "evidence": {}}
         if self._is_claude_hook_permission(pending):
             result = await self._deliver_claude_hook_permission(pending_key, pending, approved, decision)
+        elif self._is_codex_native_permission(pending):
+            result = await self._deliver_codex_native_permission(pending_key, pending, approved, decision)
         elif proxy:
             try:
                 result = await proxy.handle_permission_response(
@@ -1188,7 +1457,35 @@ class LocalCoreServiceMVP:
 
         pending_key, pending = self._find_pending_interaction(request_id, session_id)
         if pending is None:
-            raise AgentLifecycleError("REQUEST_NOT_FOUND", f"Interaction request {request_id} not found")
+            pending_key, codex_pending = self._find_pending_codex_interaction(request_id, session_id)
+            if codex_pending is None:
+                raise AgentLifecycleError("REQUEST_NOT_FOUND", f"Interaction request {request_id} not found")
+            answers = command.payload.get("answers")
+            if not isinstance(answers, dict):
+                answers = {}
+            reason = command.payload.get("reason")
+            if not isinstance(reason, str):
+                reason = ""
+            result = await self._deliver_codex_native_interaction(
+                pending_key,
+                codex_pending,
+                approved,
+                answers,
+                reason,
+            )
+            if codex_pending.session_id and not self._is_terminal_session(codex_pending.session_id):
+                self.session_mgr.update_state(codex_pending.session_id, AgentState.WORKING)
+                self._persist_session(codex_pending.session_id)
+            return {
+                "type": "interaction_ack",
+                "request_id": codex_pending.request_id,
+                "session_id": codex_pending.session_id,
+                "agent": AgentType.CODEX.value,
+                "interaction_type": codex_pending.interaction_type,
+                "approved": approved,
+                "forwarded": bool(result.get("forwarded", False)),
+                "evidence": result.get("evidence", {}),
+            }
 
         answers = command.payload.get("answers")
         if not isinstance(answers, dict):
@@ -1513,6 +1810,10 @@ class LocalCoreServiceMVP:
             pending.request_id: self._pending_interaction_record(pending)
             for pending in self._claude_hook_interactions.values()
         }
+        interactions.update({
+            pending.request_id: self._pending_codex_interaction_record(pending)
+            for pending in self._codex_native_interactions.values()
+        })
 
         store.sessions = sessions
         store.runs = runs
@@ -1604,6 +1905,38 @@ class LocalCoreServiceMVP:
             record["planFilePath"] = tool_input.get("planFilePath")
             allowed = tool_input.get("allowedPrompts")
             record["allowedPrompts"] = allowed if isinstance(allowed, list) else []
+        return record
+
+    def _pending_codex_interaction_record(self, pending: PendingCodexNativeRequest) -> Dict[str, Any]:
+        native_request = pending.native_request
+        params = native_request.get("params") if isinstance(native_request.get("params"), dict) else {}
+        method = str(native_request.get("method") or "")
+        record = {
+            "interaction_id": pending.request_id,
+            "request_id": pending.request_id,
+            "session_id": pending.session_id,
+            "provider_id": AgentType.CODEX.value,
+            "agent": AgentType.CODEX.value,
+            "interaction_type": pending.interaction_type,
+            "timeout_sec": pending.timeout_sec,
+            "created_at": int(pending.created_at),
+            "native": {
+                "adapter": "codex_cli_proxy",
+                "native_channel": method,
+                "jsonrpc_id": native_request.get("id"),
+                "thread_id": self._codex_string_field(params, "thread_id", "threadId"),
+                "turn_id": self._codex_string_field(params, "turn_id", "turnId"),
+                "item_id": self._codex_string_field(params, "item_id", "itemId"),
+            },
+        }
+        if method == "item/tool/requestUserInput":
+            questions = params.get("questions")
+            record["questions"] = questions if isinstance(questions, list) else []
+        elif method == "mcpServer/elicitation/request":
+            record["message"] = params.get("message")
+            record["mode"] = params.get("mode")
+            record["requestedSchema"] = params.get("requestedSchema")
+            record["serverName"] = params.get("serverName")
         return record
 
     @staticmethod
@@ -1956,6 +2289,27 @@ class LocalCoreServiceMVP:
             "timestamp": int(time.time()),
         }
         self._on_agent_event(self.unifier.encode_device_message(payload))
+        for event in self._claude_hook_observation_to_events(session_id, hook_input):
+            self._on_agent_event(self.unifier.encode_device_message(event))
+
+    def _claude_hook_observation_to_events(
+        self,
+        session_id: str,
+        hook_input: Dict[str, Any],
+    ) -> list:
+        hook_event_name = hook_input.get("hook_event_name")
+        if hook_event_name == "MessageDisplay":
+            delta = hook_input.get("delta")
+            if isinstance(delta, str) and delta:
+                return [self.unifier._mk_delta(session_id, AgentType.CLAUDE, delta)]
+        if hook_event_name == "Stop":
+            message = hook_input.get("last_assistant_message")
+            return [self.unifier._mk_task_completed(
+                session_id,
+                AgentType.CLAUDE,
+                str(message or "Claude turn completed"),
+            )]
+        return []
 
     def _claude_hook_permission_event(
         self,
@@ -2022,6 +2376,239 @@ class LocalCoreServiceMVP:
         return event
 
     @staticmethod
+    def _is_codex_permission_method(method: str) -> bool:
+        return method in {
+            "item/commandExecution/requestApproval",
+            "item/fileChange/requestApproval",
+            "item/permissions/requestApproval",
+            "execCommandApproval",
+            "applyPatchApproval",
+        }
+
+    @staticmethod
+    def _is_codex_interaction_method(method: str) -> bool:
+        return method in {
+            "item/tool/requestUserInput",
+            "mcpServer/elicitation/request",
+        }
+
+    @staticmethod
+    def _codex_interaction_type(method: str) -> str:
+        if method == "mcpServer/elicitation/request":
+            return "mcp_elicitation"
+        return "request_user_input"
+
+    def _codex_rpc_permission_event(
+        self,
+        session_id: str,
+        request_id: str,
+        timeout_sec: int,
+        native_request: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        method = str(native_request.get("method") or "")
+        params = native_request.get("params") if isinstance(native_request.get("params"), dict) else {}
+        tool = self._codex_permission_tool(method)
+        command = self._codex_string_field(params, "command", "cmd", "commandLine")
+        cwd = self._codex_string_field(params, "cwd", "workdir", "currentWorkingDirectory")
+        description = command or self._codex_string_field(params, "reason", "path", "file", "filePath")
+        return {
+            "type": "permission_request",
+            "request_id": request_id,
+            "session_id": session_id,
+            "agent": AgentType.CODEX.value,
+            "tool": tool,
+            "description": description or "Codex requests permission.",
+            "risk_level": "high",
+            "timeout_sec": timeout_sec,
+            "native": {
+                "adapter": "codex_cli_proxy",
+                "native_channel": method,
+                "jsonrpc_id": native_request.get("id"),
+                "approval_id": self._codex_field(params, "approval_id", "approvalId"),
+                "thread_id": self._codex_string_field(params, "thread_id", "threadId", "conversationId"),
+                "turn_id": self._codex_string_field(params, "turn_id", "turnId"),
+                "item_id": self._codex_string_field(params, "item_id", "itemId", "callId"),
+                "command": command,
+                "cwd": cwd,
+            },
+        }
+
+    def _codex_rpc_interaction_event(
+        self,
+        session_id: str,
+        request_id: str,
+        interaction_type: str,
+        timeout_sec: int,
+        native_request: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        method = str(native_request.get("method") or "")
+        params = native_request.get("params") if isinstance(native_request.get("params"), dict) else {}
+        event = {
+            "type": "interaction_request",
+            "request_id": request_id,
+            "session_id": session_id,
+            "agent": AgentType.CODEX.value,
+            "interaction_type": interaction_type,
+            "tool_name": method,
+            "tool_input": params,
+            "timeout_sec": timeout_sec,
+            "native": {
+                "adapter": "codex_cli_proxy",
+                "native_channel": method,
+                "jsonrpc_id": native_request.get("id"),
+                "thread_id": self._codex_string_field(params, "thread_id", "threadId"),
+                "turn_id": self._codex_string_field(params, "turn_id", "turnId"),
+                "item_id": self._codex_string_field(params, "item_id", "itemId"),
+            },
+        }
+        if method == "item/tool/requestUserInput":
+            questions = params.get("questions")
+            event["questions"] = questions if isinstance(questions, list) else []
+        elif method == "mcpServer/elicitation/request":
+            event["message"] = params.get("message")
+            event["mode"] = params.get("mode")
+            event["requestedSchema"] = params.get("requestedSchema")
+            event["serverName"] = params.get("serverName")
+        return event
+
+    def _codex_rpc_notification_to_event(
+        self,
+        session_id: str,
+        notification: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        method = notification.get("method")
+        if not isinstance(method, str):
+            return None
+        params = notification.get("params") if isinstance(notification.get("params"), dict) else {}
+        if method in {"thread/started", "turn/started", "item/started"}:
+            return self.unifier._mk_task_update(session_id, AgentType.CODEX, AgentState.SUBMITTED)
+        if method == "thread/status/changed":
+            status = self._codex_status_type(params.get("status"))
+            active_flags = self._codex_active_flags(params.get("status"))
+            if status == "active" and "waitingOnApproval" in active_flags:
+                return self.unifier._mk_task_update(session_id, AgentType.CODEX, AgentState.WAITING_PERMISSION)
+            if status == "active" and "waitingOnUserInput" in active_flags:
+                return self.unifier._mk_task_update(session_id, AgentType.CODEX, AgentState.WAITING_INPUT)
+            if status in {"active", "running", "busy"}:
+                return self.unifier._mk_task_update(session_id, AgentType.CODEX, AgentState.WORKING)
+            if status == "idle":
+                return self.unifier._mk_task_update(session_id, AgentType.CODEX, AgentState.COMPLETED)
+        if method in {"item/agentMessage/delta", "item/commandExecution/outputDelta"}:
+            return self.unifier._mk_delta(session_id, AgentType.CODEX, str(params.get("delta", "")))
+        if method == "turn/completed":
+            return self.unifier._mk_task_completed(session_id, AgentType.CODEX, "Turn completed")
+        if method == "error":
+            if params.get("willRetry") is True:
+                return self.unifier._mk_task_update(session_id, AgentType.CODEX, AgentState.WORKING)
+            error = params.get("error") if isinstance(params.get("error"), dict) else {}
+            return self.unifier._mk_task_failed(
+                session_id,
+                AgentType.CODEX,
+                str(params.get("code") or error.get("code") or "ERROR"),
+                str(params.get("message") or error.get("message") or params),
+            )
+        return None
+
+    @staticmethod
+    def _codex_rpc_permission_response(
+        native_request: Dict[str, Any],
+        approved: bool,
+        decision: str,
+    ) -> Dict[str, Any]:
+        method = str(native_request.get("method") or "")
+        params = native_request.get("params") if isinstance(native_request.get("params"), dict) else {}
+        if method == "item/commandExecution/requestApproval":
+            value = "acceptForSession" if approved and decision == "always_allow" else ("accept" if approved else "decline")
+            return {"id": native_request.get("id"), "result": {"decision": value}}
+        if method in {"item/fileChange/requestApproval", "item/permissions/requestApproval"}:
+            return {"id": native_request.get("id"), "result": {"decision": "accept" if approved else "decline"}}
+        if method in {"execCommandApproval", "applyPatchApproval"}:
+            return {"id": native_request.get("id"), "result": {"decision": "approved" if approved else "denied"}}
+        return {
+            "id": native_request.get("id"),
+            "error": {"code": -32601, "message": f"Unsupported Codex approval request: {method}"},
+        }
+
+    @staticmethod
+    def _codex_rpc_interaction_response(
+        native_request: Dict[str, Any],
+        approved: bool,
+        answers: Dict[str, Any],
+        reason: str = "",
+    ) -> Dict[str, Any]:
+        method = str(native_request.get("method") or "")
+        if method == "mcpServer/elicitation/request":
+            return {
+                "id": native_request.get("id"),
+                "result": {
+                    "action": "accept" if approved else "decline",
+                    "content": dict(answers) if approved else None,
+                },
+            }
+        if method == "item/tool/requestUserInput":
+            return {
+                "id": native_request.get("id"),
+                "result": {"answers": LocalCoreServiceMVP._codex_user_input_answers(answers if approved else {})},
+            }
+        return {
+            "id": native_request.get("id"),
+            "error": {"code": -32601, "message": f"Unsupported Codex interaction request: {method}"},
+        }
+
+    @staticmethod
+    def _codex_user_input_answers(answers: Dict[str, Any]) -> Dict[str, Dict[str, List[str]]]:
+        normalized: Dict[str, Dict[str, List[str]]] = {}
+        for key, value in answers.items():
+            if not isinstance(key, str) or not key:
+                continue
+            if isinstance(value, dict) and isinstance(value.get("answers"), list):
+                normalized[key] = {"answers": [str(item) for item in value["answers"]]}
+            elif isinstance(value, list):
+                normalized[key] = {"answers": [str(item) for item in value]}
+            else:
+                normalized[key] = {"answers": [str(value)]}
+        return normalized
+
+    @staticmethod
+    def _codex_permission_tool(method: str) -> str:
+        if method in {"item/fileChange/requestApproval", "applyPatchApproval"}:
+            return "file_change"
+        if method == "item/permissions/requestApproval":
+            return "permission"
+        return "shell"
+
+    @staticmethod
+    def _codex_field(params: Dict[str, Any], *names: str) -> Any:
+        for name in names:
+            if name in params:
+                return params[name]
+        return None
+
+    @classmethod
+    def _codex_string_field(cls, params: Dict[str, Any], *names: str) -> Optional[str]:
+        value = cls._codex_field(params, *names)
+        if value is None:
+            return None
+        if isinstance(value, list):
+            return " ".join(str(part) for part in value)
+        return str(value)
+
+    @staticmethod
+    def _codex_status_type(status: Any) -> Optional[str]:
+        if isinstance(status, str):
+            return status
+        if isinstance(status, dict):
+            value = status.get("type")
+            return value if isinstance(value, str) else None
+        return None
+
+    @staticmethod
+    def _codex_active_flags(status: Any) -> Set[str]:
+        if isinstance(status, dict) and isinstance(status.get("activeFlags"), list):
+            return {str(item) for item in status["activeFlags"]}
+        return set()
+
+    @staticmethod
     def _is_claude_pretooluse_interaction_hook(hook_input: Dict[str, Any]) -> bool:
         return (
             hook_input.get("hook_event_name") == "PreToolUse"
@@ -2057,6 +2644,11 @@ class LocalCoreServiceMVP:
         native = pending.native or {}
         return native.get("adapter") == "claude_code_hook"
 
+    @staticmethod
+    def _is_codex_native_permission(pending: PendingPermission) -> bool:
+        native = pending.native or {}
+        return native.get("adapter") == "codex_cli_proxy"
+
     async def _deliver_claude_hook_permission(
         self,
         pending_key: str,
@@ -2083,7 +2675,7 @@ class LocalCoreServiceMVP:
                 decision=decision,
             ))
         try:
-            await asyncio.wait_for(waiter.delivered_future, timeout=10.0)
+            delivered = await asyncio.wait_for(waiter.delivered_future, timeout=10.0)
         except asyncio.TimeoutError:
             return {
                 "accepted": True,
@@ -2096,19 +2688,87 @@ class LocalCoreServiceMVP:
                 },
             }
         finally:
-            self._claude_hook_decisions.pop(pending_key, None)
+            if waiter.delivered_future.done():
+                self._claude_hook_decisions.pop(pending_key, None)
+        response_written = bool(delivered.get("response_written")) if isinstance(delivered, dict) else True
         return {
             "accepted": True,
-            "forwarded": True,
+            "forwarded": response_written,
             "evidence": {
                 "adapter": "claude_code_hook",
                 "native_channel": "PermissionRequest",
-                "decision_delivered": True,
+                "decision_delivered": response_written,
                 "queued_to_hook_client": True,
-                "response_written": True,
+                "response_written": response_written,
                 "session_id": pending.session_id,
                 "request_id": pending.request_id,
                 "decision": decision,
+                "age_ms": int((time.time() - waiter.created_at) * 1000),
+            },
+        }
+
+    async def _deliver_codex_native_permission(
+        self,
+        pending_key: str,
+        pending: PendingPermission,
+        approved: bool,
+        decision: str,
+    ) -> Dict[str, Any]:
+        waiter = self._codex_native_permissions.get(pending_key)
+        if waiter is None:
+            return {
+                "accepted": True,
+                "forwarded": False,
+                "evidence": {
+                    "adapter": "codex_cli_proxy",
+                    "reason": "proxy_waiter_not_registered",
+                    "session_id": pending.session_id,
+                    "request_id": pending.request_id,
+                },
+            }
+        native_response = self._codex_rpc_permission_response(
+            waiter.native_request,
+            approved=approved,
+            decision=decision,
+        )
+        if not waiter.result_future.done():
+            waiter.result_future.set_result(native_response)
+        try:
+            delivered = await asyncio.wait_for(waiter.delivered_future, timeout=10.0)
+        except asyncio.TimeoutError:
+            return {
+                "accepted": True,
+                "forwarded": False,
+                "evidence": {
+                    "adapter": "codex_cli_proxy",
+                    "reason": "proxy_response_delivery_timeout",
+                    "session_id": pending.session_id,
+                    "request_id": pending.request_id,
+                },
+            }
+        finally:
+            if waiter.delivered_future.done():
+                self._codex_native_permissions.pop(pending_key, None)
+        native = pending.native or {}
+        return {
+            "accepted": True,
+            "forwarded": bool(delivered.get("response_written")) if isinstance(delivered, dict) else True,
+            "evidence": {
+                "adapter": "codex_cli_proxy",
+                "native_channel": native.get("native_channel"),
+                "jsonrpc_id": native.get("jsonrpc_id"),
+                "thread_id": native.get("thread_id"),
+                "turn_id": native.get("turn_id"),
+                "item_id": native.get("item_id"),
+                "command": native.get("command"),
+                "cwd": native.get("cwd"),
+                "decision": native_response.get("result", {}).get("decision") if isinstance(native_response.get("result"), dict) else None,
+                "decision_delivered": True,
+                "queued_to_proxy_client": True,
+                "response_written": bool(delivered.get("response_written")) if isinstance(delivered, dict) else True,
+                "session_id": pending.session_id,
+                "request_id": pending.request_id,
+                "approved": bool(approved),
                 "age_ms": int((time.time() - waiter.created_at) * 1000),
             },
         }
@@ -2141,7 +2801,7 @@ class LocalCoreServiceMVP:
                 reason=reason,
             ))
         try:
-            await asyncio.wait_for(waiter.delivered_future, timeout=10.0)
+            delivered = await asyncio.wait_for(waiter.delivered_future, timeout=10.0)
         except asyncio.TimeoutError:
             return {
                 "accepted": True,
@@ -2154,19 +2814,88 @@ class LocalCoreServiceMVP:
                 },
             }
         finally:
-            self._claude_hook_interactions.pop(pending_key, None)
+            if waiter.delivered_future.done():
+                self._claude_hook_interactions.pop(pending_key, None)
+        response_written = bool(delivered.get("response_written")) if isinstance(delivered, dict) else True
         return {
             "accepted": True,
-            "forwarded": True,
+            "forwarded": response_written,
             "evidence": {
                 "adapter": "claude_code_hook",
                 "native_channel": "PreToolUse",
-                "decision_delivered": True,
+                "decision_delivered": response_written,
                 "queued_to_hook_client": True,
-                "response_written": True,
+                "response_written": response_written,
                 "session_id": pending.session_id,
                 "request_id": pending.request_id,
                 "interaction_type": pending.interaction_type,
+                "age_ms": int((time.time() - waiter.created_at) * 1000),
+            },
+        }
+
+    async def _deliver_codex_native_interaction(
+        self,
+        pending_key: str,
+        pending: PendingCodexNativeRequest,
+        approved: bool,
+        answers: Dict[str, Any],
+        reason: str,
+    ) -> Dict[str, Any]:
+        waiter = self._codex_native_interactions.get(pending_key)
+        if waiter is None:
+            return {
+                "accepted": True,
+                "forwarded": False,
+                "evidence": {
+                    "adapter": "codex_cli_proxy",
+                    "reason": "proxy_waiter_not_registered",
+                    "session_id": pending.session_id,
+                    "request_id": pending.request_id,
+                },
+            }
+        native_response = self._codex_rpc_interaction_response(
+            waiter.native_request,
+            approved=approved,
+            answers=answers,
+            reason=reason,
+        )
+        if not waiter.result_future.done():
+            waiter.result_future.set_result(native_response)
+        try:
+            delivered = await asyncio.wait_for(waiter.delivered_future, timeout=10.0)
+        except asyncio.TimeoutError:
+            return {
+                "accepted": True,
+                "forwarded": False,
+                "evidence": {
+                    "adapter": "codex_cli_proxy",
+                    "reason": "proxy_response_delivery_timeout",
+                    "session_id": pending.session_id,
+                    "request_id": pending.request_id,
+                },
+            }
+        finally:
+            if waiter.delivered_future.done():
+                self._codex_native_interactions.pop(pending_key, None)
+        native_request = pending.native_request
+        params = native_request.get("params") if isinstance(native_request.get("params"), dict) else {}
+        return {
+            "accepted": True,
+            "forwarded": bool(delivered.get("response_written")) if isinstance(delivered, dict) else True,
+            "evidence": {
+                "adapter": "codex_cli_proxy",
+                "native_channel": native_request.get("method"),
+                "jsonrpc_id": native_request.get("id"),
+                "thread_id": self._codex_string_field(params, "thread_id", "threadId"),
+                "turn_id": self._codex_string_field(params, "turn_id", "turnId"),
+                "item_id": self._codex_string_field(params, "item_id", "itemId"),
+                "decision_delivered": True,
+                "queued_to_proxy_client": True,
+                "response_written": bool(delivered.get("response_written")) if isinstance(delivered, dict) else True,
+                "session_id": pending.session_id,
+                "request_id": pending.request_id,
+                "interaction_type": pending.interaction_type,
+                "approved": bool(approved),
                 "age_ms": int((time.time() - waiter.created_at) * 1000),
             },
         }
@@ -2406,6 +3135,27 @@ class LocalCoreServiceMVP:
             return matches[0]
         return "", None
 
+    def _find_pending_codex_interaction(
+        self,
+        request_id: str,
+        session_id: Any = None,
+    ) -> Tuple[str, Optional[PendingCodexNativeRequest]]:
+        has_session = isinstance(session_id, str) and bool(session_id)
+        matches = [
+            (key, pending)
+            for key, pending in self._codex_native_interactions.items()
+            if pending.request_id == request_id
+        ]
+        if has_session:
+            matches = [
+                (key, pending)
+                for key, pending in matches
+                if pending.session_id == session_id
+            ]
+        if len(matches) == 1:
+            return matches[0]
+        return "", None
+
     @staticmethod
     def _projected_permission_key(pending_key: str) -> str:
         digest = hashlib.sha256(pending_key.encode("utf-8")).hexdigest()[:16]
@@ -2495,7 +3245,7 @@ class LocalCoreServiceMVP:
     def _requires_native_forwarding(agent: AgentType, result: Dict[str, Any]) -> bool:
         adapter = result.get("evidence", {}).get("adapter")
         if agent == AgentType.CODEX:
-            return adapter == "codex_app_server"
+            return adapter in {"codex_app_server", "codex_cli_proxy"}
         if agent != AgentType.CLAUDE:
             return False
         return adapter not in {"fake", "unsupported"}

@@ -16,6 +16,7 @@ class ClientKind(str, Enum):
 
 CAP_AGENT_LAUNCH = "agent:launch"
 CAP_CLAUDE_HOOK = "claude:hook"
+CAP_CODEX_HOOK = "codex:hook"
 CAP_NOTIFICATION_CREATE = "notification:create"
 CAP_PERMISSION_RESPOND = "permission:respond"
 CAP_PERMISSION_RESPOND_LOW_RISK = "permission:respond:low_risk"
