@@ -206,3 +206,77 @@ def test_codex_cli_proxy_user_input_round_trips_to_native_response():
         assert server.runtime.snapshot().to_dict()["interactions"] == []
 
     asyncio.run(run())
+
+
+def test_codex_cli_proxy_mcp_elicitation_round_trips_to_native_response():
+    async def run():
+        server = make_server()
+        session = register_codex_native_session(server)
+        hook_queue = AsyncCaptureQueue()
+        desktop_queue = AsyncCaptureQueue()
+        server.connected_clients.add(desktop_queue)
+        server.register_client_identity(
+            hook_queue,
+            "agent-hook",
+            f"codex-cli-proxy:{session.session_id}",
+            {"codex:hook"},
+        )
+        server.register_client_identity(
+            desktop_queue,
+            "desktop-ui",
+            "desktop",
+            {"permission:respond"},
+        )
+        native_request = {
+            "id": "jsonrpc_3",
+            "method": "mcpServer/elicitation/request",
+            "params": {
+                "threadId": "thread_1",
+                "turnId": "turn_1",
+                "message": "Choose an option",
+                "mode": "form",
+                "serverName": "test-server",
+                "requestedSchema": {
+                    "type": "object",
+                    "properties": {"choice": {"type": "string"}},
+                },
+            },
+        }
+
+        request_task = asyncio.create_task(server._cmd_codex_rpc_request({
+            "type": "codex_rpc_request",
+            "session_id": session.session_id,
+            "request": native_request,
+        }, hook_queue))
+        interaction = await wait_for_type(desktop_queue, "interaction_request")
+        assert interaction["agent"] == "codex"
+        assert interaction["interaction_type"] == "mcp_elicitation"
+        assert interaction["message"] == "Choose an option"
+        assert interaction["serverName"] == "test-server"
+
+        response_task = asyncio.create_task(server._cmd_interaction_response({
+            "type": "interaction_response",
+            "session_id": session.session_id,
+            "request_id": "jsonrpc_3",
+            "approved": True,
+            "answers": {"choice": "A"},
+        }, desktop_queue))
+        result = await wait_for_type(hook_queue, "codex_rpc_result")
+        assert result["native_response"] == {
+            "id": "jsonrpc_3",
+            "result": {"action": "accept", "content": {"choice": "A"}},
+        }
+        await server._cmd_codex_rpc_delivered({
+            "type": "codex_rpc_delivered",
+            "session_id": session.session_id,
+            "request_id": "jsonrpc_3",
+            "response_written": True,
+        }, hook_queue)
+        await response_task
+        await request_task
+        ack = await wait_for_type(desktop_queue, "interaction_ack")
+        assert ack["forwarded"] is True
+        assert ack["evidence"]["adapter"] == "codex_cli_proxy"
+        assert ack["evidence"]["interaction_type"] == "mcp_elicitation"
+
+    asyncio.run(run())
