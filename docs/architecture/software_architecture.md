@@ -98,7 +98,11 @@ They are not separate products.
 The application owns:
 
 - keyboard configuration
-- profiles, layers, keymaps, macros, magnetic switch settings, screen settings
+- PC-side device profile library and `ProfilePackage` import/export
+- workspace presets that reference independent keyboard, screen, lighting, and
+  agent resources
+- binding scopes, behaviors, macros, magnetic switch settings, screen configs,
+  and lighting configs
 - device discovery, diagnostics, and firmware-facing control
 - Claude Code instance management
 - parked Codex compatibility instance management, where enabled
@@ -106,9 +110,10 @@ The application owns:
 - local APIs used by the UI and tests
 - protocol conversion between UI, agent adapters, and keyboard devices
 
-The key product idea is that keyboard configuration and agent control share one
-local state model. A profile can contain both keyboard behavior and agent
-bindings.
+Keyboard configuration and agent control share the same software product, but
+they do not share the same firmware profile object. A `DeviceProfile` contains
+keyboard behavior only. A software-side `WorkspacePreset` can reference a
+`DeviceProfile`, screen config, lighting config, and agent binding set.
 
 ## Layered Architecture
 
@@ -137,11 +142,11 @@ Application Core
         v                   v
 Keyboard Domain        Agent Domain
   keymaps                agent registry
-  layers                 session registry
+  binding scopes         session registry
   macros                 run registry
   magnetic config        permission queue
-  screen layout          agent events
-  agent bindings
+  screen config          agent events
+  lighting config
         |                   |
         +---------+---------+
                   |
@@ -153,12 +158,21 @@ Adapters
 
 ## Core Principle
 
-The Local Core Service is the authoritative state owner.
+The Local Core Service is the authoritative state owner for the software
+product.
 
 ```text
-Local Core Service: source of truth
-UI: view and command surface
-Keyboard: limited view and physical control surface
+Local Core Service:
+  source of truth for PC profile library, workspace presets, agent state,
+  screen/lighting libraries, and device mirrors
+
+Keyboard device:
+  source of truth for committed local DeviceProfileStore slots and
+  DeviceSettings while disconnected
+
+UI:
+  view and command surface
+
 Agent adapters: event and command integration points
 Device adapters: transport integration points
 ```
@@ -166,6 +180,10 @@ Device adapters: transport integration points
 The UI must not bypass the core to directly mutate device state. Agent adapters
 must not directly write device frames. Keyboard configuration modules must not
 directly depend on USB, BLE, or dongle implementation details.
+
+Device synchronization is explicit. When a keyboard reconnects, Local Core must
+read slot metadata and reconcile device-side changes instead of assuming its
+last cached copy is still authoritative.
 
 ## Major Modules
 
@@ -194,15 +212,16 @@ src/devices/
     simulator
 
 src/keyboard/
-  profiles
+  device profiles and ProfilePackage import/export
+  workspace presets
   keymaps
-  layers
+  binding scopes
   bindings
   macros
   magnetic switch settings
   lighting
-  screen layouts
-  agent bindings
+  screen configs
+  agent binding set references
 
 src/agents/
   agent manager
@@ -246,7 +265,9 @@ Current implementation note:
 
 ## Keyboard Configuration and Agent Control
 
-Keyboard configuration and agent control interact through profiles and bindings.
+Keyboard configuration and agent control interact through software-side
+workspace presets and command bindings. They do not merge into the device
+`ProfilePackage`.
 
 Examples:
 
@@ -254,10 +275,13 @@ Examples:
 - `Fn+Esc` interrupts the focused agent run.
 - A rotary encoder scrolls the focused session output.
 - A screen layout shows the current Claude Code session state.
-- A coding profile binds keys and screen cards to specific agent roles.
+- A coding workspace preset references a keyboard `DeviceProfile`, screen
+  config, lighting config, and agent binding set.
 
 This means agent control is not an optional overlay. It is a first-class domain
-inside the keyboard software.
+inside the software product. It is not part of the firmware `DeviceProfile`
+unless a future bounded `device_command` contract explicitly defines an offline
+device behavior.
 
 ## Agent Identity Model
 
@@ -403,13 +427,15 @@ event.
 
 Persisted state should include:
 
-- profiles
+- PC-side device profiles and ProfilePackages
+- workspace presets
 - keymaps
-- layers
+- binding scopes
 - macros
 - magnetic switch settings
-- screen layouts
-- agent bindings
+- screen configs
+- lighting configs
+- agent binding sets
 - known devices
 - agent instance presets
 - workspace bindings

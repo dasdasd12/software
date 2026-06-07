@@ -1,37 +1,51 @@
-# Profile Configuration Schema
+# Device Profile and Workspace Preset Schema
 
-Profiles are the product-level configuration unit. A profile contains keyboard
-behavior, device-facing settings, screen layout, and agent bindings.
+This document is aligned with the current keyboard configuration HTML
+architecture under `docs/architecture/keyboard_config_site`.
 
-Agent sessions and runs are runtime state. They are not stored permanently
-inside profiles.
+The word `Profile` has two different meanings in older software documents. This
+document fixes that split:
+
+- `DeviceProfile`: keyboard behavior that can be written to the device as a
+  `ProfilePackage`.
+- `WorkspacePreset`: software-only product preset that may reference a device
+  profile, screen config, lighting config, agent bindings, and workspace
+  preferences.
+
+Only `DeviceProfile` / `ProfilePackage` is shared with firmware as the native
+keyboard profile artifact.
 
 ## Ownership
 
-The Local Core Service is the source of truth for profiles.
+The Local Core Service owns the PC-side library, import/export, editing UI
+state, workspace presets, and device synchronization workflow.
 
-The keyboard may store a compact offline subset:
+The device owns the committed contents of its local `DeviceProfileStore`:
 
-- active profile ID
-- keymap and layers needed for normal typing
-- magnetic switch settings
-- basic macros that do not require the PC
-- screen fallback preferences
-- last known focus hint
+- five user `ProfilePackage` slots
+- one hidden factory-default slot
+- active slot runtime state in `DeviceState`
+- `DeviceSettings` used before profile load
 
-Agent bindings depend on the Local Core Service. If the PC service is
-unavailable, agent bindings should show or behave as unavailable rather than
-silently performing unrelated actions.
+When the device is disconnected, its local slots are still the source of truth
+for what the keyboard runs. When the PC reconnects, Local Core reads device slot
+metadata and reconciles it with the PC-side library or mirror. Local Core must
+not assume that its last cached copy is still authoritative.
 
 ## AppConfig
 
-`AppConfig` is the top-level persisted application configuration.
+`AppConfig` is the top-level software-side persisted application configuration.
+It is not written to firmware as a single object.
 
 ```json
 {
   "schema_version": "1.0",
-  "active_profile_id": "profile_coding_default",
-  "profiles": [],
+  "active_workspace_preset_id": "preset_coding_default",
+  "device_profile_library": [],
+  "workspace_presets": [],
+  "screen_configs": [],
+  "lighting_configs": [],
+  "agent_binding_sets": [],
   "known_devices": [],
   "agent_instance_presets": [],
   "workspace_bindings": [],
@@ -42,215 +56,203 @@ silently performing unrelated actions.
 
 Expected fields:
 
-- `schema_version`: migration version
-- `active_profile_id`: currently selected profile
-- `profiles`: user profiles
-- `known_devices`: previously paired or connected keyboards/dongles
-- `agent_instance_presets`: reusable Claude Code instance definitions; parked
-  Codex presets may exist only when that provider is enabled
-- `workspace_bindings`: workspace to profile/agent preferences
-- `global_approval_policy_id`: default approval policy
-- `ui_preferences`: UI-only settings
+- `schema_version`: software application migration version.
+- `active_workspace_preset_id`: active software preset for the desktop UI.
+- `device_profile_library`: PC-side reusable `DeviceProfile` sources.
+- `workspace_presets`: product presets that combine independent resources.
+- `screen_configs`: screen page/widget/media configuration.
+- `lighting_configs`: RGB/lighting configuration and rules.
+- `agent_binding_sets`: software-side agent command bindings.
+- `known_devices`: previously connected keyboards/dongles and slot mirrors.
+- `agent_instance_presets`: reusable agent instance definitions.
+- `workspace_bindings`: workspace-to-preset preferences.
+- `global_approval_policy_id`: default approval policy.
+- `ui_preferences`: UI-only settings.
 
-## Profile
+## WorkspacePreset
+
+`WorkspacePreset` is a software product convenience. It can group independent
+configuration resources, but it is not a firmware `ProfilePackage`.
 
 ```json
 {
-  "schema_version": "1.0",
-  "id": "profile_coding_default",
+  "id": "preset_coding_default",
   "name": "Coding",
-  "version": 1,
-  "target_device_family": "ai_keyboard_ch32h417",
-  "tags": ["coding", "agent-control"],
-  "keymap": {},
-  "layers": [],
-  "macros": [],
-  "magnetic_config": {},
-  "screen_layout": {},
-  "agent_bindings": [],
-  "profile_policy": {},
+  "device_profile_id": "dev_profile_coding_keyboard",
+  "screen_config_id": "screen_coding",
+  "lighting_config_id": "lighting_coding",
+  "agent_binding_set_id": "agent_bindings_coding",
+  "default_agent_instance_id": "cc-software",
+  "focus_policy": "last_active_in_workspace",
   "metadata": {}
 }
 ```
 
-Profiles initially target a device family, not an arbitrary hardware layout.
-Layout migration can be added later.
+Rules:
 
-## Device Family and Layout
+- A preset may reference a `DeviceProfile`, but it does not extend or override
+  firmware profile semantics.
+- Screen and lighting configuration stay independent from `DeviceProfile`.
+- Agent bindings stay in Local Core. They are not compiled into the keyboard
+  offline profile.
+- Runtime session IDs, provider-specific request IDs, and absolute machine paths
+  must not be stored in reusable presets.
+
+## DeviceProfile
+
+`DeviceProfile` describes keyboard input behavior. It is the source object that
+is packed into `ProfilePackage` and compiled into firmware `RuntimeTable`.
+
+The detailed schema is maintained in the HTML profile page. Software code should
+model the same boundaries:
 
 ```json
 {
-  "target_device_family": "ai_keyboard_ch32h417",
-  "physical_layout_id": "ansi_75_ai_keyboard"
+  "schema_version": "1.0",
+  "identity": {
+    "id": "dev_profile_coding_keyboard",
+    "name": "Coding Keyboard",
+    "revision": 1,
+    "target_device_family": "ai_keyboard_ch32h417"
+  },
+  "defaults": {},
+  "control_assignments": {},
+  "control_overrides": {},
+  "behaviors": {},
+  "binding_scopes": {},
+  "interaction_rules": {},
+  "macro_defs": {},
+  "report_rate_policy": {},
+  "input_guard_policy": {},
+  "metadata": {}
 }
 ```
 
-Default assumption:
+`DeviceProfile` may contain:
+
+- control `type` and `mode` assignments
+- trigger parameters such as actuation threshold, rapid trigger delta, debounce,
+  deadzone, and encoder detent parameters
+- per-control parameter overrides
+- behavior definitions such as host input, macro call, profile switch,
+  overlay/scope control, device command, tap-hold, DKS, and no-op
+- `binding_scopes`, which replace older software `layers`
+- interaction rules such as combo and SOCD
+- safe offline macro bytecode source
+- profile-local report-rate policy, used only when global report rate is
+  disabled in `DeviceSettings`
+- profile-local input guard policy, used only when global guard is disabled in
+  `DeviceSettings`
+
+`DeviceProfile` must not contain:
+
+- screen layout, page definitions, media, image, video, or animation resources
+- lighting effects or lighting trigger rules
+- `DeviceSettings`
+- `DeviceState`
+- calibration measurements, calibration offsets, sensor baselines, or hardware
+  acquisition facts
+- CH585 pairing records, wireless host records, or current connection state
+- Local Core agent bindings, provider names, session IDs, permission IDs, or
+  workspace focus policy
+
+## ProfilePackage
+
+`ProfilePackage` is the PC/device/screen exchange container for one
+`DeviceProfile`.
+
+The first implementation should use the binary container defined in the HTML
+`ProfilePackage` page:
 
 ```text
-Profiles are device-family scoped first.
-Future import/migration tools may translate between layouts.
+ProfilePackageBinary
+  header
+  section directory
+  source_profile_json       # canonical JSON bytes, required
+  runtime_table_cache       # optional RuntimeTableBinary bytes
+  resource_estimate         # optional
+  metadata                  # optional
 ```
 
-## Magnetic Switch Config
+The canonical source bytes are the integrity source for `source_hash` and
+package CRC. Software import/export may offer readable JSON, but slot writes and
+readback must preserve the canonical package semantics.
 
-Magnetic settings should include units and support default plus per-key
-overrides.
+## Binding Scopes Instead of Layers
 
-```json
-{
-  "magnetic_config": {
-    "unit": "mm",
-    "default": {
-      "actuation_mm": 1.2,
-      "release_mm": 1.0,
-      "rapid_trigger": true,
-      "rapid_trigger_sensitivity_mm": 0.15
-    },
-    "per_key": {
-      "K_W": {
-        "actuation_mm": 0.8
-      }
-    },
-    "modes": []
-  }
-}
-```
+Older software documents used `layers`. In the device profile model, the same
+runtime role is represented by `binding_scopes` plus `overlay_control`
+behaviors.
 
-Initial implementation should support:
-
-- global default
-- per-key override
-- explicit units
-
-Mode switching can be added after the basic model is stable.
-
-## Screen Layout
-
-Profiles store screen layout definitions, not live agent state.
-
-```json
-{
-  "screen_layout": {
-    "id": "screen_coding",
-    "pages": [
-      {
-        "id": "agent_status",
-        "title": "Agent",
-        "widgets": [
-          {
-            "id": "focused_session_card",
-            "type": "agent_session_card",
-            "data_source": "agent.focused_session"
-          },
-          {
-            "id": "notification_strip",
-            "type": "notification_strip",
-            "data_source": "notifications.recent"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-Default rendering direction:
+Compatibility mapping:
 
 ```text
-The device renders with LVGL from widget/state data.
-The PC sends compact widget state and updates, not full video frames.
+legacy layer id        -> binding_scope id
+legacy layer priority  -> binding_scope priority
+legacy hold/toggle     -> overlay_control behavior
+legacy layer binding   -> binding_scope.bindings entry
 ```
+
+Do not introduce another behavior inheritance system on top of
+`binding_scopes`.
 
 ## Agent Bindings
 
-Agent bindings connect keyboard inputs to agent commands through focus and
-policy.
+Agent bindings are software-side `agent_binding_sets`. They connect UI shortcuts
+or software-controlled input events to Local Core commands.
 
-```json
-{
-  "id": "approve_focused",
-  "trigger": {
-    "source": "key",
-    "key": "K_ENTER",
-    "layer": "layer_fn",
-    "event": "press"
-  },
-  "command": {
-    "type": "agent.permission.respond",
-    "decision": "approve",
-    "target": "focused_permission"
-  },
-  "safety": {
-    "allow_high_risk": false,
-    "requires_screen_confirmation": true
-  }
-}
+They may be referenced by `WorkspacePreset`, but they are not part of
+`DeviceProfile`.
+
+When the PC service is unavailable:
+
+- the device must not invent agent decisions
+- agent actions are unavailable or shown as unavailable
+- normal keyboard behavior, profile switching, and safe local macros continue
+  from the device's local `DeviceProfileStore`
+
+## Screen and Lighting Config
+
+Screen and lighting are independent resources:
+
+```text
+ScreenConfig
+  pages/widgets/media/resources
+  CPU/status widgets
+  image/animation/video presentation rules
+
+LightingConfig
+  effects
+  palettes
+  zones
+  runtime signal rules
 ```
 
-Default assumptions:
-
-- agent bindings are first-class profile entries
-- bindings resolve symbolic targets through the focus manager
-- low-risk approvals may be handled from the keyboard
-- high-risk approvals require desktop confirmation until a strong-confirm flow
-  is designed
-
-## Workspace Bindings
-
-Workspace bindings let profiles and agent presets follow the active project.
-
-```json
-{
-  "workspace_id": "software",
-  "path": "${PROJECT_ROOT}/software",
-  "default_profile_id": "profile_coding_default",
-  "default_agent_instance_id": "cc-software",
-  "focus_policy": "last_active_in_workspace"
-}
-```
-
-Profiles should refer to workspace and instance selectors rather than hard-code
-machine-specific absolute paths or runtime session IDs. The Local Core Service
-resolves workspace selectors to concrete local paths.
-
-## Offline Behavior
-
-When the Local Core Service is unavailable:
-
-- normal typing, layers, magnetic settings, and safe local macros should keep
-  working
-- agent bindings should be disabled or show `Agent unavailable`
-- high-risk macros or agent-triggering macros should not run
-- the screen may show last-known local device status or fallback page
-
-The keyboard must not invent agent decisions offline.
-
-## Import and Export
-
-Initial import/export can use JSON. SQLite should remain the primary internal
-storage for the Local Core Service.
-
-Cloud sync, sharing, and marketplace-style profile distribution are out of
-scope for the first implementation, but schema metadata should leave room for:
-
-- author
-- created_at
-- updated_at
-- source
-- compatibility
-- migration history
+They may consume runtime signals produced by the keyboard engine, but they are
+not embedded in `DeviceProfile`.
 
 ## Validation Rules
 
-Profiles should be rejected or marked invalid when:
+Device profiles should be rejected or marked invalid when:
 
 - schema version is unsupported
 - target device family is incompatible
-- layer references are missing
-- key IDs are unknown for the selected layout
-- agent bindings target unavailable command types
-- safety rules conflict with global policy
-- magnetic values are outside firmware-supported ranges
+- referenced `control_id` is not in the known keyboard/control map
+- required `type + mode` parameters are missing
+- behavior references are missing, recursive, or unsupported by device
+  capabilities
+- binding scope priority conflicts are ambiguous
+- macro bounds exceed firmware capability
+- profile-local report rate exceeds device capability
+- profile-local input guard conflicts with schema rules
+
+Workspace presets should be validated separately:
+
+- referenced device profile, screen config, lighting config, and agent binding
+  set exist
+- agent targets can be resolved by Local Core
+- high-risk actions are covered by approval policy
+- reusable presets do not store runtime session IDs or machine-local absolute
+  paths
 
 Validation should produce user-facing diagnostics, not silent fallback.

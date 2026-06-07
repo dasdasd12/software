@@ -1,319 +1,239 @@
-# Keymap, Layer, and Action Model
+# Binding Scope and Behavior Model
 
-The keymap model is a trigger-to-action system. It should not be limited to a
-static HID keycode table because the product needs normal keyboard input,
-macros, screen navigation, profile switching, and agent control.
+This document replaces the older "Keymap, Layer, and Action" model for
+device-facing keyboard behavior.
+
+The firmware profile model is:
+
+```text
+control_id + ControlSignal
+  -> active binding_scopes
+  -> behavior
+  -> RuntimeIntent
+```
+
+Software may keep compatibility UI labels such as "Fn layer", but the data model
+written to the keyboard must use `binding_scopes`, `behaviors`, and
+`interaction_rules`.
 
 ## Core Concepts
 
 ```text
-PhysicalLayout
-  names the available physical keys
+ControlId
+  stable ID shared by PC editor, Profile, Screen, diagnostics, and firmware
+  examples: key_000, akey_012, enc_000, joy_000_x
 
-Layer
-  defines activation and priority
+ControlSignal
+  profile-level signal produced by type+mode trigger algorithms
+  examples: press, release, hold, tap, cw_step, ccw_step
 
-Binding
-  maps a trigger under conditions to an action
+BindingScope
+  dispatch scope with activation state, priority, bindings, and fallback
 
-Action
-  HID output, macro, layer control, screen command, or agent command
+Behavior
+  named runtime action selected by dispatch
+
+InteractionRule
+  cross-control or cross-signal rule such as combo or SOCD
 ```
 
-## Physical Layout
+`ControlId` names an input source. Its physical meaning comes from the control
+map and the profile assignment, not from the string alone.
 
-Physical layout provides stable key IDs.
+## Physical and Control Map
+
+The product currently targets one known keyboard layout. The editor can load the
+fixed control map offline and does not need hardware communication to know the
+basic layout.
 
 ```json
 {
-  "physical_layout_id": "ansi_75_ai_keyboard",
-  "keys": [
-    {
-      "id": "K_ENTER",
-      "row": 4,
-      "col": 13,
-      "label": "Enter"
-    }
-  ]
+  "control_id": "akey_000",
+  "source": "h417_key_scan",
+  "control_index": 0,
+  "default_label": "A"
 }
 ```
 
-Key IDs should remain stable across UI, firmware config, and profile files.
+Rules:
 
-## Layer
+- `control_id` is stable across PC editor, `ProfilePackage`, diagnostics, and
+  firmware logs.
+- `control_index` is the compact runtime index used by `RuntimeTable`.
+- Profile source references `control_id`; compiled runtime tables use indexes.
+- Profile does not create new controls. Unassigned controls are allowed and
+  produce no behavior.
 
-Layers define activation, priority, and display name.
+## Binding Scopes
+
+`binding_scopes` replace older software `layers`.
 
 ```json
 {
-  "id": "layer_fn",
-  "name": "Fn",
-  "priority": 10,
-  "activation": {
-    "type": "hold_key",
-    "key": "K_FN"
+  "base": {
+    "priority": 0,
+    "default_active": true,
+    "bindings": {
+      "akey_000": "b_keyboard_a"
+    },
+    "unbound": "b_no_op"
+  },
+  "fn": {
+    "priority": 20,
+    "default_active": false,
+    "bindings": {
+      "akey_000.press": "b_profile_next"
+    },
+    "unbound": "fallthrough"
   }
 }
 ```
 
-Initial activation types:
+Dispatch lookup order:
 
 ```text
-default
-hold_key
-toggle_key
-oneshot
-profile_mode
+signal = control_id + event
+lookup = scope.bindings[control_id.event]
+      ?? scope.bindings[control_id]
+      ?? scope.unbound
 ```
 
-Layer objects should not contain all key behavior. Behavior belongs in
-`bindings` so the same action model can be used across layers.
+Rules:
 
-## Binding
+- `base` is always active.
+- Non-base scopes are inactive unless `default_active = true` or activated by
+  an `overlay_control` behavior.
+- Active scopes are evaluated by descending priority.
+- Equal-priority scopes that bind the same signal are a schema error.
+- Scopes select behavior; they do not merge behavior fields.
 
-```json
-{
-  "id": "bind_fn_enter_approve",
-  "trigger": {
-    "source": "key",
-    "key": "K_ENTER",
-    "event": "press"
-  },
-  "when": {
-    "layer": "layer_fn"
-  },
-  "action": {
-    "type": "agent.permission.respond",
-    "target": "focused_permission",
-    "decision": "approve"
-  }
-}
-```
+## Legacy Layer Mapping
 
-Trigger fields:
-
-- `source`: key, encoder, screen_button, system
-- `key`: physical key ID, when applicable
-- `event`: press, release, hold, tap, double_tap, rotate_left, rotate_right
-
-Condition fields:
-
-- active layer
-- profile mode
-- device mode
-- focused screen page
-- agent availability
-
-## Action Types
-
-Initial action namespaces:
+Older software objects map to the new model as follows:
 
 ```text
-hid.*
-layer.*
-macro.*
-profile.*
-screen.*
-agent.*
-keyboard.tool.*
-device.*
+Layer.id              -> BindingScope.id
+Layer.priority        -> BindingScope.priority
+Layer.default         -> BindingScope.default_active
+Layer hold/toggle     -> overlay_control behavior
+Binding.when.layer    -> binding scope membership
+layer.momentary       -> overlay_control(action = hold)
+layer.toggle          -> overlay_control(action = toggle)
+layer.oneshot         -> overlay_control(action = oneshot)
+```
+
+The software UI may still display "Fn layer" because users understand that
+language, but serialized device profiles should not reintroduce a separate
+`layers` collection.
+
+## Behavior Kinds
+
+Device-facing behavior kinds are finite and compileable:
+
+```text
+host_input
+macro_call
+profile_switch
+overlay_control
+device_command
+tap_hold
+dks
+no_op
 ```
 
 Examples:
 
 ```json
 {
-  "type": "hid.key",
-  "keycode": "KC_A"
-}
-```
-
-```json
-{
-  "type": "macro.run",
-  "macro_id": "macro_commit_prefix"
-}
-```
-
-```json
-{
-  "type": "layer.momentary",
-  "layer_id": "layer_fn"
-}
-```
-
-```json
-{
-  "type": "screen.navigate",
-  "direction": "next_page"
-}
-```
-
-```json
-{
-  "type": "agent.run.interrupt",
-  "target": "focused_run"
-}
-```
-
-```json
-{
-  "type": "agent.permission.respond",
-  "target": "focused_permission",
-  "decision": "approve"
-}
-```
-
-```json
-{
-  "type": "keyboard.tool.switch",
-  "target": {
-    "tool_id": "permissions"
+  "b_keyboard_a": {
+    "kind": "host_input",
+    "input": {
+      "report": "keyboard",
+      "usage": "KC_A"
+    }
   }
 }
 ```
 
 ```json
 {
-  "type": "keyboard.tool.next"
+  "b_profile_next": {
+    "kind": "profile_switch",
+    "target": "next"
+  }
 }
 ```
 
-## Agent Actions
-
-Agent actions must pass through the command router and approval policy.
-
-They should not directly call Claude Code or parked compatibility adapters.
-
-Supported initial targets:
-
-```text
-focused_agent
-focused_session
-focused_run
-focused_permission
-workspace_default
-preferred_instance
+```json
+{
+  "b_fn_hold": {
+    "kind": "overlay_control",
+    "scope": "fn",
+    "action": "hold"
+  }
+}
 ```
+
+`agent.*`, `screen.*`, and software workspace commands are not compiled into the
+device `DeviceProfile`. If a future firmware feature needs a local device
+command, it must be represented as a bounded `device_command` with explicit
+offline semantics.
+
+## Interaction Rules
+
+`interaction_rules` are for cross-control or cross-signal logic.
 
 Examples:
 
-```json
-{
-  "type": "agent.session.launch_or_resume",
-  "provider_id": "claude_code",
-  "instance_selector": "workspace_default"
-}
-```
+- combo recognition
+- SOCD direction arbitration
+- member suppression and release-to-rearm behavior
 
-```json
-{
-  "type": "agent.focus.next_session"
-}
-```
-
-## Tool Actions
-
-Tool actions are backend control-mode commands owned by the keyboard runtime,
-not screen widgets. They pass through the command router as service-required
-actions and never call agent providers or bridge adapters directly.
-
-Initial tools:
-
-```text
-agent_control
-session_list
-permissions
-profile_config
-device_status
-```
-
-`keyboard.tool.switch` selects a known tool for the input device. Bindings
-should normally put `tool_id` in the target or action payload; the command
-source supplies the originating `device_id`. `keyboard.tool.next` advances to
-the next configured tool for that device, selecting the first configured tool
-when none is active.
-
-## Macro Model Boundary
-
-Macros are action sequences. They should support more than text injection, but
-high-risk steps must be policy-gated.
-
-```json
-{
-  "id": "macro_commit_prefix",
-  "name": "Commit Prefix",
-  "steps": [
-    {
-      "type": "text",
-      "value": "feat: "
-    }
-  ]
-}
-```
-
-Possible future macro steps:
-
-```text
-text
-key_chord
-delay
-screen_command
-agent_prompt
-agent_command
-```
-
-Macros that trigger agent actions or shell/file operations must go through the
-same command and approval policy path as direct agent bindings.
+Tap-hold and DKS remain behaviors because they are selected by one binding and
+then choose child behaviors using time or travel state. Combo and SOCD live in
+`interaction_rules` because they observe multiple controls before dispatch.
 
 ## Resolution Pipeline
 
 ```text
-Raw input event
-  -> physical key/encoder identity
-  -> active layer set
-  -> matching bindings
-  -> binding priority resolution
-  -> action validation
-  -> command or device output
+Control Data Layer
+  -> type+mode trigger algorithm
+  -> ControlSignal queue
+  -> interaction_rules
+  -> binding_scope dispatch
+  -> behavior execution
+  -> RuntimeIntent queue
+  -> V5F report adaptation / allowed device request handling
 ```
 
-HID output can be firmware-local when possible. Agent, screen, and profile
-commands should be resolved by the Local Core Service unless a compact offline
-behavior is explicitly defined.
+V3F owns the deterministic offline keyboard behavior. V5F adapts
+`RuntimeIntent` to USB/wireless reports and device-management requests. Local
+Core is not in this realtime path.
 
 ## Offline Behavior
 
 When the Local Core Service is unavailable:
 
-- `hid.*`, safe `layer.*`, and safe local `macro.*` actions may run
-- `agent.*` actions become unavailable
-- `keyboard.tool.*` actions become unavailable
-- `screen.*` actions may navigate local fallback pages
-- high-risk macro steps are blocked
+- host input, profile switching, overlay controls, interaction rules, and safe
+  local macros keep working from the device's local `ProfilePackage` slots
+- agent commands are unavailable because they are software-side bindings
+- screen may show local device state or projected state that was last known
+- high-risk PC automation must not execute from firmware
 
-The firmware should expose clear unavailable state for UI/screen display.
+The keyboard must remain usable as a keyboard without PC software.
 
 ## Validation Rules
 
-Bindings are invalid when:
+Device profile validation should reject:
 
-- trigger key does not exist in layout
-- layer reference is missing
-- action type is unknown
-- target selector cannot be resolved for its action family
-- action violates global safety policy
-- firmware capabilities do not support required local behavior
+- unknown `control_id`
+- unknown behavior reference
+- recursive behavior graph
+- unsupported behavior kind
+- ambiguous same-priority binding conflicts
+- overlay target scope that does not exist
+- macro bounds above firmware capability
+- interaction rule that references unavailable controls
 
-Validation should happen before syncing a profile to the device.
-
-## Testing Expectations
-
-Tests should cover:
-
-- layer priority resolution
-- key press/release binding
-- agent symbolic target resolution
-- unavailable agent target behavior
-- macro safety gating
-- profile validation before device sync
+Validation should happen before writing a `ProfilePackage` to a device slot and
+again on device before compiling or installing a `RuntimeTable`.

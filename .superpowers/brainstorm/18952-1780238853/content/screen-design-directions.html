@@ -1,0 +1,77 @@
+<h2>屏幕大方向：约束交互，不牺牲美观</h2>
+<p class="subtitle">三种方向对比。建议选择第三种：策展式模板家族，既有审美表达，也能稳定承载键盘状态和交互。</p>
+
+<div class="cards">
+  <div class="card" data-choice="utility" onclick="toggleSelect(this)">
+    <div class="card-image" style="height:240px;background:#111827;color:#e5e7eb;padding:14px;display:grid;grid-template-rows:28px 1fr 1fr;gap:10px">
+      <div style="display:flex;gap:8px;font-size:12px"><span>CPU</span><span>PROFILE</span><span>RT</span></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div style="border:1px solid #374151;border-radius:6px;padding:10px">CPU 37%</div>
+        <div style="border:1px solid #374151;border-radius:6px;padding:10px">Layer Fn</div>
+      </div>
+      <div style="border:1px solid #374151;border-radius:6px;padding:10px">Agent: working</div>
+    </div>
+    <div class="card-body">
+      <h3>工具仪表盘</h3>
+      <p>实现稳，信息密度高，但容易变成方块堆叠，缺少桌面物件的审美价值。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="ambient" onclick="toggleSelect(this)">
+    <div class="card-image" style="height:240px;background:linear-gradient(145deg,#172554,#701a75 60%,#111827);color:#fff;padding:18px;position:relative;overflow:hidden">
+      <div style="position:absolute;left:18px;top:16px;font-size:13px;opacity:.8">Coding Night</div>
+      <div style="position:absolute;right:18px;top:14px;font-size:26px">22:48</div>
+      <div style="position:absolute;left:18px;bottom:18px;width:70%;font-size:16px">Animated background + minimal status chips</div>
+      <div style="position:absolute;right:22px;bottom:22px;border:1px solid rgba(255,255,255,.45);border-radius:999px;padding:7px 10px;font-size:12px">SCREEN</div>
+    </div>
+    <div class="card-body">
+      <h3>氛围展示屏</h3>
+      <p>好看、个性强，但如果没有信息规则，功能页和紧急状态会被视觉资产吞掉。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="curated" onclick="toggleSelect(this)">
+    <div class="card-image" style="height:240px;background:#0b1020;color:#eef2ff;padding:16px;position:relative;overflow:hidden">
+      <div style="position:absolute;inset:0;background:radial-gradient(circle at 78% 20%,rgba(45,212,191,.22),transparent 30%),linear-gradient(135deg,#0f172a,#111827);"></div>
+      <div style="position:relative;display:flex;align-items:center;gap:8px;font-size:12px;color:#cbd5e1">
+        <span style="border:1px solid #334155;border-radius:999px;padding:5px 8px;background:rgba(15,23,42,.78)">FPS Mode</span>
+        <span style="border:1px solid #334155;border-radius:999px;padding:5px 8px;background:rgba(15,23,42,.78)">PC</span>
+      </div>
+      <div style="position:relative;margin-top:42px;display:grid;grid-template-columns:1.1fr .9fr;gap:12px;align-items:end">
+        <div>
+          <div style="font-size:12px;color:#5eead4">Rapid Trigger</div>
+          <div style="font-size:36px;line-height:1;margin-top:8px">0.15mm</div>
+          <div style="height:5px;background:#1e293b;border-radius:99px;margin-top:18px"><div style="height:5px;width:72%;background:#2dd4bf;border-radius:99px"></div></div>
+        </div>
+        <div style="border:1px solid #334155;border-radius:12px;padding:12px;background:rgba(15,23,42,.72)">
+          <div style="font-size:12px;color:#93c5fd">CPU</div>
+          <div style="font-size:24px;margin-top:8px">37%</div>
+          <div style="font-size:11px;color:#94a3b8;margin-top:4px">Local Core</div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>策展式模板家族</h3>
+      <p>页面有明确用途和交互规则，但视觉由主题、背景、组件样式共同塑造，不局限于方块。</p>
+    </div>
+  </div>
+</div>
+
+<div class="pros-cons">
+  <div class="pros">
+    <h4>推荐方向</h4>
+    <ul>
+      <li>模板约束交互，不约束成方块视觉。</li>
+      <li>每类页面有专属构图语言：状态、调参、Agent、媒体、监控。</li>
+      <li>组件有统一数据契约和紧急覆盖规则。</li>
+    </ul>
+  </div>
+  <div class="cons">
+    <h4>需要避免</h4>
+    <ul>
+      <li>自由拖拽导致固件、编辑器和美术质量同时失控。</li>
+      <li>背景动画抢走状态和告警的可读性。</li>
+      <li>所有页面都用同一套卡片网格。</li>
+    </ul>
+  </div>
+</div>

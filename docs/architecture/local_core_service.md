@@ -1,8 +1,12 @@
 # Local Core Service
 
 The Local Core Service is the authoritative runtime for the software product.
-It owns keyboard configuration, agent control state, device connections,
-approval policy, persistence, and local APIs.
+It owns the PC-side profile library, workspace presets, agent control state,
+device connections, approval policy, persistence, and local APIs.
+
+The service does not replace the keyboard's local `DeviceProfileStore`.
+Committed device slots and `DeviceSettings` remain valid without the PC and
+must be read back/reconciled when a device reconnects.
 
 The browser UI used during development and the final desktop UI are clients of
 the Local Core Service. They do not own product state.
@@ -75,7 +79,7 @@ The Local Core Service owns:
 - process lifecycle for Claude Code adapters
 - parked Codex compatibility lifecycle, when that provider is enabled
 - agent provider, instance, session, and run registries
-- keyboard profile and configuration state
+- PC-side device profile library, workspace presets, and device slot mirrors
 - device discovery and device transport sessions
 - profile-to-device synchronization
 - focus, notification, and approval policy state
@@ -94,9 +98,9 @@ It does not own:
 ## Authority Model
 
 ```text
-Local Core Service: source of truth
+Local Core Service: source of truth for software product state
 UI clients: views and command surfaces
-Keyboard devices: limited views and physical control surfaces
+Keyboard devices: source of truth for committed local slots while disconnected
 Agent adapters: provider-specific event and command bridges
 Device transports: byte/frame transport bridges
 ```
@@ -104,6 +108,11 @@ Device transports: byte/frame transport bridges
 All mutating operations enter the service as commands. All state changes leave
 the service as events. UI clients and devices should resync from snapshots after
 connect or reconnect.
+
+For device configuration, "snapshot" means a synchronized view of explicit
+resources such as `DeviceSettings`, `ProfilePackage` slots, `ScreenConfig`,
+`LightingConfig`, and diagnostics. It is not a single monolithic device config
+object owned only by Local Core.
 
 ## Internal Modules
 
@@ -130,13 +139,16 @@ src/agents/
   parked Codex compatibility adapter
 
 src/keyboard/
-  profiles
+  device profile library
+  ProfilePackage import/export
+  workspace presets
   physical layouts
-  keymap, layers, actions
+  keymap, binding scopes, behaviors
   macros
   magnetic switch settings
-  screen layouts
-  agent bindings
+  screen configs
+  lighting configs
+  agent binding set references
 
 src/devices/
   device manager

@@ -7,9 +7,9 @@ many relationships for long-term JSON-only storage.
 Current V1 status:
 
 - SQLite app store and migrations are implemented.
-- Repositories cover profiles, known devices, agent instance presets, sessions,
-  runs, permission history, approval policies, UI preferences, and workspace
-  bindings.
+- Repositories cover PC-side device profiles, workspace presets, known devices,
+  agent instance presets, sessions, runs, permission history, approval policies,
+  UI preferences, and workspace bindings.
 - JSON import/export remains available for interchange and diagnostics.
 - Legacy session JSON is not the product state authority.
 
@@ -36,13 +36,15 @@ Secrets should use the OS secret store rather than plaintext config files.
 
 Persist in SQLite:
 
-- profiles
+- PC-side device profile library
+- workspace presets
 - keymaps
-- layers
+- binding scopes
 - macros
 - magnetic switch settings
-- screen layouts
-- agent bindings
+- screen configs
+- lighting configs
+- agent binding sets
 - known devices
 - agent instance presets
 - workspace bindings
@@ -117,11 +119,14 @@ respect privacy and retention settings.
 
 ## Profile Storage
 
-Profiles are stored in normalized or semi-structured SQLite tables, then
-exported/imported as JSON.
+PC-side device profiles are stored in normalized or semi-structured SQLite
+tables, then exported/imported as JSON or packaged as `ProfilePackage` when
+written to a device slot.
 
-The exported profile schema should be stable and versioned. The internal DB
-schema may evolve with migrations.
+The exported `DeviceProfile` schema should be stable and versioned. The
+internal DB schema may evolve with migrations. Software-side
+`WorkspacePreset` records are separate and may reference device profiles,
+screen configs, lighting configs, and agent binding sets.
 
 ## Sessions and Runs
 
@@ -214,17 +219,22 @@ create new IDs or ask for explicit replacement.
 
 ## Device-Side Persistence
 
-The keyboard may persist only the offline subset needed to remain useful without
-the PC:
+The keyboard persists the resources needed to remain useful without the PC:
 
-- active profile ID
-- compiled keymap/layer data
-- magnetic config
-- safe local macros
-- basic screen fallback settings
-- last focus hint
+- `DeviceSettings`
+- five user `ProfilePackage` slots plus the hidden factory-default slot
+- current active slot runtime fact in `DeviceState`
+- compiled `RuntimeTable` cache when valid
+- `ScreenConfig` and `LightingConfig`, once those resources are defined
+- `CalibrationData`
+- CH585 wireless/pairing state owned by CH585 or mirrored through H417 policy
 
-The device is not the source of truth for full profile or agent state.
+The device is the source of truth for its committed local profile slots while
+disconnected. Local Core stores the PC-side library and mirrors device slots
+after synchronization.
+
+The device is not the source of truth for software-only workspace presets,
+agent bindings, long-lived agent state, or provider session history.
 
 ## Testing Expectations
 

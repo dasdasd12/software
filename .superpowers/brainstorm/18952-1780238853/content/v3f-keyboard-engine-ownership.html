@@ -1,0 +1,52 @@
+<h2>硬件分工更新：V3F 管完整键盘扫描与实时键盘引擎</h2>
+<p class="subtitle">V3F 输出语义化键盘事件，V5F 负责屏幕、配置、通信、资源和较高层产品状态。</p>
+
+<div class="split">
+  <div class="mockup">
+    <div class="mockup-header">V3F: Real-time Keyboard Engine</div>
+    <div class="mockup-body">
+      <div class="options">
+        <div class="option">
+          <div class="letter">1</div>
+          <div class="content"><h3>采样</h3><p>ADC/DMA、MUX、滤波、校准、轴值计算。</p></div>
+        </div>
+        <div class="option">
+          <div class="letter">2</div>
+          <div class="content"><h3>触发</h3><p>触发点、释放点、RT、DKS 阶段、SOCD/SpeedTap 判定。</p></div>
+        </div>
+        <div class="option">
+          <div class="letter">3</div>
+          <div class="content"><h3>键盘语义</h3><p>层、Tap/Hold、Mod-Tap、组合键、基础宏调度。</p></div>
+        </div>
+        <div class="option">
+          <div class="letter">4</div>
+          <div class="content"><h3>事件上报</h3><p>向 V5F 发送 HID-ready key events、状态变更和调试 telemetry。</p></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="mockup">
+    <div class="mockup-header">V5F: Product/UI/Connectivity Host</div>
+    <div class="mockup-body">
+      <div class="options">
+        <div class="option">
+          <div class="letter">A</div>
+          <div class="content"><h3>输出与通信</h3><p>USB/BLE/2.4G/HID、Local Core 同步、诊断。</p></div>
+        </div>
+        <div class="option">
+          <div class="letter">B</div>
+          <div class="content"><h3>屏幕系统</h3><p>LVGL、页面模板、媒体资源、小组件、Agent 状态。</p></div>
+        </div>
+        <div class="option">
+          <div class="letter">C</div>
+          <div class="content"><h3>配置管理</h3><p>Profile slot、资源包、版本、回滚、写入事务。</p></div>
+        </div>
+        <div class="option">
+          <div class="letter">D</div>
+          <div class="content"><h3>协调</h3><p>把编译后的键盘运行配置下发给 V3F，并接收事件。</p></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

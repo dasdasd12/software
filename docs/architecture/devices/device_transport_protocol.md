@@ -17,9 +17,9 @@ USB wired:
   private radio protocol on keyboard side
   USB HID + vendor control channel on PC side
 
-Bluetooth:
-  BLE HID for typing
-  custom GATT service for config/control
+Bluetooth / wireless through CH585:
+  CH585 owns wireless host/pairing/radio state
+  wireless report/control details are device capability dependent
 ```
 
 WebSocket remains a local UI/test transport:
@@ -64,9 +64,11 @@ Current V2 status:
 - Virtual input ingress is implemented for simulator/device test paths.
 - Capability negotiation is implemented for the simulator path.
 - Slot mapping and generation mismatch handling are implemented.
-- Device snapshots are projected from Local Core state.
-- Device config sync validates capabilities, chunks compiled profile payloads,
-  and records simulator commit/reject results.
+- Device snapshots combine Local Core projected state with device-readback
+  resources such as `DeviceSettings`, `ProfilePackage` slot metadata, and
+  diagnostics.
+- Device profile sync validates capabilities, writes `ProfilePackage` payloads
+  to explicit slots, and records simulator/device commit or reject results.
 - The temporary local hotkey harness provides external real test input by
   sending Local API virtual input after identifying as `desktop-ui` with client
   id `test-harness`. It is intentionally separate from this product transport
@@ -152,7 +154,7 @@ screen focus
 notification
 permission request
 permission response
-profile/config sync
+resource sync
 diagnostics
 heartbeat
 error
@@ -171,9 +173,11 @@ SCREEN_FOCUS_SET
 NOTIFICATION_PUSH
 PERMISSION_REQUEST_PUSH
 PERMISSION_RESPONSE_CMD
-PROFILE_SYNC_BEGIN
-PROFILE_SYNC_CHUNK
-PROFILE_SYNC_END
+PROFILE_PACKAGE_WRITE_BEGIN
+PROFILE_PACKAGE_WRITE_CHUNK
+PROFILE_PACKAGE_WRITE_COMMIT
+DEVICE_SETTINGS_READ
+DEVICE_SETTINGS_WRITE
 DIAGNOSTIC_LOG
 HEARTBEAT
 ERROR_RESP
@@ -184,34 +188,39 @@ report sizes are measured.
 
 ## Snapshot and Resync
 
-Devices reconnect by receiving a projected device snapshot:
+Devices reconnect by exchanging a projected software snapshot plus device
+resource readback:
 
 1. transport opens
 2. capabilities exchanged
 3. slot map snapshot sent
-4. active profile summary sent
+4. device slot metadata and active profile summary read/sent
 5. screen focus sent
 6. pending notification/permission summary sent
 7. incremental events resume
 
-The device snapshot is a projection of core state, not a separate source of
-truth.
+Software-projected agent/screen state is a projection of Local Core state.
+Committed `ProfilePackage` slots and `DeviceSettings` are device resources and
+must be read back or reconciled rather than assumed from the previous PC cache.
 
-## Config Sync
+## Device Resource Sync
 
-Profile sync should be explicit and versioned.
+ProfilePackage sync should be explicit and versioned.
 
 ```text
-PC Core profile
+PC-side DeviceProfile
   -> validate against device capabilities
-  -> compile to device config subset
-  -> send in chunks
+  -> encode ProfilePackage
+  -> write to explicit device slot in chunks
   -> device validates and stages
   -> device commits or rejects
 ```
 
-The device may store the safe offline subset of a profile, but the Local Core
-Service remains the primary source of configuration truth.
+`DeviceSettings`, `ScreenConfig`, `LightingConfig`, and `CalibrationData` are
+separate resources. Do not fold them into a `ProfilePackage`.
+
+The device remains functional without Local Core. Local Core is the PC-side
+management plane and library owner; it is not in the realtime input chain.
 
 ## Transport Priority
 
