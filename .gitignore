@@ -4,11 +4,26 @@ __pycache__/
 *$py.class
 *.so
 .env
+.env.*
 .venv/
+.venv*/
 venv/
+env/
 .local-bin/
 
-# C / 嵌入式编译产物
+# Test and coverage artifacts
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage/
+htmlcov/
+pytestdebug.log
+junit*.xml
+test-results/
+
+# C / embedded build artifacts
 *.o
 *.obj
 *.elf
@@ -34,16 +49,25 @@ Release/
 Thumbs.db
 desktop.ini
 
-# Logs / Temp
+# Logs / temp / runtime data
 *.log
+*.err
+*.err.log
+*.pid
+logs/
+tmp/
 *.tmp
 *.bak
 *.swp
 *~
 data/
 sessions/
+.superpowers/
 .worktrees/
 
-# Docs（可选，如果你不想把大二进制文件进仓库）
+# Deprecated local documentation
+docs/
+
+# Docs, optional if large binary documents should stay out of git.
 # *.pdf
 # *.docx
