@@ -19,16 +19,17 @@ Local Core Service MVP 负责维护会话、启动或恢复 Codex/Claude 进程�
 ## 仓库结构
 
 ```text
+config/
+  factory_default_profile.json  固件内置出厂 Profile 的源 JSON
+scripts/
+  compile-factory-akpk.py       生成固件内置出厂 Profile 镜像
+  upload-profile.py             编译、上传和激活运行时 Profile
+  monitor-bridge.ps1            本地桥接服务和依赖健康检查
+  local-api-smoke.py            本地 Local Core WebSocket API smoke 脚本
 src/
   bridge/          Local Core Service MVP 和本地 WebSocket API
   devices/         设备传输 frame/transport 抽象与模拟 transport
   device/          CH32H417 设备端 AI Agent 协议与会话管理模块
-docs/
-  pre_design_report/  前期硬件、网络、产品调研资料
-  user_manual/        芯片、屏幕等器件资料
-scripts/
-  monitor-bridge.ps1  本地桥接服务和依赖健康检查
-  local-api-smoke.py  本地 Local Core WebSocket API smoke 脚本
 skills/
   wch-mrs-automation/ WCH MounRiver Studio 自动化辅助技能
 ```
@@ -77,6 +78,51 @@ python server.py --config config.yaml
 
 `src/device/agent_launcher.c` 提供键盘快捷键入口，用于切换当前 Agent、启动或恢复任务、确认权限和取消任务。目前 UI、LittleFS 持久化和真实权限 request_id 仍是待接入项。
 
+## 键盘 Profile 更新
+
+运行时 Profile 通过 H417 的 USBFS CDC 控制通道更新。先烧录硬件仓库构建的 H417 V1.0 主控固件，并确认 PC 已枚举出对应的 CDC 端口；键盘 HID 能工作不代表 CDC 端口一定选对。
+
+在软件仓库根目录执行：
+
+```powershell
+pip install -r src\bridge\requirements.txt
+$PORT = 'COM5'                    # 替换为 H417 USBFS CDC 的实际端口
+python scripts\upload-profile.py --port $PORT --info
+```
+
+只有命令返回 `device: PONG 1` 后再上传。`active=0` 表示当前使用固件内置的出厂 Profile，`slots` 的三位状态分别对应运行时槽位 1、2、3。
+
+按以下顺序创建和验证一个测试 Profile：
+
+```powershell
+New-Item -ItemType Directory -Force build | Out-Null
+Copy-Item config\factory_default_profile.json build\my_profile.json
+# 编辑 build\my_profile.json 中需要变更的 keymap 项。
+
+# 先写入槽位 1，不改变当前键盘行为。
+python scripts\upload-profile.py --port $PORT --slot 1 --chunk 64 --no-activate build\my_profile.json
+python scripts\upload-profile.py --port $PORT --info
+
+# 确认 slots 的第一位为 1 后，再切换到槽位 1。
+python scripts\upload-profile.py --port $PORT --activate 1
+python scripts\upload-profile.py --port $PORT --info
+```
+
+激活后立即验证改动过的键位，再断电重启并重复验证；最后一次 `--info` 应仍显示 `active=1`。需要返回出厂配置时执行：
+
+```powershell
+python scripts\upload-profile.py --port $PORT --factory
+```
+
+运行时上传只改动 Profile 槽位，不会改写固件内置的出厂回退配置。要更新出厂默认值，编辑 `config\factory_default_profile.json`，再执行：
+
+```powershell
+python scripts\compile-factory-akpk.py
+make -C ..\hardware\firmware\h417 v3f_keyboard
+```
+
+随后烧录 `..\hardware\firmware\h417\build\V3F_keyboard\h417_V3F_keyboard.bin`。完整的三 MCU 构建与烧录入口见 [hardware README](../hardware/README.md)。
+
 ## 当前状态
 
 已完成：
@@ -124,4 +170,4 @@ python scripts\local-api-smoke.py --scenario real-agent --agent claude --context
 
 ## 开发节奏
 
-近期开发计划见 [docs/development_plan.md](docs/development_plan.md)。当前优先级是先让 Local Core Service 稳定、可测、只监听本地，再推进 DeviceTransport、设备协议投影和 UI/LVGL 集成。
+项目架构、硬件和发布文档以 [Docs-For-AI-Keyboard](https://github.com/dasdasd12/Docs-For-AI-Keyboard) 为准。当前优先级是先让 Local Core Service 稳定、可测、只监听本地，再推进 DeviceTransport、设备协议投影和 UI/LVGL 集成。
