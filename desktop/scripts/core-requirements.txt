@@ -1,0 +1,2 @@
+# Runtime dependency used by device.list_ports and the USB CDC transport.
+pyserial==3.5

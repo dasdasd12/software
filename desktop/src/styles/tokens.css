@@ -1,0 +1,71 @@
+@layer reset, tokens, shell, components, keyboard, pages, utilities;
+
+@layer reset {
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { width: 100%; min-height: 100%; margin: 0; }
+  body { overflow: hidden; }
+  button, input, select { font: inherit; }
+  button, a { -webkit-tap-highlight-color: transparent; }
+  button { border: 0; }
+  a { color: inherit; text-decoration: none; }
+  h1, h2, h3, h4, p { margin: 0; }
+  svg { display: block; }
+}
+
+@layer tokens {
+  :root {
+    color-scheme: light;
+    --canvas: #f2f4f7;
+    --canvas-deep: #e9edf2;
+    --paper: #ffffff;
+    --paper-soft: #f8f9fb;
+    --ink: #171a22;
+    --ink-soft: #3d4450;
+    --muted: #66717f;
+    --muted-2: #858f9c;
+    --line: #dde2e9;
+    --line-strong: #cbd2dc;
+    --accent: #4e68f6;
+    --accent-strong: #3f56d9;
+    --accent-soft: #edf0ff;
+    --coral: #ff715b;
+    --coral-soft: #fff0ed;
+    --mint: #46c6a0;
+    --mint-soft: #e8f8f2;
+    --amber: #e9a94b;
+    --amber-soft: #fff7e7;
+    --screen: #111827;
+    --screen-soft: #202a3c;
+    --shadow-soft: 0 12px 32px rgba(39, 48, 65, .08);
+    --shadow-float: 0 28px 70px rgba(37, 45, 62, .16);
+    --radius-xs: 6px;
+    --radius-sm: 10px;
+    --radius-md: 16px;
+    --radius-lg: 24px;
+    --sidebar: 184px;
+    --topbar: 68px;
+    --inspector: 352px;
+    --font-display: Bahnschrift, "Arial Narrow", "Microsoft YaHei UI", sans-serif;
+    --font-body: "Microsoft YaHei UI", "PingFang SC", "Segoe UI", sans-serif;
+    --font-utility: Consolas, "SFMono-Regular", monospace;
+  }
+
+  html {
+    background: var(--canvas);
+    font-family: var(--font-body);
+    color: var(--ink);
+    font-size: 14px;
+    font-synthesis: none;
+    text-rendering: geometricPrecision;
+  }
+
+  html[data-capture="1"] *,
+  html[data-capture="1"] *::before,
+  html[data-capture="1"] *::after {
+    animation: none !important;
+    transition: none !important;
+    caret-color: transparent !important;
+  }
+
+  ::selection { background: rgba(78, 104, 246, .2); }
+}
