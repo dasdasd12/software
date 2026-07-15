@@ -1,0 +1,9 @@
+# Build-only dependency. Pinning this keeps release artifacts reproducible.
+pyinstaller==6.16.0
+
+# Runtime dependency shared with development Python.
+-r core-requirements.txt
+
+# Some existing device modules keep a Python <3.8 Protocol fallback import.
+# A real package prevents PyInstaller from aliasing setuptools' vendored copy.
+typing_extensions==4.15.0
