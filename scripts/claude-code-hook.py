@@ -18,6 +18,59 @@ def now_ts() -> float:
     return time.time()
 
 
+def _unicode_safe(value: str) -> str:
+    """Replace lone surrogate code points before JSON/WebSocket encoding."""
+    return value.encode("utf-8", errors="replace").decode("utf-8")
+
+
+def _sanitize_json_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return _unicode_safe(value)
+    if isinstance(value, dict):
+        return {
+            _unicode_safe(key) if isinstance(key, str) else key: _sanitize_json_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_sanitize_json_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_sanitize_json_value(item) for item in value]
+    return value
+
+
+def _read_stdin_utf8() -> str:
+    """Claude Code writes hook JSON to stdin as UTF-8, including on Windows."""
+    binary_stream = getattr(sys.stdin, "buffer", None)
+    if binary_stream is not None:
+        raw = binary_stream.read()
+        if isinstance(raw, bytes):
+            return raw.decode("utf-8-sig", errors="replace")
+    raw = sys.stdin.read()
+    if isinstance(raw, bytes):
+        return raw.decode("utf-8-sig", errors="replace")
+    return _unicode_safe(raw)
+
+
+def _json_for_wire(payload: Any) -> str:
+    # ASCII-only JSON keeps Windows console code pages out of the WebSocket path.
+    return json.dumps(_sanitize_json_value(payload), ensure_ascii=True)
+
+
+def _write_json_stdout(payload: Dict[str, Any]) -> None:
+    encoded = _json_for_wire(payload)
+    binary_stream = getattr(sys.stdout, "buffer", None)
+    if binary_stream is not None:
+        binary_stream.write(encoded.encode("ascii") + b"\n")
+        binary_stream.flush()
+        return
+    print(encoded, flush=True)
+
+
+def _report_nonblocking_error(message: str) -> None:
+    safe_message = _unicode_safe(message)
+    print(f"AI keyboard hook bridge unavailable; using Claude's native prompt: {safe_message}", file=sys.stderr)
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Forward Claude Code hook events to the Local API.")
     parser.add_argument("--api-url", default=DEFAULT_API_URL)
@@ -43,7 +96,7 @@ def build_hook_event(args, hook_input: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "type": "claude_hook_event",
         "session_id": args.session_id,
-        "hook": hook_input,
+        "hook": _sanitize_json_value(hook_input),
         "timestamp": now_ts(),
     }
 
@@ -68,47 +121,11 @@ def build_hook_delivered(
     return payload
 
 
-def permission_denied_response(message: str) -> Dict[str, Any]:
-    return {
-        "hookSpecificOutput": {
-            "hookEventName": "PermissionRequest",
-            "decision": {
-                "behavior": "deny",
-                "message": message,
-                "interrupt": True,
-            },
-        }
-    }
-
-
-def pretooluse_denied_response(message: str) -> Dict[str, Any]:
-    return {
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": message,
-        }
-    }
-
-
-def is_controlled_pretooluse_input(hook_input: Dict[str, Any]) -> bool:
-    return (
-        hook_input.get("hook_event_name") == "PreToolUse"
-        and hook_input.get("tool_name") in {"AskUserQuestion", "ExitPlanMode"}
-    )
-
-
-def _parse_failure_response(raw: str, message: str) -> Dict[str, Any]:
-    if any(marker in raw for marker in ("PreToolUse", "AskUserQuestion", "ExitPlanMode")):
-        return pretooluse_denied_response(message)
-    return permission_denied_response(message)
-
-
 def _load_hook_input(raw: str) -> Dict[str, Any]:
-    payload = json.loads(raw or "{}")
+    payload = json.loads(_unicode_safe(raw) or "{}")
     if not isinstance(payload, dict):
         raise ValueError("hook input must be a JSON object")
-    return payload
+    return _sanitize_json_value(payload)
 
 
 async def run_hook(args, hook_input: Dict[str, Any]) -> Dict[str, Any]:
@@ -116,7 +133,7 @@ async def run_hook(args, hook_input: Dict[str, Any]) -> Dict[str, Any]:
 
     token = os.environ.get(CLAUDE_HOOK_TOKEN_ENV, "")
     async with websockets.connect(args.api_url) as ws:
-        await ws.send(json.dumps(build_hello(args, token), ensure_ascii=False))
+        await ws.send(_json_for_wire(build_hello(args, token)))
         while True:
             hello_ack = json.loads(await asyncio.wait_for(ws.recv(), timeout=args.timeout))
             if hello_ack.get("type") == "hello_ack":
@@ -124,7 +141,7 @@ async def run_hook(args, hook_input: Dict[str, Any]) -> Dict[str, Any]:
             if hello_ack.get("type") == "error":
                 raise RuntimeError(hello_ack.get("message") or hello_ack.get("code") or "hello failed")
 
-        await ws.send(json.dumps(build_hook_event(args, hook_input), ensure_ascii=False))
+        await ws.send(_json_for_wire(build_hook_event(args, hook_input)))
         while True:
             payload = json.loads(await asyncio.wait_for(ws.recv(), timeout=args.timeout))
             if payload.get("type") == "claude_hook_result":
@@ -149,36 +166,35 @@ async def mark_hook_delivered(
 
     token = os.environ.get(CLAUDE_HOOK_TOKEN_ENV, "")
     async with websockets.connect(args.api_url) as ws:
-        await ws.send(json.dumps(build_hello(args, token), ensure_ascii=False))
+        await ws.send(_json_for_wire(build_hello(args, token)))
         while True:
             hello_ack = json.loads(await asyncio.wait_for(ws.recv(), timeout=args.timeout))
             if hello_ack.get("type") == "hello_ack":
                 break
             if hello_ack.get("type") == "error":
                 raise RuntimeError(hello_ack.get("message") or hello_ack.get("code") or "hello failed")
-        await ws.send(json.dumps(
-            build_hook_delivered(args, request_id, hook_event_name, response_written, error),
-            ensure_ascii=False,
+        await ws.send(_json_for_wire(
+            build_hook_delivered(args, request_id, hook_event_name, response_written, error)
         ))
 
 
 def main(argv=None) -> int:
     args = parse_args(argv)
-    raw_input = sys.stdin.read()
     try:
+        raw_input = _read_stdin_utf8()
         hook_input = _load_hook_input(raw_input)
     except Exception as exc:
-        print(json.dumps(_parse_failure_response(raw_input, f"Invalid Claude hook input: {exc}")), flush=True)
-        return 0
+        _report_nonblocking_error(f"Invalid Claude hook input: {exc}")
+        return 1
 
     try:
         result = asyncio.run(run_hook(args, hook_input))
     except Exception as exc:
-        if hook_input.get("hook_event_name") == "PermissionRequest":
-            print(json.dumps(permission_denied_response(f"Local API hook bridge failed closed: {exc}")), flush=True)
-        elif is_controlled_pretooluse_input(hook_input):
-            print(json.dumps(pretooluse_denied_response(f"Local API hook bridge failed closed: {exc}")), flush=True)
-        return 0
+        # Claude treats non-2 hook failures as non-blocking. Returning no
+        # decision here preserves the native approval prompt instead of
+        # fabricating a user denial.
+        _report_nonblocking_error(str(exc))
+        return 1
     if isinstance(result, dict) and (
         "hook_response" in result or "request_id" in result or "hook_event_name" in result
     ):
@@ -190,10 +206,8 @@ def main(argv=None) -> int:
         request_id = None
         hook_event_name = None
 
-    if not response and is_controlled_pretooluse_input(hook_input):
-        response = pretooluse_denied_response("Local API hook bridge returned no PreToolUse decision.")
     if response:
-        print(json.dumps(response, ensure_ascii=False), flush=True)
+        _write_json_stdout(response)
     if isinstance(request_id, str) and request_id and isinstance(hook_event_name, str) and hook_event_name:
         try:
             asyncio.run(mark_hook_delivered(

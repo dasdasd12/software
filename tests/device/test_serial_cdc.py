@@ -28,6 +28,7 @@ class FakeKeyboardSerial:
         self.expected_crc = 0
         self.upload_slot = None
         self.slots: dict[int, bytes] = {}
+        self.invalid_slots: set[int] = set()
         self.active_slot = 0
         self.fail_next_data = False
 
@@ -56,7 +57,7 @@ class FakeKeyboardSerial:
             self._reply("OK PONG 1")
         elif cmd == "INFO":
             slots = "".join(
-                "1" if s in self.slots else "0" for s in (1, 2, 3)
+                "0" if s in self.invalid_slots else "1" for s in (1, 2, 3)
             )
             self._reply(
                 f"OK INFO active={self.active_slot} id16=1abd gen=1 "
@@ -86,10 +87,11 @@ class FakeKeyboardSerial:
                 self._reply("ERR 6 crc32c")
                 return
             self.slots[self.upload_slot] = bytes(self.staging)
+            self.invalid_slots.discard(self.upload_slot)
             self._reply(f"OK COMMIT {self.upload_slot}")
         elif cmd == "ACTIVATE":
             slot = int(parts[1], 16)
-            if slot != 0 and slot not in self.slots:
+            if slot in self.invalid_slots:
                 self._reply("ERR 7 install")
                 return
             self.active_slot = slot
@@ -131,14 +133,14 @@ def test_upload_streams_package_byte_exact():
 
 def test_info_parsing():
     fake = FakeKeyboardSerial()
-    fake.slots[1] = b"x"
+    fake.invalid_slots.add(2)
     fake.active_slot = 1
     with _client(fake) as client:
         info = client.info()
     assert info.active_slot == 1
     assert info.profile_id16 == 0x1ABD
     assert info.generation == 1
-    assert info.slot_valid == (True, False, False)
+    assert info.slot_valid == (True, False, True)
 
 
 def test_device_error_is_raised():
@@ -152,8 +154,18 @@ def test_device_error_is_raised():
     assert err.value.code == 5
 
 
-def test_activate_missing_slot_errors():
+def test_activate_unwritten_slot_uses_default():
     fake = FakeKeyboardSerial()
+    with _client(fake) as client:
+        reply = client.activate(3)
+    assert reply.startswith("ACTIVATE 3")
+    assert fake.active_slot == 3
+    assert 3 not in fake.slots
+
+
+def test_activate_invalid_slot_errors():
+    fake = FakeKeyboardSerial()
+    fake.invalid_slots.add(3)
     with _client(fake) as client:
         with pytest.raises(DeviceError):
             client.activate(3)

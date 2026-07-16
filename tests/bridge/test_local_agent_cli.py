@@ -439,6 +439,8 @@ def test_cli_builds_native_claude_hook_settings(monkeypatch, tmpdir):
     assert "--session-id" in data["hooks"]["PermissionRequest"][0]["hooks"][0]["args"]
     assert "--client-kind" in data["hooks"]["PermissionRequest"][0]["hooks"][0]["args"]
     assert "agent-hook" in data["hooks"]["PermissionRequest"][0]["hooks"][0]["args"]
+    assert data["env"]["PYTHONIOENCODING"] == "utf-8"
+    assert data["env"]["PYTHONUTF8"] == "1"
     assert "PreToolUse" in data["hooks"]
     assert data["hooks"]["PreToolUse"][0]["matcher"] == "AskUserQuestion|ExitPlanMode"
     assert data["env"]["ANTHROPIC_AUTH_TOKEN"] == ""

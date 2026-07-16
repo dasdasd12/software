@@ -291,7 +291,11 @@ def build_claude_hook_settings(
     async_handler = dict(handler)
     async_handler["async"] = True
     async_handler["timeout"] = 30
-    settings_env = {"ANTHROPIC_AUTH_TOKEN": ""}
+    settings_env = {
+        "ANTHROPIC_AUTH_TOKEN": "",
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONUTF8": "1",
+    }
     for key in NATIVE_CLAUDE_SESSION_ENV_VARS:
         value = os.environ.get(key)
         if value:

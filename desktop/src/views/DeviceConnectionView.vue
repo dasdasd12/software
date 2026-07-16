@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
+import { useUnsavedChangesGuard } from "../composables/useUnsavedChangesGuard";
 import { useDeviceStore } from "../stores/device";
 import { useProfileStore } from "../stores/profile";
 
@@ -75,6 +76,14 @@ watch(
   { deep: true },
 );
 
+watch(
+  () => profile.sourceDocument.identity.profile_id,
+  () => {
+    discardPolicyForm();
+    policyStatus.value = "已切换 Profile；当前值来自新的 Profile 草稿";
+  },
+);
+
 async function refreshPorts(): Promise<void> {
   await device.refreshPorts();
 }
@@ -125,6 +134,12 @@ function savePolicyForm(): void {
   profile.compileMessage = "输入策略已保存到 Profile 草稿，等待重新验证";
   policyStatus.value = "字段已写入 Profile 草稿；当前固件不会应用这些参数";
 }
+
+useUnsavedChangesGuard(
+  () => policyFormDirty.value,
+  "设备与连接页面还有尚未保存到 Profile 的输入策略修改。",
+  discardPolicyForm,
+);
 
 onMounted(() => void refreshPorts());
 </script>
@@ -233,12 +248,12 @@ onMounted(() => void refreshPorts());
                   :class="{ active: device.targetUserSlot === slot }"
                   @click="device.targetUserSlot = slot"
                 >
-                  <span><b>用户 Slot {{ slot }}</b><small>{{ device.slotValid[slot - 1] ? "设备中已有 Profile" : "当前为空" }}</small></span>
+                  <span><b>用户 Slot {{ slot }}</b><small>{{ device.slotValid[slot - 1] ? "可用；空槽自动继承 Default" : "配置无效，需重新写入" }}</small></span>
                   <i class="radio" :class="{ active: device.targetUserSlot === slot }"></i>
                 </button>
               </div>
             </section>
-            <section class="inspector-section"><div class="notice">Factory Slot 0 只读。写入按钮始终以这里选择的用户槽为目标。</div></section>
+            <section class="inspector-section"><div class="notice">Factory Slot 0 只读。用户槽未写入时自动使用 Default；写入按钮始终以这里选择的用户槽为目标。</div></section>
           </template>
 
           <template v-else-if="inspectorTab === 'input'">

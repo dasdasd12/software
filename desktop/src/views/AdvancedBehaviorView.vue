@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { onBeforeRouteLeave } from "vue-router";
 import KeyboardBoard from "../components/keyboard/KeyboardBoard.vue";
 import { useUnsavedChangesGuard } from "../composables/useUnsavedChangesGuard";
@@ -227,6 +227,7 @@ onBeforeRouteLeave(() => confirmDiscardBuffer());
 useUnsavedChangesGuard(
   () => localDirty.value,
   "高级行为编辑器中还有尚未保存到 Profile 草稿的修改。",
+  discardBuffer,
 );
 
 function countStringReferences(value: unknown, target: string): number {
@@ -445,6 +446,11 @@ function discardBuffer(): void {
     loadSocdMembers([...socdSelectedIds.value]);
   }
 }
+
+watch(
+  () => profile.sourceDocument.identity.profile_id,
+  () => discardBuffer(),
+);
 
 function saveDks(): void {
   const controlId = dksSelectedIds.value[0];

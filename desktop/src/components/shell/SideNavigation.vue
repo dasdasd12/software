@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { useRoute } from "vue-router";
+import { useAiMonitorStore } from "../../stores/aiMonitor";
 import { useDeviceStore } from "../../stores/device";
 
 interface NavItem {
@@ -12,9 +13,10 @@ interface NavItem {
 }
 
 const route = useRoute();
+const ai = useAiMonitorStore();
 const device = useDeviceStore();
 
-const sections: Array<{ label: string; items: NavItem[] }> = [
+const sections = computed<Array<{ label: string; items: NavItem[] }>>(() => [
   {
     label: "键盘行为",
     items: [
@@ -28,7 +30,12 @@ const sections: Array<{ label: string; items: NavItem[] }> = [
     items: [
       { label: "灯效", route: "/lighting", glyph: "glyph-light" },
       { label: "屏显", route: "/display", glyph: "glyph-screen" },
-      { label: "AI 控制", route: "", glyph: "glyph-ai", badge: "暂缓", disabled: true },
+      {
+        label: "AI 控制",
+        route: "/ai",
+        glyph: "glyph-ai",
+        badge: ai.permissions.length ? String(ai.permissions.length) : ai.connected ? "LIVE" : undefined,
+      },
     ],
   },
   {
@@ -39,7 +46,7 @@ const sections: Array<{ label: string; items: NavItem[] }> = [
       { label: "设备与连接", route: "/device", glyph: "glyph-device" },
     ],
   },
-];
+]);
 
 const deviceMeta = computed(() => {
   if (!device.connected) return "尚未建立 USB 连接";
