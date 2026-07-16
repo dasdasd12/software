@@ -4,7 +4,7 @@ Talks the line protocol implemented by the H417 V3F ``pc_link`` module
 (hardware/firmware/h417/v3f/applications/pc_link.c):
 
     AK PING / AK INFO / AK BEGIN / AK DATA / AK COMMIT / AK ABORT /
-    AK ACTIVATE / AK FACTORY
+    AK ACTIVATE / AK FACTORY / AK APPROVAL SHOW / AK APPROVAL CLEAR
 
 pyserial is imported lazily so the module stays importable (and
 testable with an injected fake) without the dependency installed.
@@ -12,11 +12,20 @@ testable with an injected fake) without the dependency installed.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
-from typing import Any, Callable
+import string
 import time
+from typing import Any, Callable, Iterable, Sequence
 
 from keyboard.akpk import crc32c
+
+
+DEFAULT_WCH_USB_VID = 0x1A86
+DEFAULT_H417_USBFS_CDC_PIDS = (0xFE17, 0xFE07)
+APPROVAL_TOOL_MAX_BYTES = 16
+APPROVAL_SUMMARY_MAX_BYTES = 120
+APPROVAL_COMMAND_MAX_BYTES = 320
 
 
 class SerialCdcError(RuntimeError):
@@ -165,3 +174,187 @@ class AkpkSerialClient:
 
     def abort(self) -> None:
         self._request("AK ABORT")
+
+    def approval_show(
+        self,
+        tag8hex: str,
+        risk: int,
+        tool: bytes,
+        summary: bytes,
+    ) -> str:
+        tag = _approval_tag(tag8hex)
+        risk_value = _approval_risk(risk)
+        tool_value = _approval_field(
+            tool,
+            APPROVAL_TOOL_MAX_BYTES,
+            "tool",
+        )
+        summary_value = _approval_field(
+            summary,
+            APPROVAL_SUMMARY_MAX_BYTES,
+            "summary",
+        )
+        command = (
+            "AK APPROVAL SHOW "
+            f"{tag} {risk_value:x} "
+            f"{_hex_or_dash(tool_value)} {_hex_or_dash(summary_value)}"
+        )
+        if len(command.encode("ascii")) + 1 >= APPROVAL_COMMAND_MAX_BYTES:
+            raise SerialCdcError(
+                "approval command must be shorter than 320 bytes"
+            )
+        return self._request(command)
+
+    def approval_clear(self, tag8hex: str) -> str:
+        return self._request(f"AK APPROVAL CLEAR {_approval_tag(tag8hex)}")
+
+
+class ApprovalCdcSender:
+    """Open, send one approval command, and close the H417 USBFS CDC port."""
+
+    def __init__(
+        self,
+        *,
+        port: str = "",
+        baudrate: int = 115200,
+        timeout: float = 1.0,
+        vid: int = DEFAULT_WCH_USB_VID,
+        pids: Sequence[int] = DEFAULT_H417_USBFS_CDC_PIDS,
+        client_factory: Callable[..., AkpkSerialClient] = AkpkSerialClient,
+        port_provider: Callable[[], Iterable[Any]] | None = None,
+    ) -> None:
+        self._port = str(port or "").strip()
+        self._baudrate = int(baudrate)
+        self._timeout = max(0.05, float(timeout))
+        self._vid = int(vid)
+        self._pids = tuple(int(pid) for pid in pids)
+        self._client_factory = client_factory
+        self._port_provider = port_provider
+        self._send_lock = asyncio.Lock()
+
+    async def show(
+        self,
+        tag8hex: str,
+        risk: int,
+        tool: bytes,
+        summary: bytes,
+    ) -> str:
+        async with self._send_lock:
+            return await asyncio.to_thread(
+                self._show_sync,
+                tag8hex,
+                risk,
+                bytes(tool),
+                bytes(summary),
+            )
+
+    async def clear(self, tag8hex: str) -> str:
+        async with self._send_lock:
+            return await asyncio.to_thread(self._clear_sync, tag8hex)
+
+    def resolve_port(self) -> str:
+        if self._port:
+            return self._port
+
+        provider = self._port_provider
+        if provider is None:
+            try:
+                from serial.tools import list_ports  # type: ignore[import-untyped]
+            except ImportError as exc:  # pragma: no cover
+                raise SerialCdcError(
+                    "pyserial is required to discover the H417 USBFS CDC port"
+                ) from exc
+            provider = list_ports.comports
+
+        candidates = []
+        for port in provider():
+            device = str(getattr(port, "device", "") or "").strip()
+            if not device:
+                continue
+            if getattr(port, "vid", None) != self._vid:
+                continue
+            pid = getattr(port, "pid", None)
+            if pid not in self._pids:
+                continue
+            candidates.append((self._port_score(port), device))
+
+        if not candidates:
+            expected = ", ".join(f"0x{pid:04X}" for pid in self._pids)
+            raise SerialCdcError(
+                "H417 USBFS CDC port not found "
+                f"(VID 0x{self._vid:04X}, PID {expected})"
+            )
+        candidates.sort(key=lambda item: (-item[0], item[1]))
+        return candidates[0][1]
+
+    def _show_sync(
+        self,
+        tag8hex: str,
+        risk: int,
+        tool: bytes,
+        summary: bytes,
+    ) -> str:
+        with self._client() as client:
+            return client.approval_show(tag8hex, risk, tool, summary)
+
+    def _clear_sync(self, tag8hex: str) -> str:
+        with self._client() as client:
+            return client.approval_clear(tag8hex)
+
+    def _client(self) -> AkpkSerialClient:
+        return self._client_factory(
+            port=self.resolve_port(),
+            baudrate=self._baudrate,
+            timeout=self._timeout,
+        )
+
+    def _port_score(self, port: Any) -> int:
+        pid = getattr(port, "pid", None)
+        try:
+            pid_preference = len(self._pids) - self._pids.index(pid)
+        except ValueError:
+            pid_preference = 0
+        text = " ".join(
+            str(getattr(port, field, "") or "")
+            for field in ("description", "product", "interface", "manufacturer")
+        ).lower()
+        score = pid_preference * 100
+        if "cdc" in text:
+            score += 30
+        if "h417" in text:
+            score += 20
+        if "ai key" in text or "kiiie" in text:
+            score += 10
+        return score
+
+
+def _approval_tag(value: str) -> str:
+    tag = str(value or "").lower()
+    if len(tag) != 8 or any(ch not in string.hexdigits for ch in tag):
+        raise SerialCdcError("approval tag must be exactly 8 hexadecimal digits")
+    return tag
+
+
+def _approval_risk(value: int) -> int:
+    risk = int(value)
+    if not 0 <= risk <= 0xF:
+        raise SerialCdcError("approval risk must fit one hexadecimal digit")
+    return risk
+
+
+def _hex_or_dash(value: bytes) -> str:
+    raw = bytes(value)
+    return raw.hex() if raw else "-"
+
+
+def _approval_field(value: bytes, limit: int, field: str) -> bytes:
+    raw = bytes(value)
+    if len(raw) > limit:
+        raise SerialCdcError(
+            f"approval {field} must be at most {limit} bytes"
+        )
+    if any(byte < 0x20 or byte > 0x7E for byte in raw):
+        raise SerialCdcError(
+            f"approval {field} must contain printable ASCII bytes only"
+        )
+    return raw

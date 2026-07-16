@@ -1,21 +1,33 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, watchEffect } from "vue";
+import { onBeforeUnmount, onMounted, watch, watchEffect } from "vue";
 import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { confirm } from "@tauri-apps/plugin-dialog";
 import { useRoute } from "vue-router";
 import AppShell from "./components/shell/AppShell.vue";
-import { activeUnsavedChangeMessages, hasUnsavedChanges } from "./composables/useUnsavedChangesGuard";
+import { hasUnsavedChanges } from "./composables/useUnsavedChangesGuard";
+import { useAiMonitorStore } from "./stores/aiMonitor";
 import { useDeviceStore } from "./stores/device";
 import { useProfileStore } from "./stores/profile";
+import { useProfileLibraryStore } from "./stores/profileLibrary";
 
 const route = useRoute();
+const aiMonitor = useAiMonitorStore();
 const device = useDeviceStore();
 const profile = useProfileStore();
+const profileLibrary = useProfileLibraryStore();
 
 let disposed = false;
 let nativeCloseApproved = false;
 let unlistenCloseRequested: (() => void) | null = null;
+
+watch(
+  () => profile.sourceDocument.identity.profile_id,
+  (profileId) => {
+    if (!profileLibrary.entries.some((entry) => entry.id === profileId)) return;
+    profileLibrary.activeProfileId = profileId;
+  },
+  { immediate: true },
+);
 
 function handleBeforeUnload(event: BeforeUnloadEvent): void {
   profile.persistWorkspace();
@@ -26,41 +38,20 @@ function handleBeforeUnload(event: BeforeUnloadEvent): void {
 
 async function initializeApp(): Promise<void> {
   void device.initializeBridgeEvents();
+  void aiMonitor.initialize();
   window.addEventListener("beforeunload", handleBeforeUnload);
   if (!isTauri()) return;
 
   try {
-    const unlisten = await getCurrentWindow().onCloseRequested(async (event) => {
+    const unlisten = await getCurrentWindow().onCloseRequested(() => {
       profile.persistWorkspace();
-      const messages = activeUnsavedChangeMessages();
-      if (messages.length === 0) return;
-
-      try {
-        const details = messages.length === 1
-          ? messages[0]
-          : `以下编辑尚未应用：\n${messages.map((message) => `- ${message}`).join("\n")}`;
-        const shouldClose = await confirm(
-          `${details}\n\n关闭应用会放弃这些内容，是否继续？`,
-          {
-            title: "KIIIe Control Lab",
-            kind: "warning",
-            okLabel: "放弃并关闭",
-            cancelLabel: "继续编辑",
-          },
-        );
-        if (!shouldClose) {
-          event.preventDefault();
-          return;
-        }
-
-        nativeCloseApproved = true;
-        window.setTimeout(() => {
-          nativeCloseApproved = false;
-        }, 1_000);
-      } catch (error) {
-        event.preventDefault();
-        console.error("无法确认窗口关闭请求", error);
-      }
+      // Native close must remain deterministic. Page-level navigation and browser
+      // refresh still protect unapplied buffers, while the desktop title-bar close
+      // flushes the recoverable Profile workspace and exits without a hidden modal.
+      nativeCloseApproved = true;
+      window.setTimeout(() => {
+        nativeCloseApproved = false;
+      }, 2_000);
     });
     if (disposed) unlisten();
     else unlistenCloseRequested = unlisten;
@@ -74,6 +65,7 @@ onBeforeUnmount(() => {
   disposed = true;
   window.removeEventListener("beforeunload", handleBeforeUnload);
   unlistenCloseRequested?.();
+  aiMonitor.dispose();
   device.disposeBridgeEvents();
 });
 

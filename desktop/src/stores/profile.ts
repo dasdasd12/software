@@ -59,8 +59,26 @@ export const useProfileStore = defineStore("profile", () => {
     WORKSPACE_STORAGE_VERSION,
     isWorkspaceRecovery,
   );
-  const initialSource = normalizeProfileDocument(recoveredWorkspace?.data.sourceDocument ?? cloneFactoryProfile());
-  const initialDraft = normalizeProfileDocument(recoveredWorkspace?.data.draftDocument ?? initialSource);
+  const currentFactory = cloneFactoryProfile();
+  const recoveredSource = recoveredWorkspace
+    ? normalizeProfileDocument(recoveredWorkspace.data.sourceDocument)
+    : null;
+  const recoveredDraft = recoveredWorkspace
+    ? normalizeProfileDocument(recoveredWorkspace.data.draftDocument)
+    : null;
+  const recoveredFactory = recoveredSource?.identity.profile_id === currentFactory.identity.profile_id;
+  const recoveredFactoryDirty = Boolean(
+    recoveredFactory
+    && recoveredSource
+    && recoveredDraft
+    && signature(recoveredSource) !== signature(recoveredDraft),
+  );
+  const initialSource = recoveredFactory
+    ? currentFactory
+    : recoveredSource ?? currentFactory;
+  const initialDraft = recoveredFactory
+    ? recoveredFactoryDirty && recoveredDraft ? recoveredDraft : currentFactory
+    : recoveredDraft ?? initialSource;
   const sourceDocument = ref<ProfileDocument>(cloneProfile(initialSource));
   const draftDocument = ref<ProfileDocument>(cloneProfile(initialDraft));
   const activeScopeId = ref(recoveredWorkspace?.data.activeScopeId ?? "base");
@@ -163,14 +181,6 @@ export const useProfileStore = defineStore("profile", () => {
     compileMessage.value = "已打开本地 Profile，尚未验证";
     writeState.value = "idle";
     writeProgress.value = null;
-    persistWorkspace();
-  }
-
-  function commitLocalDraft(message = "本地 Profile 已保存"): void {
-    sourceDocument.value = cloneProfile(draftDocument.value);
-    dirtyControlIds.value = [];
-    compileState.value = "idle";
-    compileMessage.value = message;
     persistWorkspace();
   }
 
@@ -304,7 +314,6 @@ export const useProfileStore = defineStore("profile", () => {
     restoreBindings,
     markDraftChanged,
     loadDocument,
-    commitLocalDraft,
     discardDraftChanges,
     persistWorkspace,
     validateDraft,

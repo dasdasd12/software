@@ -1,5 +1,6 @@
 import { createRouter, createWebHashHistory } from "vue-router";
 import AdvancedBehaviorView from "./views/AdvancedBehaviorView.vue";
+import AiControlView from "./views/AiControlView.vue";
 import DeviceConnectionView from "./views/DeviceConnectionView.vue";
 import DiagnosticsCalibrationView from "./views/DiagnosticsCalibrationView.vue";
 import DisplayEditorView from "./views/DisplayEditorView.vue";
@@ -41,6 +42,12 @@ const router = createRouter({
       name: "display",
       component: DisplayEditorView,
       meta: { inspector: true, layout: "studio", title: "屏显编辑器" },
+    },
+    {
+      path: "/ai",
+      name: "ai",
+      component: AiControlView,
+      meta: { inspector: true, layout: "editor", title: "AI 运行监控" },
     },
     {
       path: "/profiles",

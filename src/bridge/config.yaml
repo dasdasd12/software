@@ -22,6 +22,28 @@ device:
   heartbeat_timeout_sec: 90
   max_devices: 4
 
+# The keyboard firmware emits HID F24 for Fn + five-way center. Local Core
+# captures that reserved key globally and opens a foreground Claude Code
+# terminal through the structured agent launcher.
+hardware_hotkeys:
+  enabled: true
+  launch_cooldown_ms: 500
+  device_id: "ak_h417_ch585_v1"
+
+# Claude approvals for hardware-owned foreground sessions are sent to V3F over
+# the USBFS CDC control channel. The production composite descriptor uses
+# 1A86:FE17; FE07 is retained for descriptor-compatible development builds.
+hardware_approval:
+  enabled: true
+  port: ""
+  baudrate: 115200
+  timeout_sec: 1.0
+  retry_delay_ms: 750
+  vid: 0x1A86
+  pids:
+    - 0xFE17
+    - 0xFE07
+
 # AI Agent configurations
 agents:
   claude:

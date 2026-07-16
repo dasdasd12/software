@@ -25,6 +25,7 @@ DEFAULT_CLAUDE_CONTEXT = (
 PROFILE_ID = "profile_local_hotkey_harness"
 
 HOTKEY_TO_KEY_ID: Dict[str, str] = {
+    "f24": "K_CLAUDE_LAUNCH",
     "ctrl+alt+shift+1": "K_CODEX_LAUNCH",
     "ctrl+alt+shift+2": "K_CLAUDE_LAUNCH",
     "ctrl+alt+shift+enter": "K_APPROVE",
@@ -36,6 +37,7 @@ HOTKEY_TO_KEY_ID: Dict[str, str] = {
 }
 
 PYNPUT_HOTKEYS: Dict[str, str] = {
+    "<f24>": "K_CLAUDE_LAUNCH",
     "<ctrl>+<alt>+<shift>+1": "K_CODEX_LAUNCH",
     "<ctrl>+<alt>+<shift>+2": "K_CLAUDE_LAUNCH",
     "<ctrl>+<alt>+<shift>+<enter>": "K_APPROVE",

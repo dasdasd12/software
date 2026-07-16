@@ -153,6 +153,7 @@ async def send_virtual_key(ws, device_id, key_id):
 def test_default_hotkeys_map_to_virtual_input_payloads():
     harness = HotkeyHarness(HotkeyHarnessConfig(device_id="kbd_hotkey_harness"))
 
+    assert HOTKEY_TO_KEY_ID["f24"] == "K_CLAUDE_LAUNCH"
     assert HOTKEY_TO_KEY_ID["ctrl+alt+shift+1"] == "K_CODEX_LAUNCH"
     assert HOTKEY_TO_KEY_ID["ctrl+alt+shift+2"] == "K_CLAUDE_LAUNCH"
     assert HOTKEY_TO_KEY_ID["ctrl+alt+shift+enter"] == "K_APPROVE"

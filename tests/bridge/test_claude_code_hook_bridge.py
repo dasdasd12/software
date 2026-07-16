@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 import sys
 
+import pytest
+
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 BRIDGE_DIR = ROOT_DIR / "src" / "bridge"
@@ -94,17 +96,6 @@ async def mark_claude_hook_delivered(server, hook_queue, session_id, hook_result
     }, hook_queue)
 
 
-def test_hook_script_builds_fail_closed_permission_response():
-    module = load_hook_module()
-
-    response = module.permission_denied_response("bridge unavailable")
-
-    output = response["hookSpecificOutput"]
-    assert output["hookEventName"] == "PermissionRequest"
-    assert output["decision"]["behavior"] == "deny"
-    assert output["decision"]["interrupt"] is True
-
-
 def test_hook_script_builds_delivery_ack():
     module = load_hook_module()
     args = module.parse_args([
@@ -128,27 +119,85 @@ def test_hook_script_builds_delivery_ack():
     assert payload["response_written"] is True
 
 
-def test_hook_script_fails_closed_for_pretooluse_bridge_error(monkeypatch, capsys):
+@pytest.mark.parametrize(
+    "hook_input",
+    [
+        {
+            "hook_event_name": "PermissionRequest",
+            "tool_name": "Write",
+            "tool_input": {"file_path": r"C:\tmp\中文测试.txt"},
+        },
+        {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "AskUserQuestion",
+            "tool_input": {"questions": [{"question": "Continue?", "options": ["yes", "no"]}]},
+        },
+    ],
+)
+def test_hook_script_bridge_error_falls_back_to_native_prompt(
+    monkeypatch,
+    capsys,
+    hook_input,
+):
     module = load_hook_module()
 
     async def fail_bridge(args, hook_input):
         raise RuntimeError("Local API unavailable")
 
     monkeypatch.setattr(module, "run_hook", fail_bridge)
-    monkeypatch.setattr(module.sys, "stdin", io.StringIO(json.dumps({
-        "hook_event_name": "PreToolUse",
-        "tool_name": "AskUserQuestion",
-        "tool_input": {"questions": [{"question": "Continue?", "options": ["yes", "no"]}]},
-    })))
+    monkeypatch.setattr(module.sys, "stdin", io.StringIO(json.dumps(hook_input)))
+
+    assert module.main(["--session-id", "sess_native"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "using Claude's native prompt" in captured.err
+    assert "Local API unavailable" in captured.err
+
+
+def test_hook_script_reads_utf8_json_from_binary_stdin(monkeypatch, capsys):
+    module = load_hook_module()
+    seen = {}
+    payload = {
+        "hook_event_name": "PermissionRequest",
+        "tool_name": "Write",
+        "tool_input": {
+            "file_path": r"C:\program1\Program\AI_keyb_wch\.tmp\中文测试.txt",
+            "content": "这是一个测试文件。",
+        },
+    }
+
+    class BinaryStdin:
+        def __init__(self, data):
+            self.buffer = io.BytesIO(data)
+
+    async def capture_hook(args, hook_input):
+        seen["hook_input"] = hook_input
+        return {}
+
+    monkeypatch.setattr(module, "run_hook", capture_hook)
+    monkeypatch.setattr(
+        module.sys,
+        "stdin",
+        BinaryStdin(json.dumps(payload, ensure_ascii=False).encode("utf-8")),
+    )
 
     assert module.main(["--session-id", "sess_native"]) == 0
+    assert seen["hook_input"] == payload
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
 
-    raw = capsys.readouterr().out.strip()
-    response = json.loads(raw)
-    output = response["hookSpecificOutput"]
-    assert output["hookEventName"] == "PreToolUse"
-    assert output["permissionDecision"] == "deny"
-    assert "Local API hook bridge failed closed" in output["permissionDecisionReason"]
+
+def test_hook_script_invalid_json_does_not_submit_denial(monkeypatch, capsys):
+    module = load_hook_module()
+    monkeypatch.setattr(module.sys, "stdin", io.StringIO('{"hook_event_name":"PermissionRequest"'))
+
+    assert module.main(["--session-id", "sess_native"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Invalid Claude hook input" in captured.err
 
 
 def test_claude_permission_hook_round_trips_to_permission_response():

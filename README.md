@@ -16,6 +16,12 @@ Keyboard device
 
 Local Core Service MVP 负责维护会话、启动或恢复 Codex/Claude 进程、处理权限请求，并把 Agent 状态投影给本地 UI 和未来的设备原生 transport。WebSocket 只用于本地 UI、测试和自动化客户端；它不是键盘固件协议。
 
+在 Windows 上，生产键盘的 `Fn + 五向摇杆中键` 会发送保留的 HID
+`F24`。Local Core 默认注册该全局热键，并通过已有的结构化前台启动器
+打开 Claude Code。Local Core 未运行时不会启动 Claude，普通摇杆中键仍是
+Enter。Windows 的全局热键接口不能区分 F24 来自哪一把键盘，因此其它
+键盘或自动化工具发送 F24 时也会触发同一动作。
+
 ## 仓库结构
 
 ```text
@@ -90,7 +96,7 @@ $PORT = 'COM5'                    # 替换为 H417 USBFS CDC 的实际端口
 python scripts\upload-profile.py --port $PORT --info
 ```
 
-只有命令返回 `device: PONG 1` 后再上传。`active=0` 表示当前使用固件内置的出厂 Profile，`slots` 的三位状态分别对应运行时槽位 1、2、3。
+只有命令返回 `device: PONG 1` 后再上传。`active=0` 表示当前使用固件内置的出厂 Profile，`slots` 的三位状态分别对应运行时槽位 1、2、3。状态 `1` 表示该槽位可激活；尚未写入过的擦除槽也会显示 `1`，并自动使用固件内置的 Default。状态 `0` 表示槽位中存在无效配置，需要重新写入。
 
 按以下顺序创建和验证一个测试 Profile：
 
@@ -103,7 +109,8 @@ Copy-Item config\factory_default_profile.json build\my_profile.json
 python scripts\upload-profile.py --port $PORT --slot 1 --chunk 64 --no-activate build\my_profile.json
 python scripts\upload-profile.py --port $PORT --info
 
-# 确认 slots 的第一位为 1 后，再切换到槽位 1。
+# 确认上传命令输出 commit: ok 后，再切换到槽位 1。
+# slots 表示槽位是否可激活，不用于判断本次上传前后是否发生了写入。
 python scripts\upload-profile.py --port $PORT --activate 1
 python scripts\upload-profile.py --port $PORT --info
 ```

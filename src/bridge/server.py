@@ -21,7 +21,7 @@ import time
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import yaml
 
@@ -43,7 +43,17 @@ from devices import (
     VirtualDeviceCommandAdapter,
     VirtualDeviceSession,
 )
+from devices.approval_display import (
+    ApprovalDisplayPayload,
+    approval_tag,
+    build_approval_display_payload,
+)
+from devices.transports.serial_cdc import ApprovalCdcSender, DeviceError
 from keyboard import Profile, ProfileValidationError, profile_from_dict, validate_profile
+from keyboard.global_hotkeys import (
+    GlobalHotkeyUnavailable,
+    WindowsF24HotkeyListener,
+)
 from persistence import SQLiteAppStore
 from protocol_unifier import ProtocolUnifier
 from session_manager import AgentType, AgentState, Session, SessionManager
@@ -131,6 +141,14 @@ class PendingCodexNativeRequest:
     delivered_future: asyncio.Future
 
 
+@dataclass(frozen=True)
+class ArmedHardwareApproval:
+    pending_key: str
+    request_id: str
+    session_id: str
+    display: ApprovalDisplayPayload
+
+
 class LocalCoreServiceMVP:
     """Local Core Service MVP for local APIs, sessions, permissions, and agents."""
 
@@ -145,7 +163,15 @@ class LocalCoreServiceMVP:
         AgentState.PAUSED,
     }
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(
+        self,
+        config: Dict[str, Any],
+        *,
+        hardware_hotkey_listener_factory: Optional[
+            Callable[[Callable[[], None]], Any]
+        ] = None,
+        hardware_approval_sender: Optional[Any] = None,
+    ):
         self._ensure_workspace_config(config)
         self.cfg = config
         self._setup_logging()
@@ -202,6 +228,40 @@ class LocalCoreServiceMVP:
         self._foreground_cli_launch_owners: Dict[asyncio.Queue, Set[str]] = {}
         self._server = None
         self._shutdown_event: Optional[asyncio.Event] = None
+        self._hardware_hotkey_listener_factory = (
+            hardware_hotkey_listener_factory or WindowsF24HotkeyListener
+        )
+        self._hardware_hotkey_listener = None
+        self._hardware_hotkey_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._hardware_hotkey_last_launch_at = 0.0
+        self._hardware_hotkeys_accepting = False
+        self._hardware_hotkey_tasks: Set[asyncio.Task] = set()
+        self._hardware_hotkey_launch_ids: Set[str] = set()
+        self._hardware_hotkey_session_ids: Set[str] = set()
+        self._hardware_hotkey_launch_dispatches = 0
+        self._hardware_hotkey_early_registrations: Dict[str, str] = {}
+        approval_cfg = self.cfg.get("hardware_approval", {})
+        self._hardware_approval_sender = hardware_approval_sender
+        if (
+            self._hardware_approval_sender is None
+            and approval_cfg.get("enabled", False)
+        ):
+            self._hardware_approval_sender = self._build_hardware_approval_sender(
+                approval_cfg
+            )
+        self._hardware_approval_current: Optional[ArmedHardwareApproval] = None
+        self._hardware_approval_refresh_task: Optional[asyncio.Task] = None
+        self._hardware_approval_decision_task: Optional[asyncio.Task] = None
+        self._hardware_approval_retry_handle: Optional[
+            asyncio.TimerHandle
+        ] = None
+        self._hardware_approval_pending_clear_tags: Set[str] = set()
+        self._hardware_approval_refresh_requested = False
+        self._hardware_approval_client = ClientIdentity(
+            kind=ClientKind.DESKTOP_UI,
+            client_id="trusted-hardware-approval",
+            capabilities={CAP_PERMISSION_RESPOND},
+        )
 
     # ------------------------------------------------------------------ #
     #  Initialization
@@ -244,12 +304,636 @@ class LocalCoreServiceMVP:
             status = "available" if proxy.is_available() else "NOT FOUND"
             self.logger.info(f"Agent {agent_key}: {status} ({proxy._executable or 'PATH'})")
 
+    def _start_hardware_hotkeys(
+        self,
+        loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        cfg = self.cfg.get("hardware_hotkeys", {})
+        if not cfg.get("enabled", False):
+            return
+        if self._hardware_hotkey_listener is not None:
+            self._stop_hardware_hotkeys()
+            if self._hardware_hotkey_listener is not None:
+                self.logger.warning(
+                    "Physical F24 shortcut listener is still stopping"
+                )
+                return
+        self._hardware_hotkey_loop = loop
+        listener = None
+        try:
+            listener = self._hardware_hotkey_listener_factory(
+                self._schedule_hardware_claude_launch
+            )
+            configure_approval_callbacks = getattr(
+                listener,
+                "set_approval_callbacks",
+                None,
+            )
+            if callable(configure_approval_callbacks):
+                configure_approval_callbacks(
+                    lambda: self._schedule_hardware_approval_decision(True),
+                    lambda: self._schedule_hardware_approval_decision(False),
+                )
+            self._hardware_hotkey_listener = listener
+            listener.start()
+        except (GlobalHotkeyUnavailable, OSError, RuntimeError) as exc:
+            self._hardware_hotkeys_accepting = False
+            self._hardware_hotkey_loop = None
+            if listener is not None:
+                try:
+                    listener.stop()
+                except Exception as cleanup_exc:
+                    self.logger.warning(
+                        "Failed to clean up the F24 listener after startup "
+                        "failure: %s",
+                        cleanup_exc,
+                    )
+                else:
+                    self._hardware_hotkey_listener = None
+            self.logger.warning(
+                "Physical Fn+five-way Claude shortcut unavailable: %s",
+                exc,
+            )
+            return
+        self._hardware_hotkeys_accepting = True
+        self.logger.info(
+            "Physical shortcuts listening on HID F22/F23/F24"
+        )
+
+    def _stop_hardware_hotkeys(self) -> None:
+        listener = self._hardware_hotkey_listener
+        self._hardware_hotkeys_accepting = False
+        self._hardware_hotkey_loop = None
+        if listener is None:
+            return
+        try:
+            listener.stop()
+        except Exception as exc:
+            self.logger.warning("Failed to stop the F24 hotkey listener: %s", exc)
+            return
+        self._hardware_hotkey_listener = None
+
+    def _schedule_hardware_claude_launch(self) -> None:
+        loop = self._hardware_hotkey_loop
+        if (
+            not self._hardware_hotkeys_accepting
+            or loop is None
+            or loop.is_closed()
+        ):
+            return
+        try:
+            loop.call_soon_threadsafe(self._create_hardware_hotkey_launch_task)
+        except RuntimeError:
+            return
+
+    def _schedule_hardware_approval_decision(self, approved: bool) -> None:
+        loop = self._hardware_hotkey_loop
+        if (
+            not self._hardware_hotkeys_accepting
+            or loop is None
+            or loop.is_closed()
+        ):
+            return
+        try:
+            loop.call_soon_threadsafe(
+                self._create_hardware_approval_decision_task,
+                bool(approved),
+            )
+        except RuntimeError:
+            return
+
+    def _create_hardware_hotkey_launch_task(self) -> None:
+        if not self._hardware_hotkeys_accepting:
+            return
+        task = asyncio.create_task(
+            self._launch_claude_from_hardware_hotkey()
+        )
+        self._hardware_hotkey_tasks.add(task)
+        task.add_done_callback(self._hardware_hotkey_launch_done)
+
+    def _hardware_hotkey_launch_done(self, task: asyncio.Task) -> None:
+        self._hardware_hotkey_tasks.discard(task)
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except Exception as exc:
+            self.logger.error(
+                "Fn+five-way Claude launch failed: %s",
+                exc,
+            )
+
+    def _create_hardware_approval_decision_task(self, approved: bool) -> None:
+        if self._hardware_approval_current is None:
+            return
+        active = self._hardware_approval_decision_task
+        if active is not None and not active.done():
+            return
+        task = asyncio.create_task(
+            self._submit_hardware_approval_decision(bool(approved))
+        )
+        self._hardware_approval_decision_task = task
+        task.add_done_callback(self._hardware_approval_decision_done)
+
+    def _hardware_approval_decision_done(self, task: asyncio.Task) -> None:
+        if self._hardware_approval_decision_task is task:
+            self._hardware_approval_decision_task = None
+        if not task.cancelled():
+            try:
+                task.result()
+            except Exception as exc:
+                self.logger.error("Hardware Claude approval failed: %s", exc)
+        self._schedule_hardware_approval_refresh()
+
+    async def _shutdown_hardware_hotkeys(self) -> None:
+        self._hardware_hotkeys_accepting = False
+        self._stop_hardware_hotkeys()
+        approval_tasks = [
+            task
+            for task in (
+                self._hardware_approval_refresh_task,
+                self._hardware_approval_decision_task,
+            )
+            if task is not None and not task.done()
+        ]
+        for task in approval_tasks:
+            task.cancel()
+        if approval_tasks:
+            await asyncio.gather(*approval_tasks, return_exceptions=True)
+        self._hardware_approval_refresh_task = None
+        self._hardware_approval_decision_task = None
+        self._cancel_hardware_approval_retry()
+        self._hardware_approval_refresh_requested = False
+        current_approval = self._hardware_approval_current
+        self._hardware_approval_current = None
+        clear_tags = set(self._hardware_approval_pending_clear_tags)
+        if current_approval is not None:
+            clear_tags.add(current_approval.display.tag8hex)
+        for tag8hex in sorted(clear_tags):
+            await self._clear_hardware_approval_tag(
+                tag8hex,
+                retry=False,
+            )
+        self._hardware_approval_pending_clear_tags.clear()
+        tasks = list(self._hardware_hotkey_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._hardware_hotkey_tasks.clear()
+        for launch_id in list(self._hardware_hotkey_launch_ids):
+            try:
+                self.agent_commands.cleanup_unregistered_foreground_launch(
+                    launch_id
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    "Hardware foreground launch cleanup failed for %s: %s",
+                    launch_id,
+                    exc,
+                )
+        self._hardware_hotkey_launch_ids.clear()
+        self._hardware_hotkey_session_ids.clear()
+        self._hardware_hotkey_early_registrations.clear()
+        self._hardware_hotkey_launch_dispatches = 0
+
+    async def _launch_claude_from_hardware_hotkey(self) -> Any:
+        cfg = self.cfg.get("hardware_hotkeys", {})
+        try:
+            cooldown_ms = max(0, int(cfg.get("launch_cooldown_ms", 500)))
+        except (TypeError, ValueError):
+            cooldown_ms = 500
+        now = time.monotonic()
+        if (
+            self._hardware_hotkey_last_launch_at > 0.0
+            and (now - self._hardware_hotkey_last_launch_at)
+            < (cooldown_ms / 1000.0)
+        ):
+            return None
+        self._hardware_hotkey_last_launch_at = now
+
+        command = CommandEnvelope(
+            type="agent.cli.launch_foreground",
+            source=CommandSource(
+                kind="windows-global-hotkey",
+                client_id="f24-global-hotkey",
+            ),
+            payload={
+                "agent": "claude",
+                "native_cli": True,
+                "permission_mode": "default",
+            },
+        )
+        self._sync_runtime_state()
+        start_seq = self.runtime.event_bus.last_seq
+        self._hardware_hotkey_launch_dispatches += 1
+        try:
+            event = await self.runtime.command_router.dispatch_async(command)
+            self._sync_runtime_state()
+            self._broadcast_core_events(
+                self._events_to_broadcast(start_seq, event)
+            )
+            if event.type == "agent.cli.launched":
+                launch_id = event.payload.get("foreground_launch_id")
+                if isinstance(launch_id, str) and launch_id:
+                    self._remember_hardware_hotkey_launch(launch_id)
+                self.logger.info("Fn+five-way launched foreground Claude Code")
+            else:
+                self.logger.warning(
+                    "Fn+five-way Claude launch returned %s",
+                    event.type,
+                )
+        finally:
+            self._hardware_hotkey_launch_dispatches = max(
+                0,
+                self._hardware_hotkey_launch_dispatches - 1,
+            )
+            if self._hardware_hotkey_launch_dispatches == 0:
+                self._hardware_hotkey_early_registrations.clear()
+        return event
+
+    def _remember_hardware_hotkey_launch(self, launch_id: str) -> None:
+        session_id = self._hardware_hotkey_early_registrations.pop(
+            launch_id,
+            None,
+        )
+        if session_id and self._mark_hardware_hotkey_session(session_id):
+            return
+        self._hardware_hotkey_launch_ids.add(launch_id)
+
+    def _mark_hardware_hotkey_session(self, session_id: str) -> bool:
+        session = self.session_mgr.get(session_id)
+        if (
+            session is None
+            or session.agent != AgentType.CLAUDE
+            or getattr(session, "launch_surface", None) != "foreground_cli"
+            or getattr(session, "control_mode", None) != "native_cli"
+            or self._is_terminal_session(session_id)
+        ):
+            return False
+        self._hardware_hotkey_session_ids.add(session_id)
+        self.logger.info(
+            "Registered hardware-owned Claude session %s",
+            session_id,
+        )
+        return True
+
     def _build_foreground_cli_launcher(self) -> ForegroundCliLauncher:
         return ForegroundCliLauncher(
             api_url=self._local_api_url(),
             token=self._foreground_cli_token(),
             python_executable=sys.executable,
         )
+
+    def _build_hardware_approval_sender(
+        self,
+        cfg: Dict[str, Any],
+    ) -> ApprovalCdcSender:
+        raw_pids = cfg.get("pids", [0xFE17, 0xFE07])
+        if not isinstance(raw_pids, list):
+            raw_pids = [raw_pids]
+        parsed_pids = []
+        for value in raw_pids:
+            pid = self._config_int(value, 0)
+            if pid > 0:
+                parsed_pids.append(pid)
+        return ApprovalCdcSender(
+            port=str(cfg.get("port", "") or ""),
+            baudrate=self._config_int(cfg.get("baudrate"), 115200),
+            timeout=self._config_float(cfg.get("timeout_sec"), 1.0),
+            vid=self._config_int(cfg.get("vid"), 0x1A86),
+            pids=tuple(parsed_pids) or (0xFE17, 0xFE07),
+        )
+
+    @staticmethod
+    def _config_int(value: Any, default: int) -> int:
+        try:
+            if isinstance(value, str):
+                return int(value, 0)
+            return int(value)
+        except (TypeError, ValueError):
+            return int(default)
+
+    @staticmethod
+    def _config_float(value: Any, default: float) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return float(default)
+
+    def _schedule_hardware_approval_refresh(self) -> None:
+        loop = self._hardware_hotkey_loop
+        if (
+            self._hardware_approval_sender is None
+            or loop is None
+            or loop.is_closed()
+        ):
+            return
+        retry = self._hardware_approval_retry_handle
+        if retry is not None and not retry.cancelled():
+            return
+        try:
+            loop.call_soon_threadsafe(
+                self._request_hardware_approval_refresh
+            )
+        except RuntimeError:
+            return
+
+    def _request_hardware_approval_refresh(self) -> None:
+        if self._hardware_approval_sender is None:
+            return
+        self._cancel_hardware_approval_retry()
+        self._hardware_approval_refresh_requested = True
+        decision = self._hardware_approval_decision_task
+        if decision is not None and not decision.done():
+            return
+        active = self._hardware_approval_refresh_task
+        if active is not None and not active.done():
+            return
+        task = asyncio.create_task(self._run_hardware_approval_refresh())
+        self._hardware_approval_refresh_task = task
+        task.add_done_callback(self._hardware_approval_refresh_done)
+
+    async def _run_hardware_approval_refresh(self) -> None:
+        while self._hardware_approval_refresh_requested:
+            self._hardware_approval_refresh_requested = False
+            await self._refresh_hardware_approval_once()
+            decision = self._hardware_approval_decision_task
+            if decision is not None and not decision.done():
+                return
+
+    def _hardware_approval_refresh_done(self, task: asyncio.Task) -> None:
+        if self._hardware_approval_refresh_task is task:
+            self._hardware_approval_refresh_task = None
+        if not task.cancelled():
+            try:
+                task.result()
+            except Exception as exc:
+                self.logger.warning(
+                    "Hardware approval display refresh failed: %s",
+                    exc,
+                )
+        if self._hardware_approval_refresh_requested:
+            self._request_hardware_approval_refresh()
+
+    async def _refresh_hardware_approval_once(self) -> None:
+        sender = self._hardware_approval_sender
+        if sender is None:
+            return
+
+        for tag8hex in sorted(self._hardware_approval_pending_clear_tags):
+            if not await self._clear_hardware_approval_tag(tag8hex):
+                return
+
+        current = self._hardware_approval_current
+        if current is not None:
+            pending = self.pending_permissions.get(current.pending_key)
+            if self._hardware_approval_matches(current, pending):
+                self._cancel_hardware_approval_retry()
+                return
+            self._hardware_approval_current = None
+            if not await self._clear_hardware_approval_display(current):
+                return
+
+        candidate = self._first_hardware_permission()
+        if candidate is None:
+            self._cancel_hardware_approval_retry()
+            return
+        pending_key, pending = candidate
+        display = build_approval_display_payload(
+            request_id=pending.request_id,
+            session_id=str(pending.session_id),
+            risk_level=pending.risk_level,
+            tool=pending.tool,
+            description=pending.description,
+            native=pending.native,
+        )
+        candidate_state = ArmedHardwareApproval(
+            pending_key=pending_key,
+            request_id=pending.request_id,
+            session_id=str(pending.session_id),
+            display=display,
+        )
+
+        try:
+            await sender.show(
+                display.tag8hex,
+                display.risk,
+                display.tool,
+                display.summary,
+            )
+        except Exception as exc:
+            self.logger.warning(
+                "Could not show Claude approval on the keyboard: %s",
+                exc,
+            )
+            # The device may have applied SHOW even when its acknowledgement
+            # was lost. Clear the uncertain tag before retrying; firmware
+            # reports inactive/tag-mismatch as an idempotent completed clear.
+            self._hardware_approval_pending_clear_tags.add(
+                display.tag8hex
+            )
+            self._schedule_hardware_approval_retry()
+            return
+
+        current_pending = self.pending_permissions.get(pending_key)
+        if not self._hardware_approval_matches(
+            candidate_state,
+            current_pending,
+        ):
+            if await self._clear_hardware_approval_display(candidate_state):
+                self._hardware_approval_refresh_requested = True
+            return
+        self._cancel_hardware_approval_retry()
+        self._hardware_approval_current = candidate_state
+        self.logger.info(
+            "Keyboard approval armed for Claude request %s",
+            pending.request_id,
+        )
+
+    def _first_hardware_permission(
+        self,
+    ) -> Optional[Tuple[str, PendingPermission]]:
+        candidates = [
+            (pending_key, pending)
+            for pending_key, pending in self.pending_permissions.items()
+            if self._is_hardware_permission(pending_key, pending)
+        ]
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: (item[1].created_at, item[0]))
+        return candidates[0]
+
+    def _is_hardware_permission(
+        self,
+        pending_key: str,
+        pending: Optional[PendingPermission],
+    ) -> bool:
+        if (
+            pending is None
+            or pending.agent != AgentType.CLAUDE
+            or not pending.session_id
+            or time.time() - pending.created_at >= pending.timeout_sec
+            or pending.session_id not in self._hardware_hotkey_session_ids
+            or not self._is_claude_hook_permission(pending)
+        ):
+            return False
+        waiter = self._claude_hook_decisions.get(pending_key)
+        return bool(
+            waiter is not None
+            and waiter.request_id == pending.request_id
+            and waiter.session_id == pending.session_id
+        )
+
+    def _hardware_approval_matches(
+        self,
+        state: ArmedHardwareApproval,
+        pending: Optional[PendingPermission],
+    ) -> bool:
+        return bool(
+            self._is_hardware_permission(state.pending_key, pending)
+            and pending is not None
+            and pending.request_id == state.request_id
+            and pending.session_id == state.session_id
+            and approval_tag(pending.request_id, state.session_id)
+            == state.display.tag8hex
+        )
+
+    async def _submit_hardware_approval_decision(
+        self,
+        approved: bool,
+    ) -> None:
+        state = self._hardware_approval_current
+        if state is None:
+            return
+        pending = self.pending_permissions.get(state.pending_key)
+        if not self._hardware_approval_matches(state, pending):
+            self._hardware_approval_current = None
+            await self._clear_hardware_approval_display(state)
+            return
+
+        command = CommandEnvelope(
+            type="agent.permission.respond",
+            source=CommandSource(
+                kind="hardware-approval-hotkey",
+                client_id=self._hardware_approval_client.client_id,
+                device_id=str(
+                    self.cfg.get("hardware_hotkeys", {}).get(
+                        "device_id",
+                        "ak_h417_ch585_v1",
+                    )
+                ),
+            ),
+            target={
+                "permission_id": state.request_id,
+                "session_id": state.session_id,
+            },
+            payload={
+                "approved": bool(approved),
+                "decision": "approve" if approved else "deny",
+            },
+        )
+        context_token = _permission_client_context.set(
+            self._hardware_approval_client
+        )
+        try:
+            ack = await self._handle_permission_command(command)
+        finally:
+            _permission_client_context.reset(context_token)
+        if (
+            ack.get("request_id") != state.request_id
+            or ack.get("session_id") != state.session_id
+        ):
+            raise AgentLifecycleError(
+                "PERMISSION_ACK_MISMATCH",
+                "Claude permission acknowledgement did not match the armed request",
+            )
+
+        self._hardware_approval_current = None
+        await self._clear_hardware_approval_display(state)
+        self.logger.info(
+            "Keyboard %s Claude request %s",
+            "approved" if approved else "denied",
+            state.request_id,
+        )
+
+    async def _clear_hardware_approval_display(
+        self,
+        state: ArmedHardwareApproval,
+        *,
+        retry: bool = True,
+    ) -> bool:
+        return await self._clear_hardware_approval_tag(
+            state.display.tag8hex,
+            retry=retry,
+        )
+
+    async def _clear_hardware_approval_tag(
+        self,
+        tag8hex: str,
+        *,
+        retry: bool = True,
+    ) -> bool:
+        sender = self._hardware_approval_sender
+        if sender is None:
+            return True
+        try:
+            await sender.clear(tag8hex)
+        except DeviceError as exc:
+            detail = str(exc.detail or "").strip().lower()
+            if detail in {"approval-inactive", "approval-tag"}:
+                self.logger.info(
+                    "Keyboard approval %s no longer needs clearing: %s",
+                    tag8hex,
+                    detail,
+                )
+                self._hardware_approval_pending_clear_tags.discard(tag8hex)
+                return True
+            self.logger.warning(
+                "Could not clear Claude approval from the keyboard: %s",
+                exc,
+            )
+            if retry:
+                self._hardware_approval_pending_clear_tags.add(tag8hex)
+                self._schedule_hardware_approval_retry()
+            return False
+        except Exception as exc:
+            self.logger.warning(
+                "Could not clear Claude approval from the keyboard: %s",
+                exc,
+            )
+            if retry:
+                self._hardware_approval_pending_clear_tags.add(tag8hex)
+                self._schedule_hardware_approval_retry()
+            return False
+        self._hardware_approval_pending_clear_tags.discard(tag8hex)
+        return True
+
+    def _schedule_hardware_approval_retry(self) -> None:
+        handle = self._hardware_approval_retry_handle
+        if handle is not None and not handle.cancelled():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        cfg = self.cfg.get("hardware_approval", {})
+        delay_ms = self._config_int(cfg.get("retry_delay_ms"), 750)
+        delay_sec = min(5.0, max(0.01, delay_ms / 1000.0))
+        self._hardware_approval_retry_handle = loop.call_later(
+            delay_sec,
+            self._hardware_approval_retry_due,
+        )
+
+    def _hardware_approval_retry_due(self) -> None:
+        self._hardware_approval_retry_handle = None
+        self._request_hardware_approval_refresh()
+
+    def _cancel_hardware_approval_retry(self) -> None:
+        handle = self._hardware_approval_retry_handle
+        self._hardware_approval_retry_handle = None
+        if handle is not None:
+            handle.cancel()
 
     def _foreground_cli_token(self) -> Optional[str]:
         if self.security.launch_token:
@@ -636,6 +1320,8 @@ class LocalCoreServiceMVP:
                 session_id = value
         if command.type in {"agent.session.close", "agent.session.foreground_exited"}:
             if session_id:
+                self._hardware_hotkey_session_ids.discard(session_id)
+                self._schedule_hardware_approval_refresh()
                 owned = self._foreground_cli_session_owners.get(queue)
                 if owned is not None:
                     owned.discard(session_id)
@@ -656,11 +1342,16 @@ class LocalCoreServiceMVP:
         if command.payload.get("launch_surface") != "foreground_cli":
             return
         foreground_launch_id = None
+        hardware_launch = False
         if isinstance(payload, dict):
             value = payload.get("foreground_launch_id")
             if isinstance(value, str) and value:
                 foreground_launch_id = value
         if foreground_launch_id:
+            hardware_launch = (
+                foreground_launch_id in self._hardware_hotkey_launch_ids
+            )
+            self._hardware_hotkey_launch_ids.discard(foreground_launch_id)
             launch_ids = self._foreground_cli_launch_owners.get(queue)
             if launch_ids is not None:
                 launch_ids.discard(foreground_launch_id)
@@ -671,6 +1362,16 @@ class LocalCoreServiceMVP:
         session = self.session_mgr.get(session_id)
         if session is not None and getattr(session, "launch_surface", None) != "foreground_cli":
             return
+        if command.type == "agent.session.register_foreground":
+            if hardware_launch:
+                self._mark_hardware_hotkey_session(session_id)
+            elif (
+                foreground_launch_id
+                and self._hardware_hotkey_launch_dispatches > 0
+            ):
+                self._hardware_hotkey_early_registrations[
+                    foreground_launch_id
+                ] = session_id
         self._foreground_cli_session_owners.setdefault(queue, set()).add(session_id)
 
     async def _cleanup_foreground_cli_sessions_for_queue(self, queue: asyncio.Queue) -> None:
@@ -682,6 +1383,7 @@ class LocalCoreServiceMVP:
                 self.logger.warning(f"Foreground CLI launch cleanup failed for {launch_id}: {exc}")
         session_ids = self._foreground_cli_session_owners.pop(queue, set())
         for session_id in list(session_ids):
+            self._hardware_hotkey_session_ids.discard(session_id)
             session = self.session_mgr.get(session_id)
             if session is None or getattr(session, "launch_surface", None) != "foreground_cli":
                 continue
@@ -695,6 +1397,8 @@ class LocalCoreServiceMVP:
             except Exception as exc:
                 self.logger.warning(f"Foreground CLI session cleanup failed for {session_id}: {exc}")
                 continue
+        if session_ids:
+            self._schedule_hardware_approval_refresh()
 
     async def _cmd_virtual_device_configure(self, msg: Dict[str, Any], queue: asyncio.Queue) -> None:
         device_id = msg.get("device_id")
@@ -1171,6 +1875,7 @@ class LocalCoreServiceMVP:
         except asyncio.TimeoutError:
             self.pending_permissions.pop(pending_key, None)
             self._claude_hook_decisions.pop(pending_key, None)
+            self._schedule_hardware_approval_refresh()
             hook_response = self._claude_hook_permission_response(
                 hook_input,
                 approved=False,
@@ -1415,6 +2120,8 @@ class LocalCoreServiceMVP:
             )
 
         self.pending_permissions.pop(pending_key, None)
+        if client is not self._hardware_approval_client:
+            self._schedule_hardware_approval_refresh()
 
         if pending.session_id and not self._is_terminal_session(pending.session_id):
             self.session_mgr.update_state(pending.session_id, AgentState.WORKING)
@@ -2164,6 +2871,7 @@ class LocalCoreServiceMVP:
         if session_id:
             self.session_mgr.update_state(session_id, AgentState.WAITING_PERMISSION)
             self._persist_session(session_id)
+        self._schedule_hardware_approval_refresh()
 
     def _collect_expired_permissions(self) -> List[Tuple[str, PendingPermission]]:
         now = time.time()
@@ -2174,6 +2882,8 @@ class LocalCoreServiceMVP:
         ]
         for request_id, _pending in expired:
             del self.pending_permissions[request_id]
+        if expired:
+            self._schedule_hardware_approval_refresh()
         return expired
 
     def _prune_expired_permissions(self) -> None:
@@ -3387,28 +4097,34 @@ class LocalCoreServiceMVP:
         self._server = await websockets.serve(self._handle_local_api_client, host, port)
         self.logger.info(f"Local Core Service MVP listening on ws://{host}:{port}")
 
-        # Graceful shutdown
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            try:
-                loop.add_signal_handler(sig, self._request_shutdown)
-            except NotImplementedError:
-                self.logger.debug("Signal handlers are not supported on this platform")
-                break
+        try:
+            # Graceful shutdown
+            loop = asyncio.get_running_loop()
+            self._start_hardware_hotkeys(loop)
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                try:
+                    loop.add_signal_handler(sig, self._request_shutdown)
+                except NotImplementedError:
+                    self.logger.debug(
+                        "Signal handlers are not supported on this platform"
+                    )
+                    break
 
-        await self._shutdown_event.wait()
-        self.logger.info("Shutting down...")
-        self._server.close()
-        await self._server.wait_closed()
+            await self._shutdown_event.wait()
+        finally:
+            self.logger.info("Shutting down...")
+            await self._shutdown_hardware_hotkeys()
+            self._server.close()
+            await self._server.wait_closed()
 
-        # Cleanup agent processes
-        for proxy in self.agents.values():
-            session_ids = set(proxy._processes.keys())
-            session_ids.update(getattr(proxy, "_sdk_tasks", {}).keys())
-            for session_id in list(session_ids):
-                await proxy.terminate(session_id)
-        if self.app_store:
-            self.app_store.close()
+            # Cleanup agent processes
+            for proxy in self.agents.values():
+                session_ids = set(proxy._processes.keys())
+                session_ids.update(getattr(proxy, "_sdk_tasks", {}).keys())
+                for session_id in list(session_ids):
+                    await proxy.terminate(session_id)
+            if self.app_store:
+                self.app_store.close()
 
     def _request_shutdown(self) -> None:
         if self._shutdown_event:

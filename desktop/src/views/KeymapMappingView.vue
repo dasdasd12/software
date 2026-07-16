@@ -326,19 +326,24 @@ function confirmDiscardInspectorBuffer(): boolean {
   if (!hasMappingBuffer && !hasTriggerBuffer) return true;
   const message = hasMappingBuffer ? "放弃尚未应用的映射选择？" : "放弃尚未保存的触发参数修改？";
   const accepted = window.confirm(message);
-  if (accepted && hasMappingBuffer) {
+  if (accepted) discardInspectorBuffer();
+  return accepted;
+}
+
+function discardInspectorBuffer(): void {
+  if (mappingBufferDirty.value) {
     pendingBinding.value = currentBinding.value;
     selectedCategory.value = bindingCategory(currentBinding.value);
     pendingBindingTouched.value = false;
   }
-  if (accepted && hasTriggerBuffer) triggerPreview.value = { ...resolvedTrigger.value };
-  return accepted;
+  if (triggerPreviewDirty.value) triggerPreview.value = { ...resolvedTrigger.value };
 }
 
 onBeforeRouteLeave(() => confirmDiscardInspectorBuffer());
 useUnsavedChangesGuard(
   () => mappingBufferDirty.value || triggerPreviewDirty.value,
   "键位编辑器中还有尚未应用的映射或触发参数。",
+  discardInspectorBuffer,
 );
 
 function setInspectorTab(next: InspectorTab): void {

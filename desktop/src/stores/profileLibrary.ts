@@ -96,7 +96,8 @@ function safeId(value: string): string {
 }
 
 export const useProfileLibraryStore = defineStore("profile-library", () => {
-  const restored = loadLocalValue(STORAGE_KEY, STORAGE_VERSION, isPersistedLibrary)?.data;
+  const restoredEnvelope = loadLocalValue(STORAGE_KEY, STORAGE_VERSION, isPersistedLibrary);
+  const restored = restoredEnvelope?.data;
   const factory = makeFactoryEntry();
   const restoredLocals = restored?.entries
     .filter((entry) => entry.source !== "factory" && entry.id !== FACTORY_ID)
@@ -132,6 +133,8 @@ export const useProfileLibraryStore = defineStore("profile-library", () => {
       ? restored.selectedSlotIndex
       : 1,
   );
+  const persistenceError = ref<string | null>(null);
+  const lastSavedAt = ref<string | null>(restoredEnvelope?.savedAt ?? null);
 
   const selectedEntry = computed(() =>
     entries.value.find((entry) => entry.id === selectedProfileId.value) ?? entries.value[0],
@@ -155,24 +158,36 @@ export const useProfileLibraryStore = defineStore("profile-library", () => {
     return candidate;
   }
 
+  function uniqueName(preferred: string): string {
+    const base = preferred.trim() || "未命名 Profile";
+    let candidate = base;
+    let suffix = 2;
+    while (entries.value.some((entry) => entry.name === candidate)) {
+      candidate = `${base} ${suffix}`;
+      suffix += 1;
+    }
+    return candidate;
+  }
+
   function createFromDocument(
     source: ProfileDocument,
     name = "未命名 Profile",
     origin: Exclude<ProfileSource, "factory"> = "local",
   ): ProfileLibraryEntry {
     const document = normalizeProfileDocument(source);
-    const id = uniqueId(document.identity.profile_id || name);
+    const displayName = uniqueName(name);
+    const id = uniqueId(document.identity.profile_id || displayName);
     const now = new Date().toISOString();
     document.identity = {
       ...document.identity,
       profile_id: id,
-      name,
+      name: displayName,
       category: categoryFor(document.identity.category),
       revision: 1,
     };
     const entry: ProfileLibraryEntry = {
       id,
-      name,
+      name: displayName,
       category: categoryFor(document.identity.category),
       revision: 1,
       color: PROFILE_COLORS[entries.value.length % PROFILE_COLORS.length],
@@ -246,7 +261,10 @@ export const useProfileLibraryStore = defineStore("profile-library", () => {
 
   function assignToSlot(slotIndex: 1 | 2 | 3, profileId: string | null): boolean {
     const slot = slots.value.find((candidate) => candidate.index === slotIndex);
-    if (!slot || (profileId !== null && !entries.value.some((entry) => entry.id === profileId))) return false;
+    const profile = profileId === null
+      ? null
+      : entries.value.find((entry) => entry.id === profileId);
+    if (!slot || (profileId !== null && (!profile || profile.source === "factory"))) return false;
     slot.profileId = profileId;
     slot.pending = true;
     return true;
@@ -255,13 +273,19 @@ export const useProfileLibraryStore = defineStore("profile-library", () => {
   watch(
     [entries, slots, selectedProfileId, activeProfileId, selectedSlotIndex],
     () => {
-      saveLocalValue<PersistedLibrary>(STORAGE_KEY, STORAGE_VERSION, {
+      const savedAt = saveLocalValue<PersistedLibrary>(STORAGE_KEY, STORAGE_VERSION, {
         entries: entries.value.filter((entry) => entry.source !== "factory"),
         slots: slots.value,
         selectedProfileId: selectedProfileId.value,
         activeProfileId: activeProfileId.value,
         selectedSlotIndex: selectedSlotIndex.value,
       });
+      if (savedAt) {
+        lastSavedAt.value = savedAt;
+        persistenceError.value = null;
+      } else {
+        persistenceError.value = "无法写入本地 Profile 库；请先导出 JSON，避免关闭后丢失";
+      }
     },
     { deep: true },
   );
@@ -272,6 +296,8 @@ export const useProfileLibraryStore = defineStore("profile-library", () => {
     selectedProfileId,
     activeProfileId,
     selectedSlotIndex,
+    persistenceError,
+    lastSavedAt,
     selectedEntry,
     activeEntry,
     selectedSlot,
